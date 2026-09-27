@@ -28,9 +28,13 @@ pub struct VideoMeta {
 
 /// Probe video metadata using ffprobe.
 pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
-    let mut cmd = VideoToolchain::global(None)
-        .ffprobe_cmd()
-        .ok_or_else(|| "ffprobe not found (set ffmpeg path in settings, or install ffmpeg)".to_string())?;
+    let tool = VideoToolchain::global(None);
+    let mut cmd = tool.ffprobe_cmd().ok_or_else(|| {
+        format!(
+            "ffprobe not found ({}; set ffmpeg path in settings, or install ffmpeg)",
+            tool.status_line()
+        )
+    })?;
     let output = cmd
         .args([
             "-v",
@@ -114,9 +118,15 @@ pub fn decode_all_frames(
         est_ram_mb,
     );
 
-    let mut child = VideoToolchain::global(None)
+    let tool = VideoToolchain::global(None);
+    let mut child = tool
         .ffmpeg_cmd()
-        .ok_or_else(|| "ffmpeg not found (set ffmpeg path in settings, or install ffmpeg)".to_string())?
+        .ok_or_else(|| {
+            format!(
+                "ffmpeg not found ({}; set ffmpeg path in settings, or install ffmpeg)",
+                tool.status_line()
+            )
+        })?
         .args(["-i"])
         .arg(path)
         .args([

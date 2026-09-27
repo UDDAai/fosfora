@@ -93,7 +93,10 @@ fn load_video(path: &Path) -> Result<MediaSource, String> {
     use super::video::{MAX_PREDECODE_SECS, decode_all_frames, ffmpeg_available, probe_video};
 
     if !ffmpeg_available() {
-        return Err("ffmpeg/ffprobe not found on PATH".to_string());
+        return Err(format!(
+            "ffmpeg/ffprobe not found ({})",
+            super::toolchain::VideoToolchain::global(None).status_line()
+        ));
     }
 
     let meta = probe_video(path)?;

@@ -52,6 +52,7 @@ impl Palette {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn solid_test(id: &str, name: &str) -> Self {
         let mut swatches = Vec::new();
         for (i, slot) in DEFAULT_SLOTS.iter().enumerate() {

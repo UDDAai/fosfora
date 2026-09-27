@@ -20,6 +20,9 @@ fn schema_v1() -> u32 {
 }
 
 impl PaletteBindingSet {
+    /// Slot-ID (not position) membership — planner p1-ui needs it for
+    /// "slot still on any live palette?" checks; normal builds don't call it.
+    #[cfg(test)]
     pub fn uses_slot(&self, slot: &str) -> bool {
         self.bindings.iter().any(|b| b.slot == slot)
     }

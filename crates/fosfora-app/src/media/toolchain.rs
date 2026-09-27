@@ -52,6 +52,11 @@ impl VideoToolchain {
         self.ffmpeg.is_some() && self.ffprobe.is_some()
     }
 
+    /// Human-readable toolchain line ("<path> (<version>)" or
+    /// "ffmpeg not found"). The preset media-load path logs it on every
+    /// ffmpeg/ffprobe failure (plan p0-ffmpeg-resolver: validator displays
+    /// the found path + version), so Finder-vs-Terminal PATH divergence
+    /// shows up in the log instead of a bare "not found".
     pub fn status_line(&self) -> String {
         match (&self.ffmpeg, &self.ffmpeg_version) {
             (Some(path), Some(ver)) => format!("{} ({ver})", path.display()),

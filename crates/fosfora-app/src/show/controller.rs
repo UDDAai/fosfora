@@ -69,6 +69,11 @@ impl ShowController {
         }
     }
 
+    /// Plan p1-paths: every relative show-pack path resolves against the
+    /// show.json directory. The validator's media preflight calls the
+    /// standalone `validation::media_exists` twin (same semantics), so this
+    /// stays as the runtime-load helper for cue-time path resolution.
+    #[allow(dead_code)]
     pub fn resolve_path(&self, stored: &str) -> PathBuf {
         let p = Path::new(stored);
         if p.is_absolute() {
@@ -123,6 +128,9 @@ impl ShowController {
         report
     }
 
+    /// Test-only seam for p1-showclock/p1-ui unit tests (production reads
+    /// `snapshot().elapsed_ms` instead, so this stays out of normal builds).
+    #[cfg(test)]
     pub fn elapsed_ms_at(&self, now: Instant) -> u128 {
         self.clock.elapsed_at(now).as_millis()
     }
@@ -332,6 +340,9 @@ pub struct ShowSnapshot {
 }
 
 impl ShowSnapshot {
+    /// Web reconnect baseline: FullState always carries a `show` object, so a
+    /// browser refresh before any pack loads still renders "NO SHOW" instead
+    /// of a missing field (plan p3-web-control).
     pub fn empty(blackout: bool) -> Self {
         Self {
             loaded: false,

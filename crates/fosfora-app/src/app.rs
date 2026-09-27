@@ -1054,7 +1054,13 @@ impl App {
 
             // After preset load, broadcast full state so all clients update
             if had_preset_loads && self.web.client_count > 0 {
-                let show_snap = self.show.as_ref().map(|s| s.snapshot(now, self.master_output.blackout));
+                let show_snap = self
+                    .show
+                    .as_ref()
+                    .map(|s| s.snapshot(now, self.master_output.blackout))
+                    .unwrap_or_else(|| {
+                        crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
+                    });
                 let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
                 let layer_data: Vec<_> = self
                     .layer_stack
@@ -1078,7 +1084,7 @@ impl App {
                     &layer_data,
                     &self.preset_store,
                     self.post_process.enabled,
-                    show_snap.as_ref(),
+                    Some(&show_snap),
                 );
                 self.web.broadcast_json(&state_json);
             }
@@ -1125,7 +1131,13 @@ impl App {
 
             // Broadcast full state to web clients after async preset load
             if self.web.client_count > 0 {
-                let show_snap = self.show.as_ref().map(|s| s.snapshot(now, self.master_output.blackout));
+                let show_snap = self
+                    .show
+                    .as_ref()
+                    .map(|s| s.snapshot(now, self.master_output.blackout))
+                    .unwrap_or_else(|| {
+                        crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
+                    });
                 let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
                 let layer_data: Vec<_> = self
                     .layer_stack
@@ -1149,7 +1161,7 @@ impl App {
                     &layer_data,
                     &self.preset_store,
                     self.post_process.enabled,
-                    show_snap.as_ref(),
+                    Some(&show_snap),
                 );
                 self.web.broadcast_json(&state_json);
             }
@@ -1286,7 +1298,13 @@ impl App {
 
         // Web: update latest state for new client initial sync
         if self.web.client_count > 0 || self.web.is_running() {
-            let show_snap = self.show.as_ref().map(|s| s.snapshot(now, self.master_output.blackout));
+            let show_snap = self
+                .show
+                .as_ref()
+                .map(|s| s.snapshot(now, self.master_output.blackout))
+                .unwrap_or_else(|| {
+                    crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
+                });
             let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
             let layer_data: Vec<_> = self
                 .layer_stack
@@ -1310,7 +1328,7 @@ impl App {
                 &layer_data,
                 &self.preset_store,
                 self.post_process.enabled,
-                show_snap.as_ref(),
+                Some(&show_snap),
             );
             self.web.update_latest_state(&state_json);
         }
@@ -3343,19 +3361,36 @@ impl App {
                 pack.bindings.clone(),
                 preset_ids,
             );
+            // Media preflight (p1-validator): every preset layer media_path
+            // and particle video path becomes one MediaEstimate — exists via
+            // pack-root-relative resolution, RAM via the shared RGBA formula.
+            let mut media: Vec<crate::show::validation::MediaEstimate> = Vec::new();
+            for preset in pack.presets.values() {
+                for layer in &preset.layers {
+                    for stored in [&layer.media_path, &layer.particle_video_path]
+                        .into_iter()
+                        .flatten()
+                    {
+                        media.push(crate::show::validation::MediaEstimate {
+                            path: stored.clone(),
+                            exists: crate::show::validation::media_exists(
+                                &controller.pack_root,
+                                stored,
+                            ),
+                            estimated_ram_bytes:
+                                crate::show::validation::estimate_rgba_ram(1280, 720, 15.0, 8.0),
+                        });
+                    }
+                }
+            }
             // Ownership validation (p2-ownership): collect every external
             // control path targeting a palette-owned color param. MIDI/OSC
             // configs map param NAME → mapping; resolve to the live layer
             // index by matching the name against each layer's defs. Layer-
             // addressed OSC/WS messages and bus targets carry their own
             // layer index. Audio sources are bus-only, so the bus scan
-            // covers them (audio.* → Param targets).
-            let owned: std::collections::HashSet<(usize, String)> = pack
-                .bindings
-                .values()
-                .flat_map(|set| set.bindings.iter())
-                .map(|b| (b.layer, b.parameter.clone()))
-                .collect();
+            // covers them (audio.* → Param targets). The final filter lives
+            // in `ShowController::palette_conflicts` (single implementation).
             let mut external: Vec<(String, usize, String)> = Vec::new();
             // MIDI + OSC global configs: param name → find owning layers.
             for name in self
@@ -3433,11 +3468,10 @@ impl App {
                 }
             }
             external.extend(pack_audio_targets);
-            let conflicts: Vec<(String, usize, String)> = external
-                .into_iter()
-                .filter(|(_, layer, param)| owned.contains(&(*layer, param.clone())))
-                .collect();
-            controller.validate(&pack.presets, &[], &conflicts)
+            // p2-ownership conflict scan belongs on the controller so the bus
+            // guard, validator, and tests share one implementation.
+            let conflicts = controller.palette_conflicts(external);
+            controller.validate(&pack.presets, &media, &conflicts)
         };
         log::info!(
             "Show pack '{}' loaded: {} scene cues, {} palette cues — {}",
@@ -3471,6 +3505,11 @@ impl App {
     /// AND automation is on. External writers (MIDI/OSC/WS/binding-bus)
     /// must skip palette-owned params while this holds — PaletteController
     /// is the exclusive owner, enforced by the per-frame write order below.
+    /// Plan p3-web-control contract probe: true while the show clock owns
+    /// bound color params (web UI reads this to render the automation badge).
+    /// Test-only for now — the native + web panels read `auto_enabled` off
+    /// the `show` snapshot instead — so this stays out of normal builds.
+    #[cfg(test)]
     pub fn palette_automating(&self) -> bool {
         self.show.as_ref().is_some_and(|s| s.auto_enabled)
     }

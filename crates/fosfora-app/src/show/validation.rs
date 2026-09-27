@@ -33,6 +33,9 @@ impl ValidationReport {
 pub struct MediaEstimate {
     pub path: String,
     pub exists: bool,
+    /// Raw-RGBA pre-decode cost from `estimate_rgba_ram` (plan p0-video-gate:
+    /// transition-pair peak, not totals). Read by future RAM-budget gates.
+    #[allow(dead_code)]
     pub estimated_ram_bytes: u64,
 }
 
@@ -169,11 +172,16 @@ pub fn hibernation_acceptance(def: &ShowDefinition) -> Vec<ValidationIssue> {
     }
 }
 
+/// Peak-RAM preflight for one video clip (plan p0-video-gate): raw RGBA
+/// bytes for every decoded frame. Feeds `MediaEstimate.estimated_ram_bytes`
+/// in the show validator; the per-clip baseline is 720p/6-10s/15-24fps.
 pub fn estimate_rgba_ram(width: u32, height: u32, fps: f64, duration_secs: f64) -> u64 {
     let frames = (duration_secs * fps).ceil().max(0.0) as u64;
     frames.saturating_mul(u64::from(width) * u64::from(height) * 4)
 }
 
+/// Pack-root-relative existence check for one preset `media_path` value
+/// (plan p1-paths / p1-validator). Mirrors `ShowController::resolve_path`.
 pub fn media_exists(root: &Path, stored: &str) -> bool {
     let p = Path::new(stored);
     if p.is_absolute() {
