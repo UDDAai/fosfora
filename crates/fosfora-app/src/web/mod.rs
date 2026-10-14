@@ -1,5 +1,6 @@
 pub mod client;
 pub mod server;
+pub mod upload;
 #[allow(dead_code)]
 pub mod state;
 pub mod types;
@@ -163,6 +164,7 @@ impl WebSystem {
             match msg {
                 WsInMessage::SetParam { name, value } => {
                     apply_param(param_values, param_changed, param_defs, &name, value);
+                    result.touched_params = true;
                 }
                 WsInMessage::SetLayerParam { layer, name, value } => {
                     result.layer_params.push((layer, name, value));
@@ -172,6 +174,54 @@ impl WebSystem {
                 }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
+                }
+                WsInMessage::ShowAllLayers => {
+                    result.show_all_layers = true;
+                }
+                WsInMessage::AddMedia { path } => {
+                    result.add_media.push(path);
+                }
+                WsInMessage::RescanLibrary => {
+                    result.rescan_library = true;
+                }
+                WsInMessage::ImportPreviousUploads => {
+                    result.import_uploads = true;
+                }
+                WsInMessage::RevealMediaFolder => {
+                    result.reveal_media = true;
+                }
+                WsInMessage::LinkMediaFolder => {
+                    result.link_folder = true;
+                }
+                WsInMessage::AddLibraryMedia { ids } => {
+                    result.add_library.push(ids);
+                }
+                WsInMessage::ReplaceLibraryMedia { layer, id } => {
+                    result.replace_library.push((layer, id));
+                }
+                WsInMessage::SetMediaTransport {
+                    layer,
+                    speed,
+                    looping,
+                } => {
+                    result.media_transport.push((layer, speed, looping));
+                }
+                WsInMessage::SaveScene => {
+                    result.save_scene = true;
+                }
+                WsInMessage::SetWorkspaceMode { mode } => {
+                    result.workspace_mode = Some(mode);
+                }
+                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                    result.media_place.push((layer, fit, width, x, y));
+                }
+                WsInMessage::SetGrade { strength, enabled } => {
+                    if strength.is_some() {
+                        result.grade_strength = strength;
+                    }
+                    if enabled.is_some() {
+                        result.grade_enabled = enabled;
+                    }
                 }
                 WsInMessage::SetLayerOpacity { layer, value } => {
                     result.layer_opacity.push((layer, value));
@@ -201,6 +251,9 @@ impl WebSystem {
                 }
                 WsInMessage::BindPreview { source, jpeg_data } => {
                     self.preview_images.insert(source, jpeg_data);
+                }
+                WsInMessage::ShowCommand(cmd) => {
+                    result.show_commands.push(cmd);
                 }
             }
         }
@@ -251,11 +304,62 @@ impl WebSystem {
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
+                WsInMessage::ShowAllLayers => {
+                    result.show_all_layers = true;
+                }
+                WsInMessage::AddMedia { path } => {
+                    result.add_media.push(path);
+                }
+                WsInMessage::RescanLibrary => {
+                    result.rescan_library = true;
+                }
+                WsInMessage::ImportPreviousUploads => {
+                    result.import_uploads = true;
+                }
+                WsInMessage::RevealMediaFolder => {
+                    result.reveal_media = true;
+                }
+                WsInMessage::LinkMediaFolder => {
+                    result.link_folder = true;
+                }
+                WsInMessage::AddLibraryMedia { ids } => {
+                    result.add_library.push(ids);
+                }
+                WsInMessage::ReplaceLibraryMedia { layer, id } => {
+                    result.replace_library.push((layer, id));
+                }
+                WsInMessage::SetMediaTransport {
+                    layer,
+                    speed,
+                    looping,
+                } => {
+                    result.media_transport.push((layer, speed, looping));
+                }
+                WsInMessage::SaveScene => {
+                    result.save_scene = true;
+                }
+                WsInMessage::SetWorkspaceMode { mode } => {
+                    result.workspace_mode = Some(mode);
+                }
+                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                    result.media_place.push((layer, fit, width, x, y));
+                }
+                WsInMessage::SetGrade { strength, enabled } => {
+                    if strength.is_some() {
+                        result.grade_strength = strength;
+                    }
+                    if enabled.is_some() {
+                        result.grade_enabled = enabled;
+                    }
+                }
                 WsInMessage::LoadPreset { index } => {
                     result.preset_loads.push(index);
                 }
                 WsInMessage::BindPreview { source, jpeg_data } => {
                     self.preview_images.insert(source, jpeg_data);
+                }
+                WsInMessage::ShowCommand(cmd) => {
+                    result.show_commands.push(cmd);
                 }
                 _ => {} // Skip active-layer param application
             }

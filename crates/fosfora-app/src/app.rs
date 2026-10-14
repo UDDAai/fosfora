@@ -146,6 +146,11 @@ pub struct App {
     pub quit_requested: bool,
     // Transient status error (displayed in status bar, auto-clears)
     pub status_error: Option<(String, Instant)>,
+    pub media_library: Option<crate::media::library::MediaLibrary>,
+    pub workspace_mode: crate::show::scene_file::WorkspaceMode,
+    pub save_state: crate::show::scene_file::SaveState,
+    pub scene_dirty: bool,
+    pub scene_dirty_at: Option<Instant>,
     // Webcam capture (feature-gated)
     #[cfg(feature = "webcam")]
     pub webcam_capture: Option<WebcamBackend>,
@@ -171,6 +176,85 @@ pub struct App {
     // GPU profiler (feature-gated)
     #[cfg(feature = "profiling")]
     pub gpu_profiler: crate::gpu::profiler::Profiler,
+    pub master_output: MasterOutput,
+    pub show: Option<crate::show::controller::ShowController>,
+    pub palette_panel: crate::ui::panels::palette_panel::PalettePanelState,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MasterOutput {
+    pub blackout: bool,
+}
+
+/// Intent returned by [`App::draw_show_ui`]: a show transport command and/or
+/// palette side-effects for the owner (`App`/main.rs) to apply after the egui
+/// borrow ends.
+#[derive(Debug, Clone, Default)]
+pub struct ShowUiAction {
+    pub show: Option<ShowCmd>,
+    pub toggle_blackout: bool,
+    pub apply_palette_now: bool,
+    pub palette_edited: bool,
+    pub imported_palette: Option<crate::palette::types::Palette>,
+}
+
+impl ShowUiAction {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.show.is_none()
+            && !self.toggle_blackout
+            && !self.apply_palette_now
+            && !self.palette_edited
+            && self.imported_palette.is_none()
+    }
+}
+
+/// Transport commands addressable from the native show panel (mirrors
+/// [`crate::show::controller::ShowCommand`]; the `ToggleBlackout` arm is
+/// folded into `ShowUiAction::toggle_blackout`).
+#[derive(Debug, Clone, Copy)]
+pub enum ShowCmd {
+    Start,
+    Pause,
+    Resume,
+    Reset,
+    Seek { secs: u32 },
+    StopAuto,
+    NextVisual,
+    PrevVisual,
+    NextPalette,
+    PrevPalette,
+    PaletteAuto,
+}
+
+impl ShowCmd {
+    pub fn to_controller(self) -> crate::show::controller::ShowCommand {
+        use crate::show::controller::ShowCommand as C;
+        match self {
+            ShowCmd::Start => C::Start,
+            ShowCmd::Pause => C::Pause,
+            ShowCmd::Resume => C::Resume,
+            ShowCmd::Reset => C::Reset,
+            ShowCmd::Seek { secs } => C::Seek { secs },
+            ShowCmd::StopAuto => C::StopAuto,
+            ShowCmd::NextVisual => C::NextVisual,
+            ShowCmd::PrevVisual => C::PrevVisual,
+            ShowCmd::NextPalette => C::NextPalette,
+            ShowCmd::PrevPalette => C::PrevPalette,
+            ShowCmd::PaletteAuto => C::PaletteAuto,
+        }
+    }
+}
+
+fn decoded_media_layer_bytes(media: &MediaLayer) -> u64 {
+    let (width, height) = media.source.dimensions();
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4)
+        .saturating_mul(media.source.frame_count() as u64)
 }
 
 impl App {
@@ -481,7 +565,7 @@ impl App {
         let gpu_profiler = crate::gpu::profiler::Profiler::new(&gpu.device);
 
         let now = Instant::now();
-        Ok(Self {
+        let mut app = Self {
             gpu,
             mel_last_commit: None,
             mel_commit_interval: 1.0 / 43.0, // ~43 Hz audio-hop column rate
@@ -541,6 +625,11 @@ impl App {
             binding_matrix: crate::ui::panels::binding_matrix::BindingMatrixState::new(),
             quit_requested: false,
             status_error: None,
+            media_library: None,
+            workspace_mode: crate::show::scene_file::WorkspaceMode::Prepare,
+            save_state: crate::show::scene_file::SaveState::Saved,
+            scene_dirty: false,
+            scene_dirty_at: None,
             #[cfg(feature = "webcam")]
             webcam_capture: None,
             #[cfg(feature = "webcam")]
@@ -562,7 +651,12 @@ impl App {
             depth_download: None,
             #[cfg(feature = "profiling")]
             gpu_profiler,
-        })
+            master_output: MasterOutput::default(),
+            show: None,
+            palette_panel: crate::ui::panels::palette_panel::PalettePanelState::default(),
+        };
+        app.init_show_pack();
+        Ok(app)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -895,6 +989,13 @@ impl App {
                 self.web.update(values, changed, defs)
             };
             self.pending_web_triggers = web_result.triggers;
+            let had_layer_edits = !web_result.layer_params.is_empty()
+                || !web_result.layer_opacity.is_empty()
+                || !web_result.layer_blend.is_empty()
+                || !web_result.layer_enabled.is_empty()
+                || !web_result.effect_loads.is_empty()
+                || !web_result.media_place.is_empty()
+                || !web_result.media_transport.is_empty();
 
             // Apply layer-targeted WS messages
             for (layer_idx, name, value) in web_result.layer_params {
@@ -957,48 +1058,169 @@ impl App {
                 }
             }
 
-            // Handle layer selection from web
+            // Handle layer selection from web. A click solos that layer onto
+            // the output: the row highlight alone left every layer above it
+            // covering the picture.
+            let mut web_stack_changed = false;
             if let Some(idx) = web_result.select_layer {
                 if idx < self.layer_stack.layers.len() {
+                    for (i, layer) in self.layer_stack.layers.iter_mut().enumerate() {
+                        layer.enabled = i == idx;
+                    }
                     self.layer_stack.active_layer = idx;
                     self.sync_active_layer();
-                    let msg = crate::web::state::build_active_layer_changed(idx);
-                    self.web.broadcast_json(&msg);
+                    web_stack_changed = true;
                 }
             }
+            if web_result.show_all_layers {
+                for layer in &mut self.layer_stack.layers {
+                    layer.enabled = true;
+                }
+                web_stack_changed = true;
+            }
+            for path in web_result.add_media {
+                self.add_media_layer(path);
+                web_stack_changed = true;
+            }
+            for ids in &web_result.add_library {
+                if self.add_library_media(ids) {
+                    web_stack_changed = true;
+                }
+            }
+            for (index, id) in &web_result.replace_library {
+                if self.replace_library_media(*index, id) {
+                    web_stack_changed = true;
+                }
+            }
+            for (layer_idx, speed, looping) in &web_result.media_transport {
+                if let Some(layer) = self.layer_stack.layers.get_mut(*layer_idx) {
+                    if let Some(media) = layer.as_media_mut() {
+                        if let Some(speed) = speed {
+                            media.transport.speed = speed.clamp(0.05, 4.0);
+                        }
+                        if let Some(looping) = looping {
+                            media.transport.looping = *looping;
+                        }
+                    }
+                }
+            }
+            if web_result.rescan_library || self.media_library.as_mut().is_some_and(|lib| lib.poll_watch()) {
+                if let Some(library) = &mut self.media_library {
+                    library.rescan();
+                }
+            }
+            if web_result.import_uploads {
+                let uploads = crate::paths::config_root().join("uploads");
+                if let Some(library) = &mut self.media_library {
+                    match library.import_uploads(&uploads) {
+                        Ok(count) => log::info!("Imported {count} files from previous uploads"),
+                        Err(err) => self.status_error = Some((err, Instant::now())),
+                    }
+                }
+            }
+            if web_result.reveal_media {
+                if let Some(library) = &self.media_library {
+                    if let Err(err) = library.reveal_in_finder() {
+                        self.status_error = Some((err, Instant::now()));
+                    }
+                }
+            }
+            if web_result.link_folder {
+                if let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Link a media folder")
+                    .pick_folder()
+                {
+                    if let Some(library) = &mut self.media_library {
+                        library.link_folder(folder);
+                    }
+                }
+            }
+            if let Some(mode) = web_result.workspace_mode.clone() {
+                self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&mode);
+                self.remember_workspace();
+            }
+            if web_result.save_scene {
+                let _ = self.save_open_scene();
+                web_stack_changed = true;
+            }
+            let edited = web_stack_changed
+                || had_layer_edits
+                || web_result.touched_params
+                || web_result.grade_strength.is_some()
+                || web_result.grade_enabled.is_some()
+                || web_result.postprocess_enabled.is_some();
+            if edited && !web_result.save_scene {
+                self.note_scene_edit(now);
+            }
+            if web_stack_changed {
+                self.broadcast_web_state(now);
+            }
 
-            // Handle preset loads from web
+            // Handle show commands from web
+            for cmd in web_result.show_commands {
+                self.show_command(cmd);
+            }
+            for (layer_idx, fit, width, x, y) in web_result.media_place {
+                if let Some(layer) = self.layer_stack.layers.get_mut(layer_idx) {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = crate::media::MediaFit::parse(&fit);
+                        media.width_scale = width;
+                        media.pos_x = x;
+                        media.pos_y = y;
+                    }
+                }
+            }
+            if let Some(strength) = web_result.grade_strength {
+                self.post_process.grade.strength = strength;
+            }
+            if let Some(enabled) = web_result.grade_enabled {
+                self.post_process.grade.enabled = enabled;
+            }
+
+            // A pack preset is a scene. Remember its id so Save Scene writes
+            // that file, and do not start the show clock.
             let had_preset_loads = !web_result.preset_loads.is_empty();
             for preset_idx in web_result.preset_loads {
+                let preset_name = self
+                    .preset_store
+                    .presets
+                    .get(preset_idx)
+                    .map(|(name, _)| name.clone());
+                let pack_scene = preset_name.as_ref().is_some_and(|name| {
+                    self.show
+                        .as_ref()
+                        .is_some_and(|show| show.preset_ids.iter().any(|id| id == name))
+                });
+                if pack_scene && self.scene_dirty {
+                    if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
+                        if self.save_open_scene().is_err() {
+                            continue;
+                        }
+                    } else {
+                        self.status_error = Some((
+                            "Unsaved changes were not written. Press Save Changes to keep this scene."
+                                .into(),
+                            Instant::now(),
+                        ));
+                    }
+                }
                 self.load_preset(preset_idx);
+                if pack_scene {
+                    if let Some(name) = preset_name {
+                        if let Some(show) = self.show.as_mut() {
+                            show.scene.manual_set_preset(name);
+                        }
+                    }
+                    self.scene_dirty = false;
+                    self.scene_dirty_at = None;
+                    self.save_state = crate::show::scene_file::SaveState::Saved;
+                    self.remember_workspace();
+                }
             }
 
             // After preset load, broadcast full state so all clients update
             if had_preset_loads && self.web.client_count > 0 {
-                let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
-                let layer_data: Vec<_> = self
-                    .layer_stack
-                    .layers
-                    .iter()
-                    .map(|l| {
-                        (
-                            &l.param_store,
-                            l.effect_index(),
-                            l.blend_mode,
-                            l.opacity,
-                            l.enabled,
-                            l.locked,
-                        )
-                    })
-                    .collect();
-                let state_json = crate::web::state::build_full_state(
-                    &self.effect_loader.effects,
-                    &layer_infos,
-                    self.layer_stack.active_layer,
-                    &layer_data,
-                    &self.preset_store,
-                    self.post_process.enabled,
-                );
+                let state_json = self.full_state_json(now);
                 self.web.broadcast_json(&state_json);
             }
         }
@@ -1044,30 +1266,7 @@ impl App {
 
             // Broadcast full state to web clients after async preset load
             if self.web.client_count > 0 {
-                let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
-                let layer_data: Vec<_> = self
-                    .layer_stack
-                    .layers
-                    .iter()
-                    .map(|l| {
-                        (
-                            &l.param_store,
-                            l.effect_index(),
-                            l.blend_mode,
-                            l.opacity,
-                            l.enabled,
-                            l.locked,
-                        )
-                    })
-                    .collect();
-                let state_json = crate::web::state::build_full_state(
-                    &self.effect_loader.effects,
-                    &layer_infos,
-                    self.layer_stack.active_layer,
-                    &layer_data,
-                    &self.preset_store,
-                    self.post_process.enabled,
-                );
+                let state_json = self.full_state_json(now);
                 self.web.broadcast_json(&state_json);
             }
         }
@@ -1112,6 +1311,11 @@ impl App {
             self.timeline.stop();
         }
         self.midi_clock_was_playing = self.midi_clock.playing();
+
+        // Show orchestration (Phase 1/3): edge-triggered schedulers on the
+        // Instant-based ShowClock — never the clamped render dt above. When
+        // no show pack is open this is a cheap `None` check.
+        self.tick_show(now);
 
         // Advance timeline (scene system)
         if self.timeline.active {
@@ -1196,32 +1400,12 @@ impl App {
             self.web.broadcast_audio(&features);
         }
 
+        self.poll_media_library();
+        self.autosave_if_due(now);
+
         // Web: update latest state for new client initial sync
         if self.web.client_count > 0 || self.web.is_running() {
-            let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
-            let layer_data: Vec<_> = self
-                .layer_stack
-                .layers
-                .iter()
-                .map(|l| {
-                    (
-                        &l.param_store,
-                        l.effect_index(),
-                        l.blend_mode,
-                        l.opacity,
-                        l.enabled,
-                        l.locked,
-                    )
-                })
-                .collect();
-            let state_json = crate::web::state::build_full_state(
-                &self.effect_loader.effects,
-                &layer_infos,
-                self.layer_stack.active_layer,
-                &layer_data,
-                &self.preset_store,
-                self.post_process.enabled,
-            );
+            let state_json = self.full_state_json(now);
             self.web.update_latest_state(&state_json);
         }
 
@@ -1230,6 +1414,7 @@ impl App {
             if let LayerContent::Media(ref mut m) = layer.content {
                 m.advance(dt);
                 m.upload_frame(&self.gpu.queue);
+                m.write_placement(&self.gpu.queue);
             }
         }
 
@@ -1955,10 +2140,14 @@ impl App {
                     path.clone(),
                 );
                 let file_name = media_layer.file_name.clone();
-                let name = format!("Layer {}", num + 1);
-                self.layer_stack
-                    .layers
-                    .push(Layer::new_media(name, media_layer));
+                let mut layer = Layer::new_media(file_name.clone(), media_layer);
+                layer.custom_name = Some(file_name.clone());
+                if self.show.is_some() {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = crate::media::MediaFit::Fill;
+                    }
+                }
+                self.layer_stack.layers.push(layer);
                 self.layer_stack.active_layer = self.layer_stack.layers.len() - 1;
                 self.sync_active_layer();
                 log::info!("Added media layer: {}", file_name);
@@ -1968,6 +2157,144 @@ impl App {
                 self.status_error = Some((e, Instant::now()));
             }
         }
+    }
+
+    /// Add library clips in order. If any clip cannot fit, none are decoded.
+    pub fn add_library_media(&mut self, ids: &[String]) -> bool {
+        if self.library_paths(ids).is_err() {
+            if let Some(library) = &mut self.media_library {
+                library.rescan();
+            }
+        }
+        let paths = match self.library_paths(ids) {
+            Ok(paths) => paths,
+            Err(message) => {
+                self.status_error = Some((message, Instant::now()));
+                return false;
+            }
+        };
+        let plans: Vec<_> = paths.iter().map(|path| crate::media::library::plan_clip(path)).collect();
+        let existing = self.decoded_media_bytes();
+        if let Some(message) = crate::media::library::admission_error(
+            self.layer_stack.layers.len(),
+            existing,
+            crate::bindings::catalog::MAX_LAYERS,
+            &plans,
+        ) {
+            self.status_error = Some((message, Instant::now()));
+            return false;
+        }
+        for path in paths {
+            self.add_media_layer(path);
+        }
+        true
+    }
+
+    pub fn replace_library_media(&mut self, index: usize, id: &str) -> bool {
+        let paths = match self.library_paths(&[id.to_string()]) {
+            Ok(paths) => paths,
+            Err(message) => {
+                self.status_error = Some((message, Instant::now()));
+                return false;
+            }
+        };
+        let Some(path) = paths.into_iter().next() else {
+            return false;
+        };
+        if index >= self.layer_stack.layers.len() {
+            self.status_error = Some(("That layer is not in this scene".into(), Instant::now()));
+            return false;
+        }
+        let replaced_ram = self
+            .layer_stack
+            .layers
+            .get(index)
+            .and_then(|layer| layer.as_media())
+            .map(decoded_media_layer_bytes)
+            .unwrap_or(0);
+        let existing = self.decoded_media_bytes().saturating_sub(replaced_ram);
+        let plan = crate::media::library::plan_clip(&path);
+        if let Some(message) = crate::media::library::admission_error(0, existing, crate::bindings::catalog::MAX_LAYERS, &[plan]) {
+            self.status_error = Some((message, Instant::now()));
+            return false;
+        }
+        match crate::media::decoder::load_media(&path) {
+            Ok(source) => {
+                let hdr_format = GpuContext::hdr_format();
+                let media_layer = MediaLayer::new(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    hdr_format,
+                    self.gpu.surface_config.width,
+                    self.gpu.surface_config.height,
+                    source,
+                    path,
+                );
+                let file_name = media_layer.file_name.clone();
+                let previous = &self.layer_stack.layers[index];
+                let opacity = previous.opacity;
+                let blend_mode = previous.blend_mode;
+                let enabled = previous.enabled;
+                let placement = previous.as_media().map(|media| {
+                    (media.fit, media.width_scale, media.pos_x, media.pos_y, media.transport.speed, media.transport.looping)
+                });
+                let mut layer = Layer::new_media(file_name.clone(), media_layer);
+                layer.custom_name = Some(file_name);
+                layer.opacity = opacity;
+                layer.blend_mode = blend_mode;
+                layer.enabled = enabled;
+                if let Some((fit, width, x, y, speed, looping)) = placement {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = fit;
+                        media.width_scale = width;
+                        media.pos_x = x;
+                        media.pos_y = y;
+                        media.transport.speed = speed;
+                        media.transport.looping = looping;
+                    }
+                } else if self.show.is_some() {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = crate::media::MediaFit::Fill;
+                    }
+                }
+                self.layer_stack.layers[index] = layer;
+                self.layer_stack.active_layer = index;
+                self.sync_active_layer();
+                true
+            }
+            Err(err) => {
+                self.status_error = Some((err, Instant::now()));
+                false
+            }
+        }
+    }
+
+    fn library_paths(&self, ids: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
+        let library = self.media_library.as_ref().ok_or_else(|| "No media library is open".to_string())?;
+        let mut paths = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for id in ids {
+            match library.resolve(id) {
+                Some(path) => paths.push(path),
+                None => missing.push(id.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "Nothing was added. These files are not in the library: {}",
+                missing.join(", ")
+            ));
+        }
+        Ok(paths)
+    }
+
+    fn decoded_media_bytes(&self) -> u64 {
+        self.layer_stack
+            .layers
+            .iter()
+            .filter_map(|layer| layer.as_media())
+            .map(decoded_media_layer_bytes)
+            .sum()
     }
 
     /// Add a webcam layer. Starts capture if not already running.
@@ -2143,7 +2470,79 @@ impl App {
         self.sync_active_layer();
     }
 
+    fn show_snapshot(&self, now: Instant) -> crate::show::controller::ShowSnapshot {
+        let mut snap = self
+            .show
+            .as_ref()
+            .map(|s| s.snapshot(now, self.master_output.blackout))
+            .unwrap_or_else(|| {
+                crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
+            });
+        snap.grade_enabled = self.post_process.grade.enabled;
+        snap.grade_strength = self.post_process.grade.strength;
+        if let Some((msg, _)) = &self.status_error {
+            snap.notice = msg.clone();
+        }
+        snap
+    }
+
     /// Sync effect_loader.current_effect to match active layer.
+    fn full_state_json(&self, now: Instant) -> String {
+        let show_snap = self.show_snapshot(now);
+        let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
+        let layer_data: Vec<_> = self
+            .layer_stack
+            .layers
+            .iter()
+            .map(|l| {
+                (
+                    &l.param_store,
+                    l.effect_index(),
+                    l.blend_mode,
+                    l.opacity,
+                    l.enabled,
+                    l.locked,
+                )
+            })
+            .collect();
+        let library = self
+            .media_library
+            .as_ref()
+            .map(|library| library.items.clone())
+            .unwrap_or_default();
+        let warnings = self
+            .media_library
+            .as_ref()
+            .map(|library| library.warnings.clone())
+            .unwrap_or_default();
+        let save_detail = self.save_state.detail();
+        let workspace = crate::web::state::WebWorkspace {
+            library: &library,
+            warnings: &warnings,
+            save_state: self.save_state.code(),
+            save_detail: &save_detail,
+            mode: self.workspace_mode.as_str(),
+        };
+        crate::web::state::build_full_state(
+            &self.effect_loader.effects,
+            &layer_infos,
+            self.layer_stack.active_layer,
+            &layer_data,
+            &self.preset_store,
+            self.post_process.enabled,
+            Some(&show_snap),
+            &workspace,
+        )
+    }
+
+    fn broadcast_web_state(&mut self, now: Instant) {
+        if self.web.client_count == 0 {
+            return;
+        }
+        let state_json = self.full_state_json(now);
+        self.web.broadcast_json(&state_json);
+    }
+
     pub fn sync_active_layer(&mut self) {
         if let Some(layer) = self.layer_stack.active() {
             self.effect_loader.current_effect = layer.effect_index();
@@ -2183,16 +2582,23 @@ impl App {
         value: f32,
         rising: bool,
     ) {
+        // Computed before the layer-stack borrow below (E0502 otherwise).
+        let palette_owned = self.palette_owned();
         let mut ctx = crate::bindings::apply::BindingTargetCtx {
             layer_stack: &mut self.layer_stack,
             effects: &self.effect_loader.effects,
             uniforms: &mut self.uniforms,
             pending_triggers: &mut self.binding_bus.pending_triggers,
+            // Exclusive ownership (p2-ownership): while palette automation
+            // is active the bus never writes a palette-owned color param.
+            // PaletteController has the final word via `set_runtime` in
+            // `tick_show`, which runs after the bus each frame.
+            palette_owned,
         };
         crate::bindings::apply::apply_binding_target(&mut ctx, target, value, rising);
     }
 
-    pub fn save_preset(&mut self, name: &str) {
+    fn capture_current_preset(&mut self) -> Option<crate::preset::Preset> {
         let mut chains = crate::trama::persist::capture(&self.layer_stack, &self.trama);
         let mut layer_chains = std::mem::take(&mut chains.layers).into_iter();
         let layer_presets: Vec<LayerPreset> = self
@@ -2211,6 +2617,13 @@ impl App {
                     .map(|m| m.file_path.to_string_lossy().to_string());
                 let media_speed = l.as_media().map(|m| m.transport.speed);
                 let media_looping = l.as_media().map(|m| m.transport.looping);
+                let media_fit = l
+                    .as_media()
+                    .map(|m| m.fit.as_str().to_string())
+                    .unwrap_or_else(|| "fit".to_string());
+                let media_width = l.as_media().map(|m| m.width_scale).unwrap_or(1.0);
+                let media_pos_x = l.as_media().map(|m| m.pos_x).unwrap_or(0.0);
+                let media_pos_y = l.as_media().map(|m| m.pos_y).unwrap_or(0.0);
                 let webcam_device = l
                     .as_media()
                     .filter(|m| m.is_live())
@@ -2306,6 +2719,10 @@ impl App {
                     media_path,
                     media_speed,
                     media_looping,
+                    media_fit,
+                    media_width,
+                    media_pos_x,
+                    media_pos_y,
                     webcam_device,
                     particle_video_path,
                     particle_video_speed,
@@ -2335,36 +2752,224 @@ impl App {
             l.effect_name.is_empty() && l.media_path.is_none() && l.webcam_device.is_none()
         }) {
             log::warn!("No effects or media loaded, cannot save preset");
-            return;
+            return None;
         }
 
         let postprocess = self.current_postprocess();
-        // Volumetric (R3) is a global mode, not a per-layer property — persist
-        // it at preset scope like `postprocess`.
         let volumetric = Some(crate::preset::VolumetricPreset {
             enabled: self.volumetric_enabled,
             params: self.volumetric_params,
         });
+        Some(crate::preset::Preset {
+            layers: layer_presets,
+            active_layer: self.layer_stack.active_layer,
+            postprocess,
+            volumetric,
+            master_chain: chains.master,
+        })
+    }
+
+    pub fn save_preset(&mut self, name: &str) {
+        if self
+            .show
+            .as_ref()
+            .is_some_and(|show| show.preset_ids.iter().any(|id| id == name))
+        {
+            let _ = self.save_scene_id(name);
+            return;
+        }
+        let Some(preset) = self.capture_current_preset() else {
+            return;
+        };
         match self.preset_store.save(
             name,
-            layer_presets,
-            self.layer_stack.active_layer,
-            &postprocess,
-            volumetric,
-            chains.master,
+            preset.layers,
+            preset.active_layer,
+            &preset.postprocess,
+            preset.volumetric,
+            preset.master_chain,
         ) {
             Ok(idx) => {
                 log::info!("Saved preset '{}' at index {}", name, idx);
-                // Save preset-scoped bindings as sidecar
                 self.binding_bus.save_preset_bindings(name);
                 self.binding_bus.save_global();
-                // Sidecar is now on disk — no longer an unsaved change.
                 self.binding_bus.preset_scope_dirty = false;
+                self.restore_pack_presets_after_user_scan();
             }
             Err(e) => {
                 log::error!("Failed to save preset: {e}");
                 self.status_error = Some((format!("Failed to save preset: {e}"), Instant::now()));
             }
+        }
+    }
+
+    /// Write the live stack into the show pack under the current scene id.
+    pub fn save_open_scene(&mut self) -> Result<(), String> {
+        let id = self
+            .show
+            .as_ref()
+            .and_then(|show| show.scene.active_preset_id.clone())
+            .ok_or_else(|| "No scene is selected".to_string())?;
+        self.save_scene_id(&id)
+    }
+
+    fn save_scene_id(&mut self, id: &str) -> Result<(), String> {
+        let pack_root = self
+            .show
+            .as_ref()
+            .map(|show| show.pack_root.clone())
+            .ok_or_else(|| "No show pack is open".to_string())?;
+        self.save_state = crate::show::scene_file::SaveState::Saving;
+        let Some(mut preset) = self.capture_current_preset() else {
+            let message = "Nothing to save on this scene".to_string();
+            self.save_state = crate::show::scene_file::SaveState::Failed(message.clone());
+            self.status_error = Some((message.clone(), Instant::now()));
+            return Err(message);
+        };
+        crate::show::scene_file::relativize_preset(&pack_root, &mut preset);
+        if let Err(err) = crate::show::scene_file::write_scene_preset(&pack_root, id, &preset) {
+            let message = err.to_string();
+            self.save_state = crate::show::scene_file::SaveState::Failed(message.clone());
+            self.status_error = Some((format!("Save failed: {message}"), Instant::now()));
+            return Err(message);
+        }
+        crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
+        if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == id) {
+            self.preset_store.current_preset = Some(index);
+        }
+        self.scene_dirty = false;
+        self.scene_dirty_at = None;
+        self.save_state = crate::show::scene_file::SaveState::Saved;
+        self.remember_workspace();
+        if let Some(library) = &mut self.media_library {
+            library.rescan();
+        }
+        log::info!("Saved scene '{id}' into {}", pack_root.display());
+        Ok(())
+    }
+
+    fn remember_workspace(&mut self) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        let scene = self
+            .show
+            .as_ref()
+            .and_then(|show| show.scene.active_preset_id.clone());
+        let file = crate::show::scene_file::WorkspaceFile {
+            scene,
+            mode: self.workspace_mode.as_str().to_string(),
+            grade_enabled: self.post_process.grade.enabled,
+            grade_strength: self.post_process.grade.strength,
+        };
+        if let Err(err) = file.store(&root) {
+            log::warn!("workspace save: {err:#}");
+        }
+    }
+
+    fn restore_editing_session(&mut self) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        let workspace = crate::show::scene_file::WorkspaceFile::load(&root);
+        self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&workspace.mode);
+        self.post_process.grade.enabled = workspace.grade_enabled;
+        self.post_process.grade.strength = workspace.grade_strength;
+        let known = |id: &str| self.preset_store.presets.iter().any(|(name, _)| name == id);
+        let scene = workspace
+            .scene
+            .filter(|id| known(id))
+            .or_else(|| {
+                self.show
+                    .as_ref()
+                    .and_then(|show| show.definition.scene_track.first())
+                    .map(|cue| cue.preset_id.clone())
+            });
+        if let Some(id) = scene {
+            if let Some(show) = self.show.as_mut() {
+                show.scene.manual_set_preset(id.clone());
+            }
+            if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == &id)
+            {
+                self.load_preset(index);
+            }
+        }
+        self.scene_dirty = false;
+        self.scene_dirty_at = None;
+        self.save_state = crate::show::scene_file::SaveState::Saved;
+    }
+
+    fn poll_media_library(&mut self) {
+        let dirty = self
+            .media_library
+            .as_mut()
+            .is_some_and(|library| library.poll_watch());
+        if dirty {
+            if let Some(library) = &mut self.media_library {
+                library.rescan();
+            }
+        }
+    }
+
+    fn note_scene_edit(&mut self, now: Instant) {
+        if self.show.is_none() {
+            return;
+        }
+        self.scene_dirty = true;
+        self.scene_dirty_at = Some(now);
+        if !matches!(self.save_state, crate::show::scene_file::SaveState::Saving) {
+            self.save_state = crate::show::scene_file::SaveState::Unsaved;
+        }
+    }
+
+    fn autosave_if_due(&mut self, now: Instant) {
+        if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare || !self.scene_dirty {
+            return;
+        }
+        let Some(at) = self.scene_dirty_at else {
+            return;
+        };
+        if now.saturating_duration_since(at) < std::time::Duration::from_millis(1500) {
+            return;
+        }
+        let _ = self.save_open_scene();
+    }
+
+    fn restore_pack_presets_after_user_scan(&mut self) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        self.merge_pack_presets(&root);
+    }
+
+    fn merge_pack_presets(&mut self, root: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(root.join("presets")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(preset) = serde_json::from_str::<crate::preset::Preset>(&text) else {
+                continue;
+            };
+            crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
+        }
+    }
+
+    /// With a show pack open, relative media paths resolve against the
+    /// show.json directory. Absolute paths and no-pack loads stay as stored.
+    fn resolve_show_media_path(&self, stored: &str) -> std::path::PathBuf {
+        match self.show.as_ref() {
+            Some(show) => show.resolve_path(stored),
+            None => std::path::PathBuf::from(stored),
         }
     }
 
@@ -2397,8 +3002,24 @@ impl App {
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
 
-        // Load preset-scoped bindings and migrate old 3-part targets to 4-part format
-        self.binding_bus.load_preset_bindings(&preset_name);
+        // Load preset-scoped bindings and migrate old 3-part targets to 4-part format.
+        // With a show pack open, the pack's audio-bindings/<preset>.bindings.json
+        // wins over the config-dir sidecar: the show's audio maps are curated
+        // content (music = motion/energy, never palette-owned color params),
+        // versioned with the pack, and portable across machines. Falls back to
+        // the config-dir sidecar when the pack ships none for this preset.
+        let pack_sidecar: Option<std::path::PathBuf> = self
+            .show
+            .as_ref()
+            .map(|show| show.pack_root.join(format!("audio-bindings/{preset_name}.bindings.json")));
+        match pack_sidecar {
+            Some(path) if path.is_file() => {
+                self.binding_bus.load_preset_bindings_from(&path);
+            }
+            _ => {
+                self.binding_bus.load_preset_bindings(&preset_name);
+            }
+        }
         // Freshly loaded bindings match disk — clear any stale unsaved flag.
         self.binding_bus.preset_scope_dirty = false;
         crate::bindings::apply::upgrade_legacy_targets(&mut self.binding_bus, &preset);
@@ -2417,11 +3038,13 @@ impl App {
                 continue;
             }
             if let Some(ref media_path) = lp.media_path {
-                let path = std::path::PathBuf::from(media_path);
+                let path = self.resolve_show_media_path(media_path);
                 if path.exists() {
                     media_jobs.push((i, path));
                 } else {
-                    log::warn!("Media file '{}' not found for layer {}", media_path, i);
+                    let msg = format!("Missing media '{media_path}' on layer {i}");
+                    log::warn!("{msg}");
+                    self.status_error = Some((msg, Instant::now()));
                 }
             }
         }
@@ -2533,7 +3156,7 @@ impl App {
 
             if !is_webcam_layer {
                 if let Some(ref media_path) = lp.media_path {
-                    let path = std::path::PathBuf::from(media_path);
+                    let path = self.resolve_show_media_path(media_path);
                     // Try pre-decoded media first, fall back to sync decode
                     let loaded = if let Some(decode_result) = decoded_media.remove(&i) {
                         match decode_result {
@@ -2551,7 +3174,9 @@ impl App {
                         self.load_media_on_layer(i, path.clone());
                         true
                     } else {
-                        log::warn!("Media file '{}' not found for layer {}", media_path, i);
+                        let msg = format!("Missing media '{media_path}' on layer {i}");
+                        log::warn!("{msg}");
+                        self.status_error = Some((msg, Instant::now()));
                         false
                     };
 
@@ -2565,6 +3190,10 @@ impl App {
                                 if let Some(looping) = lp.media_looping {
                                     m.transport.looping = looping;
                                 }
+                                m.fit = crate::media::MediaFit::parse(&lp.media_fit);
+                                m.width_scale = lp.media_width.clamp(0.25, 3.0);
+                                m.pos_x = lp.media_pos_x.clamp(-1.0, 1.0);
+                                m.pos_y = lp.media_pos_y.clamp(-1.0, 1.0);
                             }
                         }
                     }
@@ -3134,6 +3763,529 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Render the SHOW + PALETTES sections into the open left-panel scroll
+    /// area (Phase 1 p1-ui, Phase 2). No-ops when no show pack is loaded —
+    /// vanilla Fosfora keeps its exact current UI.
+    ///
+    /// Call sites pass `&mut self.show` + the panel state disjointly from the
+    /// other `&mut self` borrows they already hold (main.rs holds
+    /// `layer.param_store`, `volumetric_*`, …), so this is a free function.
+    pub fn draw_show_ui(
+        show: Option<&mut crate::show::controller::ShowController>,
+        palette_state: &mut crate::ui::panels::palette_panel::PalettePanelState,
+        blackout: bool,
+        ui: &mut egui::Ui,
+    ) -> ShowUiAction {
+        use crate::ui::panels::palette_panel::{draw_palette_panel, PalettePanelAction};
+        use crate::ui::panels::show_panel::{draw_show_panel, ShowPanelAction};
+        let Some(show) = show else {
+            return ShowUiAction::none();
+        };
+        let mut out = ShowUiAction::none();
+        ui.separator();
+        match draw_show_panel(ui, show, blackout) {
+            ShowPanelAction::None => {}
+            ShowPanelAction::Start => out.show = Some(ShowCmd::Start),
+            ShowPanelAction::Pause => out.show = Some(ShowCmd::Pause),
+            ShowPanelAction::Resume => out.show = Some(ShowCmd::Resume),
+            ShowPanelAction::Reset => out.show = Some(ShowCmd::Reset),
+            ShowPanelAction::StopAuto => out.show = Some(ShowCmd::StopAuto),
+            ShowPanelAction::ToggleBlackout => out.toggle_blackout = true,
+            ShowPanelAction::Seek(secs) => out.show = Some(ShowCmd::Seek { secs }),
+            ShowPanelAction::NextVisual => out.show = Some(ShowCmd::NextVisual),
+            ShowPanelAction::PrevVisual => out.show = Some(ShowCmd::PrevVisual),
+        }
+        ui.separator();
+        match draw_palette_panel(ui, show, palette_state) {
+            PalettePanelAction::None => {}
+            PalettePanelAction::ApplyNow => out.apply_palette_now = true,
+            PalettePanelAction::Imported(p) => out.imported_palette = Some(p),
+            PalettePanelAction::Edited => out.palette_edited = true,
+            PalettePanelAction::PrevPalette => out.show = Some(ShowCmd::PrevPalette),
+            PalettePanelAction::NextPalette => out.show = Some(ShowCmd::NextPalette),
+            PalettePanelAction::PaletteAuto => out.show = Some(ShowCmd::PaletteAuto),
+            // CRUD actions mutate the open pack directly — same save path as
+            // edits (deleted palettes remove their file; created/renamed write).
+            PalettePanelAction::Created => out.palette_edited = true,
+            PalettePanelAction::Deleted => out.palette_edited = true,
+            PalettePanelAction::Duplicated => out.palette_edited = true,
+        }
+        out
+    }
+
+    /// Open `--show <path/to/show.json>` in place (Phase 1 p1-paths).
+    ///
+    /// Every relative path in the pack resolves against the show.json
+    /// directory; the pack directory itself is the single filesystem root.
+    /// Called once from `App::new` — before this, `self.show` is `None`.
+    fn init_show_pack(&mut self) {
+        let Some(show_json) = crate::show::SHOW_PACK_ARG.get().cloned() else {
+            return;
+        };
+        let pack = match crate::show::pack::ShowPack::open(&show_json) {
+            Ok(pack) => pack,
+            Err(e) => {
+                log::warn!("--show {}: {e:#}", show_json.display());
+                self.status_error = Some((format!("Show pack: {e:#}"), Instant::now()));
+                return;
+            }
+        };
+        // Populate the native preset store with the pack's presets so cue
+        // loads resolve by stable preset_id.
+        let mut preset_ids: Vec<String> = pack.presets.keys().cloned().collect();
+        preset_ids.sort();
+        for id in &preset_ids {
+            if let Some(preset) = pack.presets.get(id) {
+                crate::show::scene_file::upsert_named(
+                    &mut self.preset_store.presets,
+                    id,
+                    preset.clone(),
+                );
+            }
+        }
+        // Bridge show cues into the native scene-timeline types: one cue per
+        // preset lets show transitions reuse the engine's dissolve snapshot
+        // path instead of duplicating renderer logic.
+        self.timeline = Timeline::new(
+            crate::show::build_timeline_cues(&preset_ids, 8.0),
+            false,
+            AdvanceMode::Manual,
+        );
+        self.transition_renderer.get_or_insert_with(|| {
+            TransitionRenderer::new(&self.gpu.device, GpuContext::hdr_format())
+        });
+        let report = {
+            let mut controller = crate::show::controller::ShowController::new(
+                pack.definition.clone(),
+                pack.root.clone(),
+                pack.palettes.clone(),
+                pack.bindings.clone(),
+                preset_ids,
+            );
+            // Media preflight (p1-validator): every preset layer media_path
+            // and particle video path becomes one MediaEstimate — exists via
+            // pack-root-relative resolution, RAM via the shared RGBA formula.
+            let mut media: Vec<crate::show::validation::MediaEstimate> = Vec::new();
+            for preset in pack.presets.values() {
+                for layer in &preset.layers {
+                    for stored in [&layer.media_path, &layer.particle_video_path]
+                        .into_iter()
+                        .flatten()
+                    {
+                        media.push(crate::show::validation::MediaEstimate {
+                            path: stored.clone(),
+                            exists: crate::show::validation::media_exists(
+                                &controller.pack_root,
+                                stored,
+                            ),
+                            estimated_ram_bytes:
+                                crate::show::validation::estimate_rgba_ram(1280, 720, 15.0, 8.0),
+                        });
+                    }
+                }
+            }
+            // Ownership validation (p2-ownership): collect every external
+            // control path targeting a palette-owned color param. MIDI/OSC
+            // configs map param NAME → mapping; resolve to the live layer
+            // index by matching the name against each layer's defs. Layer-
+            // addressed OSC/WS messages and bus targets carry their own
+            // layer index. Audio sources are bus-only, so the bus scan
+            // covers them (audio.* → Param targets). The final filter lives
+            // in `ShowController::palette_conflicts` (single implementation).
+            let mut external: Vec<(String, usize, String)> = Vec::new();
+            // MIDI + OSC global configs: param name → find owning layers.
+            for name in self
+                .midi
+                .config
+                .params
+                .keys()
+                .chain(self.osc.config.params.keys())
+            {
+                let owner = if self.midi.config.params.contains_key(name) {
+                    "midi"
+                } else {
+                    "osc"
+                };
+                for (idx, layer) in self.layer_stack.layers.iter().enumerate() {
+                    if layer.param_store.defs.iter().any(|d| d.name() == name) {
+                        external.push((owner.into(), idx, name.clone()));
+                    }
+                }
+            }
+            // Pack audio maps also count as external writers: the pack's
+            // audio-bindings/*.bindings.json are live bus bindings (loaded
+            // per cue above), so a map onto a palette-owned tint must fail
+            // validation exactly like a config-dir sidecar would.
+            let mut pack_audio_targets: Vec<(String, usize, String)> = Vec::new();
+            for (preset_id, list) in &pack.audio_bindings {
+                for b in list {
+                    if !b.enabled {
+                        continue;
+                    }
+                    match &b.target {
+                        crate::bindings::types::BindingTarget::Param {
+                            layer,
+                            param,
+                            ..
+                        } => pack_audio_targets.push((
+                            format!("audio-bindings({preset_id})"),
+                            *layer,
+                            param.clone(),
+                        )),
+                        crate::bindings::types::BindingTarget::LegacyParam { param, .. } => {
+                            pack_audio_targets.push((
+                                format!("audio-bindings({preset_id})"),
+                                0,
+                                param.clone(),
+                            ))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Binding bus: audio + midi + osc + ws sources → Param targets.
+            for b in &self.binding_bus.bindings {
+                if !b.enabled {
+                    continue;
+                }
+                match &b.target {
+                    crate::bindings::types::BindingTarget::Param {
+                        layer,
+                        param,
+                        ..
+                    } => external.push((
+                        format!("binding-bus({})", b.source),
+                        *layer,
+                        param.clone(),
+                    )),
+                    crate::bindings::types::BindingTarget::LegacyParam {
+                        param, ..
+                    } => external.push((
+                        format!("binding-bus({})", b.source),
+                        self.layer_stack.active_layer,
+                        param.clone(),
+                    )),
+                    _ => {}
+                }
+            }
+            external.extend(pack_audio_targets);
+            // p2-ownership conflict scan belongs on the controller so the bus
+            // guard, validator, and tests share one implementation.
+            let conflicts = controller.palette_conflicts(external);
+            controller.validate(&pack.presets, &media, &conflicts)
+        };
+        log::info!(
+            "Show pack '{}' loaded: {} scene cues, {} palette cues — {}",
+            pack.definition.name,
+            pack.definition.scene_track.len(),
+            pack.definition.palette_track.len(),
+            report.summary()
+        );
+        if !report.ready() {
+            for issue in &report.issues {
+                log::warn!("show validation: {}", issue.message);
+            }
+            self.status_error = Some((format!("Show: {}", report.summary()), Instant::now()));
+        }
+        let mut controller = crate::show::controller::ShowController::new(
+            pack.definition,
+            pack.root,
+            pack.palettes,
+            pack.bindings,
+            self.preset_store
+                .presets
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>(),
+        );
+        controller.last_report = report;
+        self.show = Some(controller);
+        let root = self
+            .show
+            .as_ref()
+            .map(|show| show.pack_root.clone())
+            .unwrap_or_default();
+        self.media_library = Some(crate::media::library::MediaLibrary::open(root));
+        self.restore_editing_session();
+        // Hibernation's picture is graded from the open palette. Strength 0
+        // leaves ordinary Fosfora presets untouched; a show pack starts on.
+        self.post_process.grade.enabled = true;
+        self.post_process.grade.strength = 0.75;
+        let opening = self.show.as_ref().and_then(|show| {
+            crate::palette::controller::palette_colors_at(
+                &show.definition.palette_track,
+                &show.palettes,
+                std::time::Duration::ZERO,
+            )
+        });
+        if let Some(colors) = opening {
+            self.apply_palette_map(colors);
+        }
+    }
+
+    /// True while palette automation owns bound color params: a pack is open
+    /// AND automation is on. External writers (MIDI/OSC/WS/binding-bus)
+    /// must skip palette-owned params while this holds — PaletteController
+    /// is the exclusive owner, enforced by the per-frame write order below.
+    /// Plan p3-web-control contract probe: true while the show clock owns
+    /// bound color params (web UI reads this to render the automation badge).
+    /// Test-only for now — the native + web panels read `auto_enabled` off
+    /// the `show` snapshot instead — so this stays out of normal builds.
+    #[cfg(test)]
+    pub fn palette_automating(&self) -> bool {
+        self.show.as_ref().is_some_and(|s| s.auto_enabled)
+    }
+
+    /// Palette-owned (layer, param) pairs for the ownership guard, or `None`
+    /// when automation is off (no guard — vanilla Fosfora behavior).
+    fn palette_owned(&self) -> Option<std::collections::HashSet<(usize, String)>> {
+        let show = self.show.as_ref()?;
+        if !show.auto_enabled {
+            return None;
+        }
+        Some(show.palette_owned_params())
+    }
+
+    /// Tick the show + palette schedulers (Phase 1/3). Called every frame from
+    /// `update` with an `Instant` `now` — never the clamped render `dt` — so a
+    /// 5 s stall advances the show by exactly 5 s.
+    ///
+    /// Exclusive ownership (Phase 2 p2-ownership): palette automation writes
+    /// LAST each frame via `set_runtime`, so a stray MIDI/OSC/WS/binding write
+    /// to a bound color param is overwritten the same frame — the palette is
+    /// the final word while automation is active. The validator surfaces the
+    /// configuration conflict; this guarantees the runtime behavior.
+    fn tick_show(&mut self, now: Instant) {
+        let events = match self.show.as_mut() {
+            Some(show) => show.tick(now),
+            None => return,
+        };
+        for event in events {
+            self.apply_show_event(event);
+        }
+        // Continuous slot-ID-keyed interpolation: survive scene changes and
+        // fill frames between cue edges without new events. Computed without
+        // holding the show borrow so `apply_palette_map` can take `&mut self`.
+        let colors = match self.show.as_ref() {
+            Some(show) if show.auto_enabled => {
+                let elapsed = show.clock.elapsed_at(now);
+                crate::palette::controller::palette_colors_at(
+                    &show.definition.palette_track,
+                    &show.palettes,
+                    elapsed,
+                )
+            }
+            _ => None,
+        };
+        if let Some(colors) = colors {
+            self.apply_palette_map(colors);
+        }
+    }
+
+    /// Handle one edge-triggered [`ShowVisualEvent`]: scene preset load +
+    /// palette `set_runtime` writes (non-dirtying).
+    fn apply_show_event(&mut self, event: crate::show::controller::ShowVisualEvent) {
+        use crate::show::controller::ShowVisualEvent;
+        match event {
+            ShowVisualEvent::Scene(action) => {
+                let cue_index = self
+                    .timeline
+                    .cues
+                    .iter()
+                    .position(|c| c.preset_name == action.preset_id);
+                if action.snap {
+                    // SEEK/START semantics: snap-load the target preset
+                    // immediately (no historical dissolve reconstruction).
+                    if let Some(idx) = cue_index {
+                        if let Some(preset_idx) = self
+                            .preset_store
+                            .presets
+                            .iter()
+                            .position(|(n, _)| n == &action.preset_id)
+                        {
+                            // Keep the timeline's cue cursor aligned so the
+                            // next scheduled edge still fires on time.
+                            let tl_event = self.timeline.go_to_cue(idx);
+                            self.process_timeline_event(tl_event);
+                            self.load_preset_for_cue(preset_idx, idx);
+                        }
+                    } else if let Some(preset_idx) = self
+                        .preset_store
+                        .presets
+                        .iter()
+                        .position(|(n, _)| n == &action.preset_id)
+                    {
+                        self.load_preset(preset_idx);
+                    }
+                } else if let Some(idx) = cue_index {
+                    // Native transitions: cut loads now, dissolve/param-morph
+                    // go through `TimelineEvent` so the render path captures
+                    // the outgoing frame (see `dissolve_capture_pending`).
+                    let from = self.timeline.current_cue_index();
+                    let tl_event = if action.kind
+                        == crate::show::definition::TransitionKind::Cut
+                    {
+                        // Align cursor then load directly: `go_to_cue` on a
+                        // Cut cue already emits `LoadCue`, which
+                        // `process_timeline_event` handles.
+                        self.timeline.go_to_cue(idx)
+                    } else {
+                        let cue = &self.timeline.cues[idx];
+                        self.timeline.state = crate::scene::timeline::PlaybackState::Transitioning {
+                            from_cue: from.min(self.timeline.cues.len().saturating_sub(1)),
+                            to_cue: idx,
+                            progress: 0.0,
+                            transition_type: cue.transition,
+                            duration: action.duration_ms as f32 / 1000.0,
+                        };
+                        crate::show::timeline_event_for_cue(
+                            idx,
+                            action.kind,
+                            action.duration_ms,
+                        )
+                    };
+                    self.process_timeline_event(tl_event);
+                } else if let Some(preset_idx) = self
+                    .preset_store
+                    .presets
+                    .iter()
+                    .position(|(n, _)| n == &action.preset_id)
+                {
+                    self.load_preset(preset_idx);
+                } else {
+                    log::warn!("show cue: unknown preset '{}'", action.preset_id);
+                }
+            }
+            ShowVisualEvent::Palette(colors) => {
+                self.apply_palette_map(colors);
+            }
+        }
+    }
+
+fn slot_rgb(
+    colors: &std::collections::HashMap<String, crate::params::ParamValue>,
+    slot: &str,
+) -> Option<[f32; 3]> {
+    match colors.get(slot) {
+        Some(crate::params::ParamValue::Color(c)) => Some([c[0], c[1], c[2]]),
+        _ => None,
+    }
+}
+
+    /// Route an interpolated slot→color map through the active preset's
+    /// `PaletteBindingSet` and write via `set_runtime` (never dirty).
+    ///
+    /// Fallback rule (MVP): when the active preset has no binding set, the
+    /// first set in the pack applies — every Hibernation preset ships one,
+    /// so this only fires for ad-hoc packs.
+    pub fn apply_palette_map(&mut self, colors: std::collections::HashMap<String, crate::params::ParamValue>) {
+        // Whole-frame grade roles. color-5 and color-6 stay on the per-effect
+        // bindings (highlights and line work) and are not consumed here.
+        if let Some(c) = Self::slot_rgb(&colors, "color-1") {
+            self.post_process.grade.shadow = c;
+        }
+        if let Some(c) = Self::slot_rgb(&colors, "color-2") {
+            self.post_process.grade.mid = c;
+        }
+        if let Some(c) = Self::slot_rgb(&colors, "color-3") {
+            self.post_process.grade.high = c;
+        }
+        if let Some(c) = Self::slot_rgb(&colors, "color-4") {
+            self.post_process.grade.accent = c;
+        }
+        let Some(show) = self.show.as_ref() else {
+            return;
+        };
+        let active = show.scene.active_preset_id.clone();
+        let bindings = active
+            .as_deref()
+            .and_then(|id| show.bindings.get(id))
+            .cloned()
+            .or_else(|| show.bindings.values().next().cloned());
+        let Some(set) = bindings else {
+            return;
+        };
+        for b in &set.bindings {
+            let Some(value) = colors.get(&b.slot) else {
+                continue;
+            };
+            if let Some(layer) = self.layer_stack.layers.get_mut(b.layer) {
+                if !layer.locked {
+                    layer.param_store.set_runtime(&b.parameter, value.clone());
+                }
+            }
+        }
+    }
+
+    /// Dispatch a [`ShowCommand`]: START/PAUSE/RESUME/RESET/SEEK/STOP AUTO/
+    /// NEXT-PREV VISUAL/PALETTE. Returns after applying the resulting scene +
+    /// palette events atomically (seek applies both at once).
+    pub fn show_command(&mut self, cmd: crate::show::controller::ShowCommand) {
+        let now = Instant::now();
+        if matches!(cmd, crate::show::controller::ShowCommand::ToggleBlackout) {
+            self.master_output.blackout = !self.master_output.blackout;
+            return;
+        }
+        let switches_scene = matches!(
+            cmd,
+            crate::show::controller::ShowCommand::Start
+                | crate::show::controller::ShowCommand::Reset
+                | crate::show::controller::ShowCommand::Seek { .. }
+                | crate::show::controller::ShowCommand::NextVisual
+                | crate::show::controller::ShowCommand::PrevVisual
+        );
+        if switches_scene && self.scene_dirty {
+            if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
+                if self.save_open_scene().is_err() {
+                    return;
+                }
+            } else {
+                self.status_error = Some((
+                    "Unsaved changes were not written. Press Save Changes to keep this scene."
+                        .into(),
+                    Instant::now(),
+                ));
+            }
+        }
+        let events = match self.show.as_mut() {
+            Some(show) => show.handle(now, cmd.clone()),
+            None => return,
+        };
+        for event in events {
+            self.apply_show_event(event);
+        }
+        // SEEK/START atomically reconstruct the exact palette colors at the
+        // target timestamp (no historical dissolve reconstruction).
+        if matches!(
+            cmd,
+            crate::show::controller::ShowCommand::Seek { .. }
+                | crate::show::controller::ShowCommand::Start
+                | crate::show::controller::ShowCommand::Reset
+        ) {
+            let (elapsed, colors) = match self.show.as_mut() {
+                Some(show) => {
+                    let elapsed = show.clock.elapsed_at(now);
+                    let colors = crate::palette::controller::palette_colors_at(
+                        &show.definition.palette_track,
+                        &show.palettes,
+                        elapsed,
+                    );
+                    (elapsed, colors)
+                }
+                None => return,
+            };
+            let _ = elapsed;
+            if let Some(colors) = colors {
+                self.apply_palette_map(colors);
+            }
+        }
+        if switches_scene {
+            self.scene_dirty = false;
+            self.save_state = crate::show::scene_file::SaveState::Saved;
+            self.remember_workspace();
+        }
+    }
+
     /// Load a scene and start its timeline.
     pub fn load_scene(&mut self, index: usize) {
         let scene = match self.scene_store.load(index) {
@@ -3496,20 +4648,40 @@ impl App {
             } else {
                 new_source
             };
-            // Post-process → surface
-            self.post_process.render(
-                &self.gpu.device,
-                &self.gpu.queue,
-                &mut encoder,
-                source,
-                &surface_view,
-                self.uniforms.time,
-                self.uniforms.rms,
-                self.uniforms.onset,
-                self.uniforms.flatness,
-                &new_pp,
-                alpha_mode,
-            );
+            // TRUE BLACKOUT also covers the dissolve deferred-load branch:
+            // same contract as the normal path — present black, egui on top.
+            if self.master_output.blackout {
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("blackout-clear-dissolve"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            } else {
+                // Post-process → surface
+                self.post_process.render(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut encoder,
+                    source,
+                    &surface_view,
+                    self.uniforms.time,
+                    self.uniforms.rms,
+                    self.uniforms.onset,
+                    self.uniforms.flatness,
+                    &new_pp,
+                    alpha_mode,
+                );
+            }
 
             // NDI capture
             #[cfg(feature = "ndi")]
@@ -3643,6 +4815,42 @@ impl App {
         } else {
             source
         };
+
+        // TRUE BLACKOUT (Phase 1 p1-blackout): applied at final
+        // presentation, independent of scene/palette/pause/STOP AUTO/preset/
+        // audio. When on, the surface presents black instead of the
+        // post-processed frame — reachable via keyboard (B), native UI, and
+        // web. UI overlays (egui) still draw on top so the operator keeps
+        // control; projector rehearsal hides the overlay separately.
+        if self.master_output.blackout {
+            // Still submit a cleared command buffer so the surface presents
+            // a real black frame (never a stale or torn one), then draw only
+            // the egui overlay.
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blackout-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.egui_overlay.render(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                &surface_view,
+            );
+            self.gpu.queue.submit(std::iter::once(encoder.finish()));
+            output.present();
+            return Ok(());
+        }
 
         // Post-process → surface
         self.post_process.render(

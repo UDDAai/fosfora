@@ -1,4 +1,6 @@
 pub mod decoder;
+pub mod library;
+pub mod toolchain;
 pub mod types;
 #[cfg(feature = "video")]
 pub mod video;
@@ -8,6 +10,36 @@ pub mod webcam;
 pub mod webcam_ffmpeg;
 
 use std::path::PathBuf;
+
+/// How a video or still is placed on the output.
+///
+/// `Fit` is the historical letterbox and the default for presets that do not
+/// say otherwise. `Fill` covers the output and crops. `Width` uses
+/// `width_scale` as a fraction of the canvas; height follows the media aspect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaFit {
+    Fit,
+    Fill,
+    Width,
+}
+
+impl MediaFit {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "fill" => Self::Fill,
+            "width" => Self::Width,
+            _ => Self::Fit,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fit => "fit",
+            Self::Fill => "fill",
+            Self::Width => "width",
+        }
+    }
+}
 
 /// Unified webcam backend that wraps either nokhwa (native) or ffmpeg capture.
 #[cfg(feature = "webcam")]
@@ -109,6 +141,13 @@ pub struct MediaLayer {
     // Dimensions
     pub media_width: u32,
     pub media_height: u32,
+    pub fit: MediaFit,
+    /// Width as a fraction of the output canvas when `fit` is [`MediaFit::Width`].
+    pub width_scale: f32,
+    pub pos_x: f32,
+    pub pos_y: f32,
+    /// Small JPEG of the first frame, as a data URL, for the control page.
+    pub preview_jpeg: Option<String>,
     needs_upload: bool,
     // PingPong direction for GIF
     pingpong_forward: bool,
@@ -215,7 +254,17 @@ impl MediaLayer {
             RenderTarget::new(device, width, height, hdr_format, 1.0, "media-output");
 
         // Uniform buffer for letterbox transform
-        let uniforms = compute_media_uniforms(media_width, media_height, width, height, false);
+        let uniforms = compute_media_uniforms(
+            media_width,
+            media_height,
+            width,
+            height,
+            MediaFit::Fit,
+            1.0,
+            0.0,
+            0.0,
+            false,
+        );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("media-uniforms"),
             size: std::mem::size_of::<MediaUniforms>() as u64,
@@ -324,6 +373,8 @@ impl MediaLayer {
             if total_frames == 1 { "" } else { "s" }
         );
 
+        let preview_jpeg = source.first_frame().and_then(preview_data_url);
+
         Self {
             source,
             file_path,
@@ -341,6 +392,11 @@ impl MediaLayer {
             uniform_buffer,
             media_width,
             media_height,
+            fit: MediaFit::Fit,
+            width_scale: 1.0,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            preview_jpeg,
             needs_upload: false,
             pingpong_forward: true,
             #[cfg(feature = "webcam")]
@@ -495,21 +551,7 @@ impl MediaLayer {
     /// Resize output target and recompute letterbox uniforms. Rebuilds bind group.
     pub fn resize(&mut self, device: &Device, queue: &Queue, width: u32, height: u32) {
         self.output_target.resize(device, width, height);
-
-        // Recompute letterbox
-        let mirror = {
-            #[cfg(feature = "webcam")]
-            {
-                self.mirror
-            }
-            #[cfg(not(feature = "webcam"))]
-            {
-                false
-            }
-        };
-        let uniforms =
-            compute_media_uniforms(self.media_width, self.media_height, width, height, mirror);
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        self.write_placement(queue);
 
         // Rebuild bind group (output_target view changed but frame texture/sampler/uniform didn't)
         self.bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -548,14 +590,7 @@ impl MediaLayer {
     #[cfg(feature = "webcam")]
     pub fn set_mirror(&mut self, queue: &Queue, mirror: bool) {
         self.mirror = mirror;
-        let uniforms = compute_media_uniforms(
-            self.media_width,
-            self.media_height,
-            self.output_target.width,
-            self.output_target.height,
-            mirror,
-        );
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        self.write_placement(queue);
     }
 
     /// Set live frame data from webcam capture thread.
@@ -619,34 +654,195 @@ impl MediaLayer {
     pub fn duration_secs(&self) -> f64 {
         self.transport.duration / 1000.0
     }
+
+    /// Upload the current placement. Does not touch the decoded frames.
+    pub fn write_placement(&self, queue: &wgpu::Queue) {
+        let mirror = {
+            #[cfg(feature = "webcam")]
+            {
+                self.mirror
+            }
+            #[cfg(not(feature = "webcam"))]
+            {
+                false
+            }
+        };
+        let uniforms = compute_media_uniforms(
+            self.media_width,
+            self.media_height,
+            self.output_target.width,
+            self.output_target.height,
+            self.fit,
+            self.width_scale,
+            self.pos_x,
+            self.pos_y,
+            mirror,
+        );
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+    }
 }
 
-/// Compute letterbox scale and offset to fit media into viewport (fit mode).
+/// Place media on the output. `width_scale` is a fraction of the canvas
+/// (0.25–3) and only applies in [`MediaFit::Width`]. Position is -1..1
+/// around centre.
 fn compute_media_uniforms(
     media_w: u32,
     media_h: u32,
     viewport_w: u32,
     viewport_h: u32,
+    fit: MediaFit,
+    width_scale: f32,
+    pos_x: f32,
+    pos_y: f32,
     mirror: bool,
 ) -> MediaUniforms {
     let media_aspect = media_w as f32 / media_h.max(1) as f32;
     let viewport_aspect = viewport_w as f32 / viewport_h.max(1) as f32;
-
-    let (scale_x, scale_y) = if media_aspect > viewport_aspect {
-        // Media is wider — fit width, letterbox top/bottom
-        (1.0, viewport_aspect / media_aspect)
-    } else {
-        // Media is taller — fit height, pillarbox left/right
-        (media_aspect / viewport_aspect, 1.0)
+    let (scale_x, scale_y) = match fit {
+        MediaFit::Fit => {
+            if media_aspect > viewport_aspect {
+                (1.0, viewport_aspect / media_aspect)
+            } else {
+                (media_aspect / viewport_aspect, 1.0)
+            }
+        }
+        MediaFit::Fill => {
+            if media_aspect > viewport_aspect {
+                (media_aspect / viewport_aspect, 1.0)
+            } else {
+                (1.0, viewport_aspect / media_aspect)
+            }
+        }
+        MediaFit::Width => {
+            let sx = width_scale.clamp(0.25, 3.0);
+            (sx, sx * viewport_aspect / media_aspect)
+        }
     };
-
-    let offset_x = (1.0 - scale_x) * 0.5;
-    let offset_y = (1.0 - scale_y) * 0.5;
-
+    let offset_x = (1.0 - scale_x) * 0.5 + pos_x.clamp(-1.0, 1.0) * 0.5;
+    let offset_y = (1.0 - scale_y) * 0.5 + pos_y.clamp(-1.0, 1.0) * 0.5;
     MediaUniforms {
         scale: [scale_x, scale_y],
         offset: [offset_x, offset_y],
         mirror: mirror as u32,
         _pad: 0,
+    }
+}
+
+/// A 96px-wide JPEG of one decoded frame, for the layer row. Nearest sample,
+/// so it stays cheap when a clip is opened.
+fn preview_data_url(frame: &crate::media::types::DecodedFrame) -> Option<String> {
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+    let pixels = (frame.width as usize).saturating_mul(frame.height as usize) * 4;
+    if frame.data.len() < pixels {
+        return None;
+    }
+    let tw: u32 = 96;
+    let th: u32 = ((u64::from(frame.height) * u64::from(tw)) / u64::from(frame.width)).clamp(24, 54) as u32;
+    let mut rgb = Vec::with_capacity((tw * th * 3) as usize);
+    for y in 0..th {
+        let sy = ((u64::from(y) * u64::from(frame.height)) / u64::from(th))
+            .min(u64::from(frame.height) - 1) as u32;
+        for x in 0..tw {
+            let sx = ((u64::from(x) * u64::from(frame.width)) / u64::from(tw))
+                .min(u64::from(frame.width) - 1) as u32;
+            let i = ((sy * frame.width + sx) * 4) as usize;
+            rgb.extend_from_slice(&frame.data[i..i + 3]);
+        }
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut jpeg), 55)
+        .encode(&rgb, tw, th, image::ExtendedColorType::Rgb8)
+        .ok()?;
+    Some(format!("data:image/jpeg;base64,{}", base64_encode(&jpeg)))
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    let mut chunks = data.chunks_exact(3);
+    for chunk in chunks.by_ref() {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push(TABLE[(n & 63) as usize] as char);
+    }
+    let rest = chunks.remainder();
+    if rest.len() == 1 {
+        let n = u32::from(rest[0]) << 16;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rest.len() == 2 {
+        let n = (u32::from(rest[0]) << 16) | (u32::from(rest[1]) << 8);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    #[test]
+    fn sixteen_by_nine_fill_covers_a_1080p_output() {
+        let u = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Fill, 1.0, 0.0, 0.0, false);
+        assert!((u.scale[0] - 1.0).abs() < 1e-4);
+        assert!((u.scale[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn vertical_video_fills_by_cropping_top_and_bottom() {
+        let u = compute_media_uniforms(720, 1280, 1920, 1080, MediaFit::Fill, 1.0, 0.0, 0.0, false);
+        assert!((u.scale[0] - 1.0).abs() < 1e-4, "width covers the canvas");
+        assert!(u.scale[1] > 1.0, "height overflows so the frame is cropped");
+    }
+
+    #[test]
+    fn four_by_three_fit_keeps_the_whole_frame() {
+        let u = compute_media_uniforms(1440, 1080, 1920, 1080, MediaFit::Fit, 1.0, 0.0, 0.0, false);
+        assert!(u.scale[0] < 1.0);
+        assert!((u.scale[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn custom_width_zooms_without_changing_aspect() {
+        let u = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.0, 0.0, false);
+        assert!((u.scale[0] - 1.3).abs() < 1e-4);
+        assert!((u.scale[1] - 1.3).abs() < 1e-4);
+        assert!(u.offset[0] < 0.0 && u.offset[1] < 0.0);
+    }
+
+    #[test]
+    fn position_shifts_which_part_of_a_zoom_stays_visible() {
+        let centered = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.0, 0.0, false);
+        let shifted = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.4, 0.0, false);
+        assert!(shifted.offset[0] > centered.offset[0]);
+        assert!((shifted.scale[0] - centered.scale[0]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_decoded_frame_becomes_a_jpeg_preview() {
+        let frame = crate::media::types::DecodedFrame {
+            data: vec![10, 40, 200, 255, 220, 30, 20, 255, 10, 40, 200, 255, 220, 30, 20, 255],
+            width: 2,
+            height: 2,
+        };
+        let url = preview_data_url(&frame).expect("preview");
+        assert!(url.starts_with("data:image/jpeg;base64,"));
+        assert!(url.len() > 40);
+    }
+
+    #[test]
+    fn omitted_mode_stays_letterboxed() {
+        let fit = compute_media_uniforms(720, 1280, 1920, 1080, MediaFit::Fit, 1.0, 0.0, 0.0, false);
+        assert!(fit.scale[0] < 1.0);
+        assert!((fit.scale[1] - 1.0).abs() < 1e-4);
     }
 }

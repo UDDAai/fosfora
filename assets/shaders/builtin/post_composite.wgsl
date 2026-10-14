@@ -16,11 +16,24 @@ struct PostParams {
     alpha_mode: f32,       // 0 = opaque, 1 = luma-derived, 2 = scene-alpha passthrough
     tonemap_mode: f32,     // 0 = ACES, 1 = linear passthrough (SuperSplat-faithful)
     grain_rate: f32,       // grain updates per second; <= 0 = every frame
-    // Scalar pads, not a vec3f: a vec3f would align to 16 and push the struct
-    // to 64 bytes, while the Rust PostParams is 9 f32 + 3 pad = 48.
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    // Flat f32s. A vec3f would align to 16 and disagree with the Rust layout.
+    // 24 floats = 96 bytes. color-1 shadows, color-2 mids, color-3 highlights,
+    // color-4 accent. Strength 0 leaves the picture unchanged.
+    grade_strength: f32,
+    shadow_r: f32,
+    shadow_g: f32,
+    shadow_b: f32,
+    mid_r: f32,
+    mid_g: f32,
+    mid_b: f32,
+    high_r: f32,
+    high_g: f32,
+    high_b: f32,
+    accent_r: f32,
+    accent_g: f32,
+    accent_b: f32,
+    _end0: f32,
+    _end1: f32,
 }
 @group(0) @binding(4) var<uniform> post: PostParams;
 
@@ -71,6 +84,25 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
         color = aces_tonemap(color);
     } else {
         color = clamp(color, vec3f(0.0), vec3f(1.0));
+    }
+
+    // Palette grade. Luma of the footage is kept; the swatch supplies the hue
+    // for that brightness band, so a video stays a video.
+    let grade_strength = clamp(post.grade_strength, 0.0, 1.0);
+    if grade_strength > 0.001 {
+        let luma_w = vec3f(0.2126, 0.7152, 0.0722);
+        let luma = dot(color, luma_w);
+        let shadow_w = 1.0 - smoothstep(0.05, 0.55, luma);
+        let high_w = smoothstep(0.45, 0.92, luma);
+        let mid_w = clamp(1.0 - shadow_w - high_w, 0.0, 1.0);
+        let mapped = vec3f(post.shadow_r, post.shadow_g, post.shadow_b) * shadow_w
+            + vec3f(post.mid_r, post.mid_g, post.mid_b) * mid_w
+            + vec3f(post.high_r, post.high_g, post.high_b) * high_w;
+        let mapped_l = max(dot(mapped, luma_w), 0.001);
+        var recolored = (mapped / mapped_l) * luma;
+        let accent = vec3f(post.accent_r, post.accent_g, post.accent_b);
+        recolored = mix(recolored, accent * luma, high_w * 0.35);
+        color = mix(color, recolored, grade_strength);
     }
 
     // Vignette

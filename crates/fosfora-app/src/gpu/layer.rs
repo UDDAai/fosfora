@@ -533,6 +533,14 @@ pub struct LayerInfo {
     #[allow(dead_code)]
     pub media_is_video: bool,
     pub media_is_live: bool,
+    pub media_fit: String,
+    pub media_width_scale: f32,
+    pub media_pos_x: f32,
+    pub media_pos_y: f32,
+    pub media_speed: f32,
+    pub media_looping: bool,
+    /// JPEG data URL of the media's first frame, when this row is a video or still.
+    pub media_preview: Option<String>,
     /// The layer's trama chain, when it has one worth mentioning.
     pub chain: Option<ChainBadge>,
     /// An enabled layer whose effect reads the layers beneath it (`@backdrop`)
@@ -589,17 +597,34 @@ impl LayerStack {
             .iter()
             .enumerate()
             .map(|(i, l)| {
-                let (is_media, media_file_name, media_is_animated, media_is_video, media_is_live) =
-                    match &l.content {
-                        LayerContent::Media(m) => (
-                            true,
-                            Some(m.file_name.clone()),
-                            m.is_animated(),
-                            m.is_video(),
-                            m.is_live(),
-                        ),
-                        _ => (false, None, false, false, false),
-                    };
+                let (
+                    is_media,
+                    media_file_name,
+                    media_is_animated,
+                    media_is_video,
+                    media_is_live,
+                    media_fit,
+                    media_width_scale,
+                    media_pos_x,
+                    media_pos_y,
+                    media_speed,
+                    media_looping,
+                ) = match &l.content {
+                    LayerContent::Media(m) => (
+                        true,
+                        Some(m.file_name.clone()),
+                        m.is_animated(),
+                        m.is_video(),
+                        m.is_live(),
+                        m.fit.as_str().to_string(),
+                        m.width_scale,
+                        m.pos_x,
+                        m.pos_y,
+                        m.transport.speed,
+                        m.transport.looping,
+                    ),
+                    _ => (false, None, false, false, false, String::new(), 1.0, 0.0, 0.0, 1.0, true),
+                };
                 LayerInfo {
                     name: l.name.clone(),
                     custom_name: l.custom_name.clone(),
@@ -621,6 +646,16 @@ impl LayerStack {
                     media_is_animated,
                     media_is_video,
                     media_is_live,
+                    media_fit,
+                    media_width_scale,
+                    media_pos_x,
+                    media_pos_y,
+                    media_speed,
+                    media_looping,
+                    media_preview: match &l.content {
+                        LayerContent::Media(m) => m.preview_jpeg.clone(),
+                        _ => None,
+                    },
                     chain: l.chain.as_deref().and_then(|c| ChainBadge::of(&c.graph)),
                     // Later in the list = beneath (the list's top renders on top).
                     needs_layer_below: l.enabled

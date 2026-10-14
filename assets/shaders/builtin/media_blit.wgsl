@@ -1,4 +1,4 @@
-// Media blit shader — samples Rgba8UnormSrgb texture with letterbox transform,
+// Media blit shader — samples Rgba8UnormSrgb texture with a fit/fill/width transform,
 // outputs to Rgba16Float HDR target.
 
 struct MediaUniforms {

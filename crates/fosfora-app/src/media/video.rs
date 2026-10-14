@@ -7,24 +7,14 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::process::Stdio;
 
+use super::toolchain::VideoToolchain;
 use super::types::DecodedFrame;
 
 /// Check if ffmpeg/ffprobe are available on the system. Cached per process.
 pub fn ffmpeg_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        Command::new("ffprobe")
-            .arg("-version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
+    VideoToolchain::global(None).available()
 }
 
 /// Video metadata from ffprobe.
@@ -38,7 +28,14 @@ pub struct VideoMeta {
 
 /// Probe video metadata using ffprobe.
 pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
-    let output = Command::new("ffprobe")
+    let tool = VideoToolchain::global(None);
+    let mut cmd = tool.ffprobe_cmd().ok_or_else(|| {
+        format!(
+            "ffprobe not found ({}; set ffmpeg path in settings, or install ffmpeg)",
+            tool.status_line()
+        )
+    })?;
+    let output = cmd
         .args([
             "-v",
             "quiet",
@@ -121,7 +118,15 @@ pub fn decode_all_frames(
         est_ram_mb,
     );
 
-    let mut child = Command::new("ffmpeg")
+    let tool = VideoToolchain::global(None);
+    let mut child = tool
+        .ffmpeg_cmd()
+        .ok_or_else(|| {
+            format!(
+                "ffmpeg not found ({}; set ffmpeg path in settings, or install ffmpeg)",
+                tool.status_line()
+            )
+        })?
         .args(["-i"])
         .arg(path)
         .args([

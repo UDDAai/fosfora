@@ -50,6 +50,16 @@ impl MediaSource {
         false
     }
 
+    /// First stored frame. Live sources have none until a capture arrives.
+    pub fn first_frame(&self) -> Option<&super::types::DecodedFrame> {
+        match self {
+            MediaSource::Static(frame) => Some(frame),
+            MediaSource::Animated { frames, .. } => frames.first(),
+            #[cfg(feature = "webcam")]
+            MediaSource::Live { .. } => None,
+        }
+    }
+
     /// Get frame dimensions.
     pub fn dimensions(&self) -> (u32, u32) {
         match self {
@@ -93,7 +103,10 @@ fn load_video(path: &Path) -> Result<MediaSource, String> {
     use super::video::{MAX_PREDECODE_SECS, decode_all_frames, ffmpeg_available, probe_video};
 
     if !ffmpeg_available() {
-        return Err("ffmpeg/ffprobe not found on PATH".to_string());
+        return Err(format!(
+            "ffmpeg/ffprobe not found ({})",
+            super::toolchain::VideoToolchain::global(None).status_line()
+        ));
     }
 
     let meta = probe_video(path)?;

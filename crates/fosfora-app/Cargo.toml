@@ -64,6 +64,11 @@ ctrlc = "3"
 dirs = "6"
 # WebSocket server
 tungstenite = "0.28"
+# Streaming multipart uploads for the media library. The parser is multer;
+# the accept thread blocks on it with pollster (already a dependency).
+multer = "3"
+bytes = "1"
+futures-core = "0.3"
 # Image loading (particle sprites, media layers)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # WebP animation decoding (image crate only decodes first frame)
