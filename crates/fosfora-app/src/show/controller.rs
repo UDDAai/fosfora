@@ -13,7 +13,7 @@ use crate::palette::controller::{palette_colors_at, PaletteScheduler};
 use crate::palette::types::Palette;
 use crate::params::ParamValue;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShowCommand {
     Start,
     Pause,
@@ -25,6 +25,10 @@ pub enum ShowCommand {
     PrevVisual,
     NextPalette,
     PrevPalette,
+    /// Pick a palette by id. Holds until the next scheduled cue or PaletteAuto.
+    SelectPalette { id: String },
+    /// Drop the manual hold and restore the colour scheduled at the clock.
+    PaletteAuto,
     ToggleBlackout,
 }
 
@@ -71,9 +75,9 @@ impl ShowController {
 
     /// Plan p1-paths: every relative show-pack path resolves against the
     /// show.json directory. The validator's media preflight calls the
-    /// standalone `validation::media_exists` twin (same semantics), so this
-    /// stays as the runtime-load helper for cue-time path resolution.
-    #[allow(dead_code)]
+    /// standalone `validation::media_exists` twin (same semantics). Preset
+    /// load uses this so a pack-relative `media_path` is not looked up from
+    /// the process working directory.
     pub fn resolve_path(&self, stored: &str) -> PathBuf {
         let p = Path::new(stored);
         if p.is_absolute() {
@@ -188,7 +192,7 @@ impl ShowController {
                 self.clock.reset();
                 self.scene = SceneScheduler::default();
                 self.palette.reset();
-                Vec::new()
+                self.seek_events(0)
             }
             ShowCommand::Seek { secs } => {
                 let pos = Duration::from_secs(u64::from(secs));
@@ -227,6 +231,22 @@ impl ShowController {
             }
             ShowCommand::NextPalette => self.manual_palette(1),
             ShowCommand::PrevPalette => self.manual_palette(-1),
+            ShowCommand::SelectPalette { id } => {
+                if !self.palettes.contains_key(&id) {
+                    return Vec::new();
+                }
+                self.palette.manual_set(id.clone());
+                self.palettes
+                    .get(&id)
+                    .map(|p| vec![ShowVisualEvent::Palette(p.as_param_map())])
+                    .unwrap_or_default()
+            }
+            ShowCommand::PaletteAuto => {
+                let elapsed = self.clock.elapsed_at(now);
+                self.palette_at(elapsed)
+                    .map(|colors| vec![ShowVisualEvent::Palette(colors)])
+                    .unwrap_or_default()
+            }
             ShowCommand::ToggleBlackout => Vec::new(),
         }
     }
@@ -319,8 +339,19 @@ impl ShowController {
             next_scene: next_scene.map(|c| c.preset_id.clone()),
             palette: self.palette.active_palette_id.clone(),
             next_palette: next_pal.map(|c| c.palette_id.clone()),
+            next_scene_secs: next_scene.map(|c| c.at_secs),
+            next_palette_secs: next_pal.map(|c| c.at_secs),
+            palette_manual: self.palette.manual,
+            palettes: {
+                let mut ids: Vec<String> = self.palettes.keys().cloned().collect();
+                ids.sort();
+                ids
+            },
             blackout,
             validation: self.last_report.summary(),
+            grade_enabled: false,
+            grade_strength: 0.0,
+            notice: String::new(),
         }
     }
 }
@@ -335,8 +366,15 @@ pub struct ShowSnapshot {
     pub next_scene: Option<String>,
     pub palette: Option<String>,
     pub next_palette: Option<String>,
+    pub next_scene_secs: Option<u32>,
+    pub next_palette_secs: Option<u32>,
+    pub palette_manual: bool,
+    pub palettes: Vec<String>,
     pub blackout: bool,
     pub validation: String,
+    pub grade_enabled: bool,
+    pub grade_strength: f32,
+    pub notice: String,
 }
 
 impl ShowSnapshot {
@@ -353,8 +391,15 @@ impl ShowSnapshot {
             next_scene: None,
             palette: None,
             next_palette: None,
+            next_scene_secs: None,
+            next_palette_secs: None,
+            palette_manual: false,
+            palettes: Vec::new(),
             blackout,
             validation: "NO SHOW".into(),
+            grade_enabled: false,
+            grade_strength: 0.0,
+            notice: String::new(),
         }
     }
 }
@@ -552,5 +597,44 @@ mod tests {
         let events = c.tick(t0 + Duration::from_secs(3500));
         assert_eq!(c.palette.last_processed_scheduled_index, Some(1));
         assert!(events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
+    }
+
+    #[test]
+    fn manual_palette_holds_until_the_next_scheduled_cue() {
+        let mut c = controller();
+        let t0 = Instant::now();
+        c.handle(t0, ShowCommand::Start);
+        c.handle(
+            t0 + Duration::from_secs(60),
+            ShowCommand::SelectPalette {
+                id: "deep-blue".into(),
+            },
+        );
+        assert!(c.palette.manual);
+        assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
+        let held = c.tick(t0 + Duration::from_secs(90));
+        assert!(
+            held.iter().all(|e| !matches!(e, ShowVisualEvent::Palette(_))),
+            "a manual palette must not be replaced on the next ticks"
+        );
+        assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
+        let events = c.handle(t0 + Duration::from_secs(91), ShowCommand::PaletteAuto);
+        assert!(!c.palette.manual);
+        assert_eq!(c.palette.active_palette_id.as_deref(), Some("earth"));
+        assert!(events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
+    }
+
+    #[test]
+    fn relative_media_resolves_against_the_show_pack_not_the_working_directory() {
+        let mut c = controller();
+        c.pack_root = PathBuf::from("/show/hibernation");
+        assert_eq!(
+            c.resolve_path("assets/video/under-ice.mp4"),
+            PathBuf::from("/show/hibernation/assets/video/under-ice.mp4")
+        );
+        assert_eq!(
+            c.resolve_path("/Volumes/clips/plate.mp4"),
+            PathBuf::from("/Volumes/clips/plate.mp4")
+        );
     }
 }

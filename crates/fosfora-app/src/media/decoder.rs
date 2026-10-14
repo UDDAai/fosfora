@@ -50,6 +50,16 @@ impl MediaSource {
         false
     }
 
+    /// First stored frame. Live sources have none until a capture arrives.
+    pub fn first_frame(&self) -> Option<&super::types::DecodedFrame> {
+        match self {
+            MediaSource::Static(frame) => Some(frame),
+            MediaSource::Animated { frames, .. } => frames.first(),
+            #[cfg(feature = "webcam")]
+            MediaSource::Live { .. } => None,
+        }
+    }
+
     /// Get frame dimensions.
     pub fn dimensions(&self) -> (u32, u32) {
         match self {

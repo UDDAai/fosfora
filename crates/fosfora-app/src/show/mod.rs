@@ -1,4 +1,5 @@
 pub mod clock;
+pub mod scene_file;
 pub mod controller;
 pub mod definition;
 pub mod pack;

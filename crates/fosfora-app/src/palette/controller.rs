@@ -9,6 +9,9 @@ use crate::show::definition::{scheduled_index, PaletteCue};
 pub struct PaletteScheduler {
     pub last_processed_scheduled_index: Option<usize>,
     pub active_palette_id: Option<String>,
+    /// Operator picked a palette. Holds until the next scheduled cue or an
+    /// explicit return to automatic.
+    pub manual: bool,
 }
 
 impl PaletteScheduler {
@@ -18,12 +21,14 @@ impl PaletteScheduler {
 
     pub fn manual_set(&mut self, id: String) {
         self.active_palette_id = Some(id);
+        self.manual = true;
     }
 
     pub fn sync_index(&mut self, cues: &[PaletteCue], elapsed: Duration) {
         let secs = elapsed.as_secs().min(u64::from(u32::MAX)) as u32;
         self.last_processed_scheduled_index =
             scheduled_index(cues.iter().map(|c| c.at_secs), secs);
+        self.manual = false;
         if let Some(i) = self.last_processed_scheduled_index {
             self.active_palette_id = cues.get(i).map(|c| c.palette_id.clone());
         }
@@ -37,11 +42,17 @@ impl PaletteScheduler {
     ) -> Option<HashMap<String, ParamValue>> {
         let secs = elapsed.as_secs().min(u64::from(u32::MAX)) as u32;
         let idx = scheduled_index(cues.iter().map(|c| c.at_secs), secs);
-        if idx != self.last_processed_scheduled_index {
+        let crossed = idx != self.last_processed_scheduled_index;
+        if crossed {
             self.last_processed_scheduled_index = idx;
+            // The next scheduled cue ends a manual hold and follows the track.
+            self.manual = false;
             if let Some(i) = idx {
                 self.active_palette_id = cues.get(i).map(|c| c.palette_id.clone());
             }
+        }
+        if self.manual {
+            return None;
         }
         palette_colors_at(cues, palettes, elapsed)
     }
@@ -230,6 +241,31 @@ mod tests {
             .unwrap();
         assert_eq!(sched.last_processed_scheduled_index, Some(1));
         assert!(colors.contains_key("color-1"));
+    }
+
+    #[test]
+    fn manual_palette_is_not_replaced_before_the_next_cue() {
+        let cues = vec![
+            PaletteCue {
+                at_secs: 0,
+                palette_id: "a".into(),
+                transition_ms: 0,
+            },
+            PaletteCue {
+                at_secs: 3500,
+                palette_id: "b".into(),
+                transition_ms: 60_000,
+            },
+        ];
+        let mut map = HashMap::new();
+        map.insert("a".into(), pal("a", 0.0));
+        map.insert("b".into(), pal("b", 1.0));
+        let mut sched = PaletteScheduler::default();
+        sched.tick(&cues, &map, Duration::from_secs(1));
+        sched.manual_set("b".into());
+        assert!(sched.tick(&cues, &map, Duration::from_secs(30)).is_none());
+        assert!(sched.manual);
+        assert_eq!(sched.active_palette_id.as_deref(), Some("b"));
     }
 
     #[test]

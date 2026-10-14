@@ -928,20 +928,22 @@ impl ApplicationHandler for FosforaApp {
                             // set via `set_runtime` (non-dirtying).
                             if action.apply_palette_now {
                                 if let Some(show) = app.show.as_ref() {
-                                    let elapsed = show.clock.elapsed();
-                                    let colors =
+                                    // A manual pick must win over the colour
+                                    // the timeline would write this frame.
+                                    let colors = if show.palette.manual {
+                                        show.palette
+                                            .active_palette_id
+                                            .as_deref()
+                                            .and_then(|id| show.palettes.get(id))
+                                            .map(|p| p.as_param_map())
+                                    } else {
+                                        let elapsed = show.clock.elapsed();
                                         crate::palette::controller::palette_colors_at(
                                             &show.definition.palette_track,
                                             &show.palettes,
                                             elapsed,
                                         )
-                                        .or_else(|| {
-                                            show.palette
-                                                .active_palette_id
-                                                .as_deref()
-                                                .and_then(|id| show.palettes.get(id))
-                                                .map(|p| p.as_param_map())
-                                        });
+                                    };
                                     if let Some(colors) = colors {
                                         app.apply_palette_map(colors);
                                     }

@@ -37,6 +37,7 @@ pub enum PalettePanelAction {
     Edited,
     PrevPalette,
     NextPalette,
+    PaletteAuto,
     Created,
     Deleted,
     Duplicated,
@@ -51,11 +52,15 @@ pub fn draw_palette_panel(
     ui.label(RichText::new("PALETTES").size(11.0).strong());
 
     ui.horizontal(|ui| {
+        ui.label(if show.palette.manual { "MANUAL" } else { "AUTO" });
         if ui.small_button("◀ PREV").clicked() {
             action = PalettePanelAction::PrevPalette;
         }
         if ui.small_button("NEXT ▶").clicked() {
             action = PalettePanelAction::NextPalette;
+        }
+        if show.palette.manual && ui.small_button("AUTO").clicked() {
+            action = PalettePanelAction::PaletteAuto;
         }
     });
 

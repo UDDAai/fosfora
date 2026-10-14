@@ -146,6 +146,11 @@ pub struct App {
     pub quit_requested: bool,
     // Transient status error (displayed in status bar, auto-clears)
     pub status_error: Option<(String, Instant)>,
+    pub media_library: Option<crate::media::library::MediaLibrary>,
+    pub workspace_mode: crate::show::scene_file::WorkspaceMode,
+    pub save_state: crate::show::scene_file::SaveState,
+    pub scene_dirty: bool,
+    pub scene_dirty_at: Option<Instant>,
     // Webcam capture (feature-gated)
     #[cfg(feature = "webcam")]
     pub webcam_capture: Option<WebcamBackend>,
@@ -222,6 +227,7 @@ pub enum ShowCmd {
     PrevVisual,
     NextPalette,
     PrevPalette,
+    PaletteAuto,
 }
 
 impl ShowCmd {
@@ -238,8 +244,17 @@ impl ShowCmd {
             ShowCmd::PrevVisual => C::PrevVisual,
             ShowCmd::NextPalette => C::NextPalette,
             ShowCmd::PrevPalette => C::PrevPalette,
+            ShowCmd::PaletteAuto => C::PaletteAuto,
         }
     }
+}
+
+fn decoded_media_layer_bytes(media: &MediaLayer) -> u64 {
+    let (width, height) = media.source.dimensions();
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4)
+        .saturating_mul(media.source.frame_count() as u64)
 }
 
 impl App {
@@ -610,6 +625,11 @@ impl App {
             binding_matrix: crate::ui::panels::binding_matrix::BindingMatrixState::new(),
             quit_requested: false,
             status_error: None,
+            media_library: None,
+            workspace_mode: crate::show::scene_file::WorkspaceMode::Prepare,
+            save_state: crate::show::scene_file::SaveState::Saved,
+            scene_dirty: false,
+            scene_dirty_at: None,
             #[cfg(feature = "webcam")]
             webcam_capture: None,
             #[cfg(feature = "webcam")]
@@ -969,6 +989,13 @@ impl App {
                 self.web.update(values, changed, defs)
             };
             self.pending_web_triggers = web_result.triggers;
+            let had_layer_edits = !web_result.layer_params.is_empty()
+                || !web_result.layer_opacity.is_empty()
+                || !web_result.layer_blend.is_empty()
+                || !web_result.layer_enabled.is_empty()
+                || !web_result.effect_loads.is_empty()
+                || !web_result.media_place.is_empty()
+                || !web_result.media_transport.is_empty();
 
             // Apply layer-targeted WS messages
             for (layer_idx, name, value) in web_result.layer_params {
@@ -1031,61 +1058,169 @@ impl App {
                 }
             }
 
-            // Handle layer selection from web
+            // Handle layer selection from web. A click solos that layer onto
+            // the output: the row highlight alone left every layer above it
+            // covering the picture.
+            let mut web_stack_changed = false;
             if let Some(idx) = web_result.select_layer {
                 if idx < self.layer_stack.layers.len() {
+                    for (i, layer) in self.layer_stack.layers.iter_mut().enumerate() {
+                        layer.enabled = i == idx;
+                    }
                     self.layer_stack.active_layer = idx;
                     self.sync_active_layer();
-                    let msg = crate::web::state::build_active_layer_changed(idx);
-                    self.web.broadcast_json(&msg);
+                    web_stack_changed = true;
                 }
+            }
+            if web_result.show_all_layers {
+                for layer in &mut self.layer_stack.layers {
+                    layer.enabled = true;
+                }
+                web_stack_changed = true;
+            }
+            for path in web_result.add_media {
+                self.add_media_layer(path);
+                web_stack_changed = true;
+            }
+            for ids in &web_result.add_library {
+                if self.add_library_media(ids) {
+                    web_stack_changed = true;
+                }
+            }
+            for (index, id) in &web_result.replace_library {
+                if self.replace_library_media(*index, id) {
+                    web_stack_changed = true;
+                }
+            }
+            for (layer_idx, speed, looping) in &web_result.media_transport {
+                if let Some(layer) = self.layer_stack.layers.get_mut(*layer_idx) {
+                    if let Some(media) = layer.as_media_mut() {
+                        if let Some(speed) = speed {
+                            media.transport.speed = speed.clamp(0.05, 4.0);
+                        }
+                        if let Some(looping) = looping {
+                            media.transport.looping = *looping;
+                        }
+                    }
+                }
+            }
+            if web_result.rescan_library || self.media_library.as_mut().is_some_and(|lib| lib.poll_watch()) {
+                if let Some(library) = &mut self.media_library {
+                    library.rescan();
+                }
+            }
+            if web_result.import_uploads {
+                let uploads = crate::paths::config_root().join("uploads");
+                if let Some(library) = &mut self.media_library {
+                    match library.import_uploads(&uploads) {
+                        Ok(count) => log::info!("Imported {count} files from previous uploads"),
+                        Err(err) => self.status_error = Some((err, Instant::now())),
+                    }
+                }
+            }
+            if web_result.reveal_media {
+                if let Some(library) = &self.media_library {
+                    if let Err(err) = library.reveal_in_finder() {
+                        self.status_error = Some((err, Instant::now()));
+                    }
+                }
+            }
+            if web_result.link_folder {
+                if let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Link a media folder")
+                    .pick_folder()
+                {
+                    if let Some(library) = &mut self.media_library {
+                        library.link_folder(folder);
+                    }
+                }
+            }
+            if let Some(mode) = web_result.workspace_mode.clone() {
+                self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&mode);
+                self.remember_workspace();
+            }
+            if web_result.save_scene {
+                let _ = self.save_open_scene();
+                web_stack_changed = true;
+            }
+            let edited = web_stack_changed
+                || had_layer_edits
+                || web_result.touched_params
+                || web_result.grade_strength.is_some()
+                || web_result.grade_enabled.is_some()
+                || web_result.postprocess_enabled.is_some();
+            if edited && !web_result.save_scene {
+                self.note_scene_edit(now);
+            }
+            if web_stack_changed {
+                self.broadcast_web_state(now);
             }
 
             // Handle show commands from web
             for cmd in web_result.show_commands {
                 self.show_command(cmd);
             }
+            for (layer_idx, fit, width, x, y) in web_result.media_place {
+                if let Some(layer) = self.layer_stack.layers.get_mut(layer_idx) {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = crate::media::MediaFit::parse(&fit);
+                        media.width_scale = width;
+                        media.pos_x = x;
+                        media.pos_y = y;
+                    }
+                }
+            }
+            if let Some(strength) = web_result.grade_strength {
+                self.post_process.grade.strength = strength;
+            }
+            if let Some(enabled) = web_result.grade_enabled {
+                self.post_process.grade.enabled = enabled;
+            }
 
-            // Handle preset loads from web
+            // A pack preset is a scene. Remember its id so Save Scene writes
+            // that file, and do not start the show clock.
             let had_preset_loads = !web_result.preset_loads.is_empty();
             for preset_idx in web_result.preset_loads {
+                let preset_name = self
+                    .preset_store
+                    .presets
+                    .get(preset_idx)
+                    .map(|(name, _)| name.clone());
+                let pack_scene = preset_name.as_ref().is_some_and(|name| {
+                    self.show
+                        .as_ref()
+                        .is_some_and(|show| show.preset_ids.iter().any(|id| id == name))
+                });
+                if pack_scene && self.scene_dirty {
+                    if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
+                        if self.save_open_scene().is_err() {
+                            continue;
+                        }
+                    } else {
+                        self.status_error = Some((
+                            "Unsaved changes were not written. Press Save Changes to keep this scene."
+                                .into(),
+                            Instant::now(),
+                        ));
+                    }
+                }
                 self.load_preset(preset_idx);
+                if pack_scene {
+                    if let Some(name) = preset_name {
+                        if let Some(show) = self.show.as_mut() {
+                            show.scene.manual_set_preset(name);
+                        }
+                    }
+                    self.scene_dirty = false;
+                    self.scene_dirty_at = None;
+                    self.save_state = crate::show::scene_file::SaveState::Saved;
+                    self.remember_workspace();
+                }
             }
 
             // After preset load, broadcast full state so all clients update
             if had_preset_loads && self.web.client_count > 0 {
-                let show_snap = self
-                    .show
-                    .as_ref()
-                    .map(|s| s.snapshot(now, self.master_output.blackout))
-                    .unwrap_or_else(|| {
-                        crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
-                    });
-                let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
-                let layer_data: Vec<_> = self
-                    .layer_stack
-                    .layers
-                    .iter()
-                    .map(|l| {
-                        (
-                            &l.param_store,
-                            l.effect_index(),
-                            l.blend_mode,
-                            l.opacity,
-                            l.enabled,
-                            l.locked,
-                        )
-                    })
-                    .collect();
-                let state_json = crate::web::state::build_full_state(
-                    &self.effect_loader.effects,
-                    &layer_infos,
-                    self.layer_stack.active_layer,
-                    &layer_data,
-                    &self.preset_store,
-                    self.post_process.enabled,
-                    Some(&show_snap),
-                );
+                let state_json = self.full_state_json(now);
                 self.web.broadcast_json(&state_json);
             }
         }
@@ -1131,38 +1266,7 @@ impl App {
 
             // Broadcast full state to web clients after async preset load
             if self.web.client_count > 0 {
-                let show_snap = self
-                    .show
-                    .as_ref()
-                    .map(|s| s.snapshot(now, self.master_output.blackout))
-                    .unwrap_or_else(|| {
-                        crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
-                    });
-                let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
-                let layer_data: Vec<_> = self
-                    .layer_stack
-                    .layers
-                    .iter()
-                    .map(|l| {
-                        (
-                            &l.param_store,
-                            l.effect_index(),
-                            l.blend_mode,
-                            l.opacity,
-                            l.enabled,
-                            l.locked,
-                        )
-                    })
-                    .collect();
-                let state_json = crate::web::state::build_full_state(
-                    &self.effect_loader.effects,
-                    &layer_infos,
-                    self.layer_stack.active_layer,
-                    &layer_data,
-                    &self.preset_store,
-                    self.post_process.enabled,
-                    Some(&show_snap),
-                );
+                let state_json = self.full_state_json(now);
                 self.web.broadcast_json(&state_json);
             }
         }
@@ -1296,40 +1400,12 @@ impl App {
             self.web.broadcast_audio(&features);
         }
 
+        self.poll_media_library();
+        self.autosave_if_due(now);
+
         // Web: update latest state for new client initial sync
         if self.web.client_count > 0 || self.web.is_running() {
-            let show_snap = self
-                .show
-                .as_ref()
-                .map(|s| s.snapshot(now, self.master_output.blackout))
-                .unwrap_or_else(|| {
-                    crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
-                });
-            let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
-            let layer_data: Vec<_> = self
-                .layer_stack
-                .layers
-                .iter()
-                .map(|l| {
-                    (
-                        &l.param_store,
-                        l.effect_index(),
-                        l.blend_mode,
-                        l.opacity,
-                        l.enabled,
-                        l.locked,
-                    )
-                })
-                .collect();
-            let state_json = crate::web::state::build_full_state(
-                &self.effect_loader.effects,
-                &layer_infos,
-                self.layer_stack.active_layer,
-                &layer_data,
-                &self.preset_store,
-                self.post_process.enabled,
-                Some(&show_snap),
-            );
+            let state_json = self.full_state_json(now);
             self.web.update_latest_state(&state_json);
         }
 
@@ -1338,6 +1414,7 @@ impl App {
             if let LayerContent::Media(ref mut m) = layer.content {
                 m.advance(dt);
                 m.upload_frame(&self.gpu.queue);
+                m.write_placement(&self.gpu.queue);
             }
         }
 
@@ -2063,10 +2140,14 @@ impl App {
                     path.clone(),
                 );
                 let file_name = media_layer.file_name.clone();
-                let name = format!("Layer {}", num + 1);
-                self.layer_stack
-                    .layers
-                    .push(Layer::new_media(name, media_layer));
+                let mut layer = Layer::new_media(file_name.clone(), media_layer);
+                layer.custom_name = Some(file_name.clone());
+                if self.show.is_some() {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = crate::media::MediaFit::Fill;
+                    }
+                }
+                self.layer_stack.layers.push(layer);
                 self.layer_stack.active_layer = self.layer_stack.layers.len() - 1;
                 self.sync_active_layer();
                 log::info!("Added media layer: {}", file_name);
@@ -2076,6 +2157,144 @@ impl App {
                 self.status_error = Some((e, Instant::now()));
             }
         }
+    }
+
+    /// Add library clips in order. If any clip cannot fit, none are decoded.
+    pub fn add_library_media(&mut self, ids: &[String]) -> bool {
+        if self.library_paths(ids).is_err() {
+            if let Some(library) = &mut self.media_library {
+                library.rescan();
+            }
+        }
+        let paths = match self.library_paths(ids) {
+            Ok(paths) => paths,
+            Err(message) => {
+                self.status_error = Some((message, Instant::now()));
+                return false;
+            }
+        };
+        let plans: Vec<_> = paths.iter().map(|path| crate::media::library::plan_clip(path)).collect();
+        let existing = self.decoded_media_bytes();
+        if let Some(message) = crate::media::library::admission_error(
+            self.layer_stack.layers.len(),
+            existing,
+            crate::bindings::catalog::MAX_LAYERS,
+            &plans,
+        ) {
+            self.status_error = Some((message, Instant::now()));
+            return false;
+        }
+        for path in paths {
+            self.add_media_layer(path);
+        }
+        true
+    }
+
+    pub fn replace_library_media(&mut self, index: usize, id: &str) -> bool {
+        let paths = match self.library_paths(&[id.to_string()]) {
+            Ok(paths) => paths,
+            Err(message) => {
+                self.status_error = Some((message, Instant::now()));
+                return false;
+            }
+        };
+        let Some(path) = paths.into_iter().next() else {
+            return false;
+        };
+        if index >= self.layer_stack.layers.len() {
+            self.status_error = Some(("That layer is not in this scene".into(), Instant::now()));
+            return false;
+        }
+        let replaced_ram = self
+            .layer_stack
+            .layers
+            .get(index)
+            .and_then(|layer| layer.as_media())
+            .map(decoded_media_layer_bytes)
+            .unwrap_or(0);
+        let existing = self.decoded_media_bytes().saturating_sub(replaced_ram);
+        let plan = crate::media::library::plan_clip(&path);
+        if let Some(message) = crate::media::library::admission_error(0, existing, crate::bindings::catalog::MAX_LAYERS, &[plan]) {
+            self.status_error = Some((message, Instant::now()));
+            return false;
+        }
+        match crate::media::decoder::load_media(&path) {
+            Ok(source) => {
+                let hdr_format = GpuContext::hdr_format();
+                let media_layer = MediaLayer::new(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    hdr_format,
+                    self.gpu.surface_config.width,
+                    self.gpu.surface_config.height,
+                    source,
+                    path,
+                );
+                let file_name = media_layer.file_name.clone();
+                let previous = &self.layer_stack.layers[index];
+                let opacity = previous.opacity;
+                let blend_mode = previous.blend_mode;
+                let enabled = previous.enabled;
+                let placement = previous.as_media().map(|media| {
+                    (media.fit, media.width_scale, media.pos_x, media.pos_y, media.transport.speed, media.transport.looping)
+                });
+                let mut layer = Layer::new_media(file_name.clone(), media_layer);
+                layer.custom_name = Some(file_name);
+                layer.opacity = opacity;
+                layer.blend_mode = blend_mode;
+                layer.enabled = enabled;
+                if let Some((fit, width, x, y, speed, looping)) = placement {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = fit;
+                        media.width_scale = width;
+                        media.pos_x = x;
+                        media.pos_y = y;
+                        media.transport.speed = speed;
+                        media.transport.looping = looping;
+                    }
+                } else if self.show.is_some() {
+                    if let Some(media) = layer.as_media_mut() {
+                        media.fit = crate::media::MediaFit::Fill;
+                    }
+                }
+                self.layer_stack.layers[index] = layer;
+                self.layer_stack.active_layer = index;
+                self.sync_active_layer();
+                true
+            }
+            Err(err) => {
+                self.status_error = Some((err, Instant::now()));
+                false
+            }
+        }
+    }
+
+    fn library_paths(&self, ids: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
+        let library = self.media_library.as_ref().ok_or_else(|| "No media library is open".to_string())?;
+        let mut paths = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for id in ids {
+            match library.resolve(id) {
+                Some(path) => paths.push(path),
+                None => missing.push(id.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "Nothing was added. These files are not in the library: {}",
+                missing.join(", ")
+            ));
+        }
+        Ok(paths)
+    }
+
+    fn decoded_media_bytes(&self) -> u64 {
+        self.layer_stack
+            .layers
+            .iter()
+            .filter_map(|layer| layer.as_media())
+            .map(decoded_media_layer_bytes)
+            .sum()
     }
 
     /// Add a webcam layer. Starts capture if not already running.
@@ -2251,7 +2470,79 @@ impl App {
         self.sync_active_layer();
     }
 
+    fn show_snapshot(&self, now: Instant) -> crate::show::controller::ShowSnapshot {
+        let mut snap = self
+            .show
+            .as_ref()
+            .map(|s| s.snapshot(now, self.master_output.blackout))
+            .unwrap_or_else(|| {
+                crate::show::controller::ShowSnapshot::empty(self.master_output.blackout)
+            });
+        snap.grade_enabled = self.post_process.grade.enabled;
+        snap.grade_strength = self.post_process.grade.strength;
+        if let Some((msg, _)) = &self.status_error {
+            snap.notice = msg.clone();
+        }
+        snap
+    }
+
     /// Sync effect_loader.current_effect to match active layer.
+    fn full_state_json(&self, now: Instant) -> String {
+        let show_snap = self.show_snapshot(now);
+        let layer_infos = self.layer_stack.layer_infos(&self.effect_loader.effects);
+        let layer_data: Vec<_> = self
+            .layer_stack
+            .layers
+            .iter()
+            .map(|l| {
+                (
+                    &l.param_store,
+                    l.effect_index(),
+                    l.blend_mode,
+                    l.opacity,
+                    l.enabled,
+                    l.locked,
+                )
+            })
+            .collect();
+        let library = self
+            .media_library
+            .as_ref()
+            .map(|library| library.items.clone())
+            .unwrap_or_default();
+        let warnings = self
+            .media_library
+            .as_ref()
+            .map(|library| library.warnings.clone())
+            .unwrap_or_default();
+        let save_detail = self.save_state.detail();
+        let workspace = crate::web::state::WebWorkspace {
+            library: &library,
+            warnings: &warnings,
+            save_state: self.save_state.code(),
+            save_detail: &save_detail,
+            mode: self.workspace_mode.as_str(),
+        };
+        crate::web::state::build_full_state(
+            &self.effect_loader.effects,
+            &layer_infos,
+            self.layer_stack.active_layer,
+            &layer_data,
+            &self.preset_store,
+            self.post_process.enabled,
+            Some(&show_snap),
+            &workspace,
+        )
+    }
+
+    fn broadcast_web_state(&mut self, now: Instant) {
+        if self.web.client_count == 0 {
+            return;
+        }
+        let state_json = self.full_state_json(now);
+        self.web.broadcast_json(&state_json);
+    }
+
     pub fn sync_active_layer(&mut self) {
         if let Some(layer) = self.layer_stack.active() {
             self.effect_loader.current_effect = layer.effect_index();
@@ -2307,7 +2598,7 @@ impl App {
         crate::bindings::apply::apply_binding_target(&mut ctx, target, value, rising);
     }
 
-    pub fn save_preset(&mut self, name: &str) {
+    fn capture_current_preset(&mut self) -> Option<crate::preset::Preset> {
         let mut chains = crate::trama::persist::capture(&self.layer_stack, &self.trama);
         let mut layer_chains = std::mem::take(&mut chains.layers).into_iter();
         let layer_presets: Vec<LayerPreset> = self
@@ -2326,6 +2617,13 @@ impl App {
                     .map(|m| m.file_path.to_string_lossy().to_string());
                 let media_speed = l.as_media().map(|m| m.transport.speed);
                 let media_looping = l.as_media().map(|m| m.transport.looping);
+                let media_fit = l
+                    .as_media()
+                    .map(|m| m.fit.as_str().to_string())
+                    .unwrap_or_else(|| "fit".to_string());
+                let media_width = l.as_media().map(|m| m.width_scale).unwrap_or(1.0);
+                let media_pos_x = l.as_media().map(|m| m.pos_x).unwrap_or(0.0);
+                let media_pos_y = l.as_media().map(|m| m.pos_y).unwrap_or(0.0);
                 let webcam_device = l
                     .as_media()
                     .filter(|m| m.is_live())
@@ -2421,6 +2719,10 @@ impl App {
                     media_path,
                     media_speed,
                     media_looping,
+                    media_fit,
+                    media_width,
+                    media_pos_x,
+                    media_pos_y,
                     webcam_device,
                     particle_video_path,
                     particle_video_speed,
@@ -2450,36 +2752,224 @@ impl App {
             l.effect_name.is_empty() && l.media_path.is_none() && l.webcam_device.is_none()
         }) {
             log::warn!("No effects or media loaded, cannot save preset");
-            return;
+            return None;
         }
 
         let postprocess = self.current_postprocess();
-        // Volumetric (R3) is a global mode, not a per-layer property — persist
-        // it at preset scope like `postprocess`.
         let volumetric = Some(crate::preset::VolumetricPreset {
             enabled: self.volumetric_enabled,
             params: self.volumetric_params,
         });
+        Some(crate::preset::Preset {
+            layers: layer_presets,
+            active_layer: self.layer_stack.active_layer,
+            postprocess,
+            volumetric,
+            master_chain: chains.master,
+        })
+    }
+
+    pub fn save_preset(&mut self, name: &str) {
+        if self
+            .show
+            .as_ref()
+            .is_some_and(|show| show.preset_ids.iter().any(|id| id == name))
+        {
+            let _ = self.save_scene_id(name);
+            return;
+        }
+        let Some(preset) = self.capture_current_preset() else {
+            return;
+        };
         match self.preset_store.save(
             name,
-            layer_presets,
-            self.layer_stack.active_layer,
-            &postprocess,
-            volumetric,
-            chains.master,
+            preset.layers,
+            preset.active_layer,
+            &preset.postprocess,
+            preset.volumetric,
+            preset.master_chain,
         ) {
             Ok(idx) => {
                 log::info!("Saved preset '{}' at index {}", name, idx);
-                // Save preset-scoped bindings as sidecar
                 self.binding_bus.save_preset_bindings(name);
                 self.binding_bus.save_global();
-                // Sidecar is now on disk — no longer an unsaved change.
                 self.binding_bus.preset_scope_dirty = false;
+                self.restore_pack_presets_after_user_scan();
             }
             Err(e) => {
                 log::error!("Failed to save preset: {e}");
                 self.status_error = Some((format!("Failed to save preset: {e}"), Instant::now()));
             }
+        }
+    }
+
+    /// Write the live stack into the show pack under the current scene id.
+    pub fn save_open_scene(&mut self) -> Result<(), String> {
+        let id = self
+            .show
+            .as_ref()
+            .and_then(|show| show.scene.active_preset_id.clone())
+            .ok_or_else(|| "No scene is selected".to_string())?;
+        self.save_scene_id(&id)
+    }
+
+    fn save_scene_id(&mut self, id: &str) -> Result<(), String> {
+        let pack_root = self
+            .show
+            .as_ref()
+            .map(|show| show.pack_root.clone())
+            .ok_or_else(|| "No show pack is open".to_string())?;
+        self.save_state = crate::show::scene_file::SaveState::Saving;
+        let Some(mut preset) = self.capture_current_preset() else {
+            let message = "Nothing to save on this scene".to_string();
+            self.save_state = crate::show::scene_file::SaveState::Failed(message.clone());
+            self.status_error = Some((message.clone(), Instant::now()));
+            return Err(message);
+        };
+        crate::show::scene_file::relativize_preset(&pack_root, &mut preset);
+        if let Err(err) = crate::show::scene_file::write_scene_preset(&pack_root, id, &preset) {
+            let message = err.to_string();
+            self.save_state = crate::show::scene_file::SaveState::Failed(message.clone());
+            self.status_error = Some((format!("Save failed: {message}"), Instant::now()));
+            return Err(message);
+        }
+        crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
+        if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == id) {
+            self.preset_store.current_preset = Some(index);
+        }
+        self.scene_dirty = false;
+        self.scene_dirty_at = None;
+        self.save_state = crate::show::scene_file::SaveState::Saved;
+        self.remember_workspace();
+        if let Some(library) = &mut self.media_library {
+            library.rescan();
+        }
+        log::info!("Saved scene '{id}' into {}", pack_root.display());
+        Ok(())
+    }
+
+    fn remember_workspace(&mut self) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        let scene = self
+            .show
+            .as_ref()
+            .and_then(|show| show.scene.active_preset_id.clone());
+        let file = crate::show::scene_file::WorkspaceFile {
+            scene,
+            mode: self.workspace_mode.as_str().to_string(),
+            grade_enabled: self.post_process.grade.enabled,
+            grade_strength: self.post_process.grade.strength,
+        };
+        if let Err(err) = file.store(&root) {
+            log::warn!("workspace save: {err:#}");
+        }
+    }
+
+    fn restore_editing_session(&mut self) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        let workspace = crate::show::scene_file::WorkspaceFile::load(&root);
+        self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&workspace.mode);
+        self.post_process.grade.enabled = workspace.grade_enabled;
+        self.post_process.grade.strength = workspace.grade_strength;
+        let known = |id: &str| self.preset_store.presets.iter().any(|(name, _)| name == id);
+        let scene = workspace
+            .scene
+            .filter(|id| known(id))
+            .or_else(|| {
+                self.show
+                    .as_ref()
+                    .and_then(|show| show.definition.scene_track.first())
+                    .map(|cue| cue.preset_id.clone())
+            });
+        if let Some(id) = scene {
+            if let Some(show) = self.show.as_mut() {
+                show.scene.manual_set_preset(id.clone());
+            }
+            if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == &id)
+            {
+                self.load_preset(index);
+            }
+        }
+        self.scene_dirty = false;
+        self.scene_dirty_at = None;
+        self.save_state = crate::show::scene_file::SaveState::Saved;
+    }
+
+    fn poll_media_library(&mut self) {
+        let dirty = self
+            .media_library
+            .as_mut()
+            .is_some_and(|library| library.poll_watch());
+        if dirty {
+            if let Some(library) = &mut self.media_library {
+                library.rescan();
+            }
+        }
+    }
+
+    fn note_scene_edit(&mut self, now: Instant) {
+        if self.show.is_none() {
+            return;
+        }
+        self.scene_dirty = true;
+        self.scene_dirty_at = Some(now);
+        if !matches!(self.save_state, crate::show::scene_file::SaveState::Saving) {
+            self.save_state = crate::show::scene_file::SaveState::Unsaved;
+        }
+    }
+
+    fn autosave_if_due(&mut self, now: Instant) {
+        if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare || !self.scene_dirty {
+            return;
+        }
+        let Some(at) = self.scene_dirty_at else {
+            return;
+        };
+        if now.saturating_duration_since(at) < std::time::Duration::from_millis(1500) {
+            return;
+        }
+        let _ = self.save_open_scene();
+    }
+
+    fn restore_pack_presets_after_user_scan(&mut self) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        self.merge_pack_presets(&root);
+    }
+
+    fn merge_pack_presets(&mut self, root: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(root.join("presets")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(preset) = serde_json::from_str::<crate::preset::Preset>(&text) else {
+                continue;
+            };
+            crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
+        }
+    }
+
+    /// With a show pack open, relative media paths resolve against the
+    /// show.json directory. Absolute paths and no-pack loads stay as stored.
+    fn resolve_show_media_path(&self, stored: &str) -> std::path::PathBuf {
+        match self.show.as_ref() {
+            Some(show) => show.resolve_path(stored),
+            None => std::path::PathBuf::from(stored),
         }
     }
 
@@ -2548,11 +3038,13 @@ impl App {
                 continue;
             }
             if let Some(ref media_path) = lp.media_path {
-                let path = std::path::PathBuf::from(media_path);
+                let path = self.resolve_show_media_path(media_path);
                 if path.exists() {
                     media_jobs.push((i, path));
                 } else {
-                    log::warn!("Media file '{}' not found for layer {}", media_path, i);
+                    let msg = format!("Missing media '{media_path}' on layer {i}");
+                    log::warn!("{msg}");
+                    self.status_error = Some((msg, Instant::now()));
                 }
             }
         }
@@ -2664,7 +3156,7 @@ impl App {
 
             if !is_webcam_layer {
                 if let Some(ref media_path) = lp.media_path {
-                    let path = std::path::PathBuf::from(media_path);
+                    let path = self.resolve_show_media_path(media_path);
                     // Try pre-decoded media first, fall back to sync decode
                     let loaded = if let Some(decode_result) = decoded_media.remove(&i) {
                         match decode_result {
@@ -2682,7 +3174,9 @@ impl App {
                         self.load_media_on_layer(i, path.clone());
                         true
                     } else {
-                        log::warn!("Media file '{}' not found for layer {}", media_path, i);
+                        let msg = format!("Missing media '{media_path}' on layer {i}");
+                        log::warn!("{msg}");
+                        self.status_error = Some((msg, Instant::now()));
                         false
                     };
 
@@ -2696,6 +3190,10 @@ impl App {
                                 if let Some(looping) = lp.media_looping {
                                     m.transport.looping = looping;
                                 }
+                                m.fit = crate::media::MediaFit::parse(&lp.media_fit);
+                                m.width_scale = lp.media_width.clamp(0.25, 3.0);
+                                m.pos_x = lp.media_pos_x.clamp(-1.0, 1.0);
+                                m.pos_y = lp.media_pos_y.clamp(-1.0, 1.0);
                             }
                         }
                     }
@@ -3305,6 +3803,7 @@ impl App {
             PalettePanelAction::Edited => out.palette_edited = true,
             PalettePanelAction::PrevPalette => out.show = Some(ShowCmd::PrevPalette),
             PalettePanelAction::NextPalette => out.show = Some(ShowCmd::NextPalette),
+            PalettePanelAction::PaletteAuto => out.show = Some(ShowCmd::PaletteAuto),
             // CRUD actions mutate the open pack directly — same save path as
             // edits (deleted palettes remove their file; created/renamed write).
             PalettePanelAction::Created => out.palette_edited = true,
@@ -3337,9 +3836,11 @@ impl App {
         preset_ids.sort();
         for id in &preset_ids {
             if let Some(preset) = pack.presets.get(id) {
-                if !self.preset_store.presets.iter().any(|(n, _)| n == id) {
-                    self.preset_store.presets.push((id.clone(), preset.clone()));
-                }
+                crate::show::scene_file::upsert_named(
+                    &mut self.preset_store.presets,
+                    id,
+                    preset.clone(),
+                );
             }
         }
         // Bridge show cues into the native scene-timeline types: one cue per
@@ -3499,6 +4000,27 @@ impl App {
         );
         controller.last_report = report;
         self.show = Some(controller);
+        let root = self
+            .show
+            .as_ref()
+            .map(|show| show.pack_root.clone())
+            .unwrap_or_default();
+        self.media_library = Some(crate::media::library::MediaLibrary::open(root));
+        self.restore_editing_session();
+        // Hibernation's picture is graded from the open palette. Strength 0
+        // leaves ordinary Fosfora presets untouched; a show pack starts on.
+        self.post_process.grade.enabled = true;
+        self.post_process.grade.strength = 0.75;
+        let opening = self.show.as_ref().and_then(|show| {
+            crate::palette::controller::palette_colors_at(
+                &show.definition.palette_track,
+                &show.palettes,
+                std::time::Duration::ZERO,
+            )
+        });
+        if let Some(colors) = opening {
+            self.apply_palette_map(colors);
+        }
     }
 
     /// True while palette automation owns bound color params: a pack is open
@@ -3640,6 +4162,16 @@ impl App {
         }
     }
 
+fn slot_rgb(
+    colors: &std::collections::HashMap<String, crate::params::ParamValue>,
+    slot: &str,
+) -> Option<[f32; 3]> {
+    match colors.get(slot) {
+        Some(crate::params::ParamValue::Color(c)) => Some([c[0], c[1], c[2]]),
+        _ => None,
+    }
+}
+
     /// Route an interpolated slot→color map through the active preset's
     /// `PaletteBindingSet` and write via `set_runtime` (never dirty).
     ///
@@ -3647,6 +4179,20 @@ impl App {
     /// first set in the pack applies — every Hibernation preset ships one,
     /// so this only fires for ad-hoc packs.
     pub fn apply_palette_map(&mut self, colors: std::collections::HashMap<String, crate::params::ParamValue>) {
+        // Whole-frame grade roles. color-5 and color-6 stay on the per-effect
+        // bindings (highlights and line work) and are not consumed here.
+        if let Some(c) = Self::slot_rgb(&colors, "color-1") {
+            self.post_process.grade.shadow = c;
+        }
+        if let Some(c) = Self::slot_rgb(&colors, "color-2") {
+            self.post_process.grade.mid = c;
+        }
+        if let Some(c) = Self::slot_rgb(&colors, "color-3") {
+            self.post_process.grade.high = c;
+        }
+        if let Some(c) = Self::slot_rgb(&colors, "color-4") {
+            self.post_process.grade.accent = c;
+        }
         let Some(show) = self.show.as_ref() else {
             return;
         };
@@ -3676,15 +4222,33 @@ impl App {
     /// palette events atomically (seek applies both at once).
     pub fn show_command(&mut self, cmd: crate::show::controller::ShowCommand) {
         let now = Instant::now();
-        if matches!(
-            cmd,
-            crate::show::controller::ShowCommand::ToggleBlackout
-        ) {
+        if matches!(cmd, crate::show::controller::ShowCommand::ToggleBlackout) {
             self.master_output.blackout = !self.master_output.blackout;
             return;
         }
+        let switches_scene = matches!(
+            cmd,
+            crate::show::controller::ShowCommand::Start
+                | crate::show::controller::ShowCommand::Reset
+                | crate::show::controller::ShowCommand::Seek { .. }
+                | crate::show::controller::ShowCommand::NextVisual
+                | crate::show::controller::ShowCommand::PrevVisual
+        );
+        if switches_scene && self.scene_dirty {
+            if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
+                if self.save_open_scene().is_err() {
+                    return;
+                }
+            } else {
+                self.status_error = Some((
+                    "Unsaved changes were not written. Press Save Changes to keep this scene."
+                        .into(),
+                    Instant::now(),
+                ));
+            }
+        }
         let events = match self.show.as_mut() {
-            Some(show) => show.handle(now, cmd),
+            Some(show) => show.handle(now, cmd.clone()),
             None => return,
         };
         for event in events {
@@ -3696,8 +4260,7 @@ impl App {
             cmd,
             crate::show::controller::ShowCommand::Seek { .. }
                 | crate::show::controller::ShowCommand::Start
-                | crate::show::controller::ShowCommand::NextPalette
-                | crate::show::controller::ShowCommand::PrevPalette
+                | crate::show::controller::ShowCommand::Reset
         ) {
             let (elapsed, colors) = match self.show.as_mut() {
                 Some(show) => {
@@ -3715,6 +4278,11 @@ impl App {
             if let Some(colors) = colors {
                 self.apply_palette_map(colors);
             }
+        }
+        if switches_scene {
+            self.scene_dirty = false;
+            self.save_state = crate::show::scene_file::SaveState::Saved;
+            self.remember_workspace();
         }
     }
 

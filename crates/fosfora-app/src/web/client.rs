@@ -121,6 +121,65 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::SelectLayer { index })
         }
+        "show_all_layers" => Some(WsInMessage::ShowAllLayers),
+        "rescan_library" => Some(WsInMessage::RescanLibrary),
+        "import_previous_uploads" => Some(WsInMessage::ImportPreviousUploads),
+        "reveal_media_folder" => Some(WsInMessage::RevealMediaFolder),
+        "link_media_folder" => Some(WsInMessage::LinkMediaFolder),
+        "save_scene" => Some(WsInMessage::SaveScene),
+        "set_workspace_mode" => {
+            let mode = v.get("mode")?.as_str()?.to_string();
+            Some(WsInMessage::SetWorkspaceMode { mode })
+        }
+        "add_library_media" => {
+            let ids = v
+                .get("ids")?
+                .as_array()?
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect();
+            Some(WsInMessage::AddLibraryMedia { ids })
+        }
+        "replace_library_media" => {
+            let layer = v.get("layer")?.as_u64()? as usize;
+            let id = v.get("id")?.as_str()?.to_string();
+            Some(WsInMessage::ReplaceLibraryMedia { layer, id })
+        }
+        "set_media_transport" => {
+            let layer = v.get("layer")?.as_u64()? as usize;
+            let speed = v.get("speed").and_then(|n| n.as_f64()).map(|n| n as f32);
+            let looping = v.get("looping").and_then(|n| n.as_bool());
+            Some(WsInMessage::SetMediaTransport {
+                layer,
+                speed,
+                looping,
+            })
+        }
+        "set_media_place" => {
+            let layer = v.get("layer")?.as_u64()? as usize;
+            let fit = v.get("fit")?.as_str()?.to_string();
+            let width = v.get("width").and_then(|n| n.as_f64()).unwrap_or(1.0) as f32;
+            let x = v.get("x").and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
+            let y = v.get("y").and_then(|n| n.as_f64()).unwrap_or(0.0) as f32;
+            Some(WsInMessage::SetMediaPlace {
+                layer,
+                fit,
+                width: width.clamp(0.25, 3.0),
+                x: x.clamp(-1.0, 1.0),
+                y: y.clamp(-1.0, 1.0),
+            })
+        }
+        "set_grade" => {
+            let strength = v
+                .get("strength")
+                .and_then(|n| n.as_f64())
+                .map(|n| (n as f32).clamp(0.0, 1.0));
+            let enabled = v.get("enabled").and_then(|n| n.as_bool());
+            if strength.is_none() && enabled.is_none() {
+                return None;
+            }
+            Some(WsInMessage::SetGrade { strength, enabled })
+        }
         "set_layer_opacity" => {
             let layer = v.get("layer")?.as_u64()? as usize;
             let value = v.get("value")?.as_f64()? as f32;
@@ -212,6 +271,11 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
                 "prev_visual" => crate::show::controller::ShowCommand::PrevVisual,
                 "next_palette" => crate::show::controller::ShowCommand::NextPalette,
                 "prev_palette" => crate::show::controller::ShowCommand::PrevPalette,
+                "select_palette" => {
+                    let id = v.get("id")?.as_str()?.to_string();
+                    crate::show::controller::ShowCommand::SelectPalette { id }
+                }
+                "palette_auto" => crate::show::controller::ShowCommand::PaletteAuto,
                 _ => return None,
             };
             Some(WsInMessage::ShowCommand(cmd))

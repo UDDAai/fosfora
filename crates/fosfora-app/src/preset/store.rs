@@ -24,6 +24,14 @@ const BUILTIN_PRESETS: &[(&str, &str)] = &[
     ("Spectral Eye", BUILTIN_SPECTRAL_EYE),
 ];
 
+fn default_media_fit() -> String {
+    "fit".into()
+}
+
+fn default_media_scale() -> f32 {
+    1.0
+}
+
 /// Per-layer state saved in a preset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerPreset {
@@ -52,6 +60,16 @@ pub struct LayerPreset {
     pub media_speed: Option<f32>,
     #[serde(default)]
     pub media_looping: Option<bool>,
+    /// "fit" letterboxes (historical default), "fill" covers, "width" uses `media_width`.
+    #[serde(default = "default_media_fit")]
+    pub media_fit: String,
+    /// Canvas width as a fraction when `media_fit` is "width". 1.0 is 100%.
+    #[serde(default = "default_media_scale")]
+    pub media_width: f32,
+    #[serde(default)]
+    pub media_pos_x: f32,
+    #[serde(default)]
+    pub media_pos_y: f32,
     #[serde(default)]
     pub webcam_device: Option<String>,
     /// Absolute path to video file used as particle image source.
@@ -657,6 +675,10 @@ mod tests {
                 media_path: None,
                 media_speed: None,
                 media_looping: None,
+                media_fit: "fit".into(),
+                media_width: 1.0,
+                media_pos_x: 0.0,
+                media_pos_y: 0.0,
                 webcam_device: None,
                 particle_video_path: None,
                 particle_video_speed: None,
@@ -864,6 +886,9 @@ mod tests {
         let lp: LayerPreset = serde_json::from_str(json).unwrap();
         assert!(lp.lattice.is_none());
         assert!(lp.particle_sim.is_none());
+        assert_eq!(lp.media_fit, "fit");
+        assert!((lp.media_width - 1.0).abs() < 1e-5);
+        assert_eq!(lp.media_pos_x, 0.0);
     }
 
     #[test]
@@ -891,6 +916,10 @@ mod tests {
             media_path: None,
             media_speed: None,
             media_looping: None,
+            media_fit: "fit".into(),
+            media_width: 1.0,
+            media_pos_x: 0.0,
+            media_pos_y: 0.0,
             webcam_device: None,
             particle_video_path: None,
             particle_video_speed: None,

@@ -13,22 +13,29 @@
   --border: #3a3a3a; --text: #e0e0e0; --text2: #888;
   --accent: #5090e0; --accent2: #3a70c0;
   --beat: #ff6040; --green: #50c070;
-  --slider-h: 52px; --btn-min: 52px;
+  --slider-h: 22px; --btn-min: 32px;
 }
-html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; font-size: 15px; overflow: hidden; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; font-size: 13px; overflow: hidden; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 body { display: flex; flex-direction: column; }
+.is-hidden { display: none; }
+.section-gap { margin-top: 10px; }
+.param-header { margin-bottom: 6px; padding: 4px 2px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text2); }
+.perform-btn.wide { display: block; width: 100%; margin-top: 6px; }
+.hint-gap { margin-top: 8px; }
+.accent { color: var(--accent); font-weight: 600; }
+.muted { color: var(--text2); margin: 0 4px; }
 
 /* Header */
-.header { display: flex; align-items: center; padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 10px; min-height: 48px; }
-.header h1 { font-size: 17px; font-weight: 600; }
+.header { display: flex; align-items: center; padding: 6px 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 8px; min-height: 32px; }
+.header h1 { font-size: 14px; font-weight: 600; }
 .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #555; flex-shrink: 0; transition: background 0.15s; }
 .status-dot.connected { background: var(--green); }
 .status-dot.beat { background: var(--beat); }
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text2); }
 
-/* Audio bars — labeled, 60px tall */
-.audio-section { background: var(--surface); padding: 6px 12px 8px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
-.audio-bars { display: flex; height: 56px; gap: 4px; }
+/* Audio bars */
+.audio-section { background: var(--surface); padding: 4px 12px 5px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
+.audio-bars { display: flex; height: 28px; gap: 4px; }
 .audio-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .audio-bar { flex: 1; width: 100%; background: var(--border); border-radius: 3px; position: relative; overflow: hidden; }
 .audio-bar-fill { position: absolute; bottom: 0; left: 0; right: 0; background: var(--accent); border-radius: 3px; transition: height 60ms linear; }
@@ -36,78 +43,115 @@ body { display: flex; flex-direction: column; }
 
 /* Tabs — WCAG 2.5.8 min 48px */
 .tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.tab { flex: 1; padding: 14px 8px; text-align: center; font-size: 14px; color: var(--text2); border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent; min-height: 48px; }
+.tab { flex: 1; padding: 7px 6px; text-align: center; font-size: 13px; color: var(--text2); border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent; min-height: 32px; }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
 /* Content */
-.content { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px; }
+.content { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 8px; }
 .panel { display: none; }
 .panel.active { display: block; }
 
 /* Section */
-.section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text2); letter-spacing: 0.5px; margin: 16px 0 8px; }
+.section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text2); letter-spacing: 0.5px; margin: 10px 0 6px; }
 .section-title:first-child { margin-top: 4px; }
 
 /* Effects grid — min 52px buttons */
-.effects-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.effect-btn { padding: 14px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; text-align: center; cursor: pointer; min-height: var(--btn-min); display: flex; align-items: center; justify-content: center; }
+.effects-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.effect-btn { padding: 6px 6px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; text-align: center; cursor: pointer; min-height: var(--btn-min); display: flex; align-items: center; justify-content: center; }
 .effect-btn.active { background: var(--accent2); border-color: var(--accent); color: #fff; }
 .effect-btn:active { opacity: 0.8; }
 
 /* Param sliders — 52px height, fat thumb */
-.param-row { margin-bottom: 10px; }
-.param-label { display: flex; justify-content: space-between; margin-bottom: 4px; padding: 0 2px; }
-.param-name { font-size: 13px; color: var(--text2); }
-.param-value { font-size: 13px; color: var(--text2); font-variant-numeric: tabular-nums; }
-.param-slider { -webkit-appearance: none; appearance: none; width: 100%; height: var(--slider-h); background: var(--surface2); border-radius: 8px; outline: none; touch-action: none; border: 1px solid var(--border); }
-.param-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 32px; height: 44px; background: var(--accent); border-radius: 6px; cursor: pointer; }
-.param-slider::-moz-range-thumb { width: 32px; height: 44px; background: var(--accent); border-radius: 6px; cursor: pointer; border: none; }
+.param-row { margin-bottom: 6px; }
+.param-label { display: flex; justify-content: space-between; margin-bottom: 2px; padding: 0 2px; }
+.param-name { font-size: 12px; color: var(--text2); }
+.param-value { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
+.param-slider { -webkit-appearance: none; appearance: none; width: 100%; height: var(--slider-h); background: var(--surface2); border-radius: 6px; outline: none; touch-action: none; border: 1px solid var(--border); }
+.param-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 18px; background: var(--accent); border-radius: 4px; cursor: pointer; }
+.param-slider::-moz-range-thumb { width: 16px; height: 18px; background: var(--accent); border-radius: 4px; cursor: pointer; border: none; }
 .param-slider::-webkit-slider-runnable-track { height: var(--slider-h); border-radius: 8px; }
 .param-slider::-moz-range-track { height: var(--slider-h); border-radius: 8px; background: var(--surface2); }
 
 /* Bool toggles — 52px min */
-.param-toggle { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; min-height: var(--btn-min); margin-bottom: 10px; font-size: 14px; }
+.param-toggle { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; min-height: var(--btn-min); margin-bottom: 6px; font-size: 13px; }
 .param-toggle.on { background: var(--accent2); border-color: var(--accent); }
 .param-toggle-dot { width: 14px; height: 14px; border-radius: 50%; background: #555; flex-shrink: 0; }
 .param-toggle.on .param-toggle-dot { background: #fff; }
 
+.layer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.layer-actions .trigger-btn { display: flex; align-items: center; justify-content: center; }
+.layer-hint { font-size: 12px; color: var(--text2); margin: 0 2px 10px; }
+.picture-box, .perform-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+.mode-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 6px 0; }
+.mode-btn, .perform-btn { min-height: 30px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; font-size: 13px; }
+.mode-btn.on, .perform-btn.on { background: var(--accent2); border-color: var(--accent); color: #fff; }
+.perform-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.clock { font-size: 28px; font-variant-numeric: tabular-nums; letter-spacing: 1px; line-height: 1.1; }
+.cue-line { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-size: 13px; }
+.badge { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; padding: 4px 8px; border-radius: 6px; background: var(--surface); }
+.badge.manual { background: #6a4020; color: #ffd0a0; }
+.badge.auto { background: #1d4a32; color: #b6f0cc; }
+.notice { color: #ffb0a0; font-size: 13px; margin-top: 8px; }
+.palette-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#addMediaLabel.busy { opacity: 0.6; }
+
 /* Layers — bigger cards */
-.layer-card { display: flex; align-items: center; gap: 10px; padding: 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; min-height: var(--btn-min); }
+.layer-card { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; min-height: 36px; }
 .layer-card.active { border-color: var(--accent); border-width: 2px; }
 .layer-card.disabled { opacity: 0.5; }
-.layer-info { flex: 1; cursor: pointer; min-height: 40px; display: flex; flex-direction: column; justify-content: center; }
-.layer-name { font-size: 14px; font-weight: 500; }
-.layer-effect { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.layer-info { flex: 1; cursor: pointer; min-height: 28px; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+.layer-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-effect { font-size: 11px; color: var(--text2); margin-top: 1px; }
+.layer-thumb { width: 56px; height: 32px; object-fit: cover; border-radius: 4px; background: #111; flex-shrink: 0; }
+.layer-thumb[hidden] { display: none; }
 .layer-controls { display: flex; align-items: center; gap: 8px; }
 .layer-opacity { width: 70px; }
-.layer-opacity input { width: 100%; height: 32px; -webkit-appearance: none; appearance: none; background: var(--border); border-radius: 4px; touch-action: none; }
-.layer-opacity input::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 28px; background: var(--accent); border-radius: 4px; }
-.layer-opacity input::-moz-range-thumb { width: 18px; height: 28px; background: var(--accent); border-radius: 4px; border: none; }
+.layer-opacity input { width: 100%; height: 18px; -webkit-appearance: none; appearance: none; background: var(--border); border-radius: 4px; touch-action: none; }
+.layer-opacity input::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 16px; background: var(--accent); border-radius: 3px; }
+.layer-opacity input::-moz-range-thumb { width: 12px; height: 16px; background: var(--accent); border-radius: 3px; border: none; }
 
 /* Blend dropdown — bigger */
-.blend-select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 8px; font-size: 13px; min-height: 40px; }
+.blend-select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 12px; min-height: 28px; }
 
 /* Enable checkbox — bigger touch target */
-.layer-cb { width: 24px; height: 24px; accent-color: var(--accent); cursor: pointer; }
+.layer-cb { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 
 /* Presets — bigger */
-.preset-btn { display: block; width: 100%; padding: 16px 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; text-align: left; cursor: pointer; margin-bottom: 8px; min-height: var(--btn-min); }
+.preset-btn { display: block; width: 100%; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; margin-bottom: 6px; min-height: var(--btn-min); }
 .preset-btn.active { background: var(--accent2); border-color: var(--accent); color: #fff; }
 .preset-btn:active { opacity: 0.8; }
 .preset-section-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; margin: 10px 0 4px; }
 
 /* Triggers — bigger */
 .trigger-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.trigger-btn { padding: 16px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; text-align: center; cursor: pointer; min-height: var(--btn-min); }
+.trigger-btn { padding: 6px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; text-align: center; cursor: pointer; min-height: var(--btn-min); }
 .trigger-btn:active { background: var(--accent2); }
 
 /* PostProcess toggle */
-.pp-toggle { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; margin-bottom: 12px; min-height: var(--btn-min); font-size: 14px; }
+.pp-toggle { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; margin-bottom: 8px; min-height: var(--btn-min); font-size: 13px; }
 .pp-toggle.on { border-color: var(--accent); }
+.pp-toggle.on .param-toggle-dot { background: #fff; }
 .pp-toggle:active { opacity: 0.8; }
 
 /* Empty state */
-.empty-msg { text-align: center; color: var(--text2); padding: 32px 16px; font-size: 14px; }
+.save-status { font-size: 12px; min-width: 92px; }
+.save-status.saved { color: var(--green); }
+.save-status.unsaved { color: #e0b060; }
+.save-status.saving { color: var(--text2); }
+.save-status.failed { color: #ffb0a0; }
+.header-mode { display: flex; gap: 4px; }
+.header-mode .mode-btn { min-height: 26px; padding: 0 8px; }
+.lib-tools { display: flex; gap: 6px; margin-bottom: 6px; }
+.lib-tools input[type="search"], .lib-tools select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; min-height: 28px; padding: 0 8px; font-size: 12px; }
+.lib-drop { border: 1px dashed var(--border); border-radius: 6px; padding: 8px; margin-bottom: 6px; color: var(--text2); font-size: 12px; }
+.lib-drop.over { border-color: var(--accent); color: var(--text); }
+.lib-row { display: grid; grid-template-columns: 16px 56px 1fr; gap: 8px; align-items: center; padding: 4px 6px; margin-bottom: 4px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; }
+.lib-row.on { border-color: var(--accent); }
+.lib-row img { width: 56px; height: 32px; object-fit: cover; border-radius: 4px; background: #111; }
+.lib-name { font-size: 13px; }
+.lib-meta { font-size: 11px; color: var(--text2); }
+.lib-warn { color: #ffb0a0; font-size: 12px; margin: 0 0 6px; white-space: pre-wrap; }
+.upload-line { font-size: 12px; color: var(--text2); margin: 2px 0; }
 </style>
 </head>
 <body>
@@ -116,6 +160,12 @@ body { display: flex; flex-direction: column; }
   <div class="status-dot" id="statusDot"></div>
   <h1>Fosfora</h1>
   <div class="header-right">
+    <div class="header-mode">
+      <button type="button" class="mode-btn on" id="modePrepare">Prepare</button>
+      <button type="button" class="mode-btn" id="modePerform">Perform</button>
+    </div>
+    <span id="saveStatus" class="save-status saved">Saved</span>
+    <button type="button" class="perform-btn" id="saveScene">Save Scene</button>
     <span id="bpmDisplay"></span>
     <div class="status-dot" id="beatDot"></div>
   </div>
@@ -137,13 +187,15 @@ body { display: flex; flex-direction: column; }
   <div class="tab active" data-panel="effects">Effects</div>
   <div class="tab" data-panel="params">Params</div>
   <div class="tab" data-panel="layers">Layers</div>
+  <div class="tab" data-panel="library">Library</div>
+  <div class="tab" data-panel="perform">Perform</div>
   <div class="tab" data-panel="presets">Presets</div>
 </div>
 
 <div class="content">
   <div class="panel active" id="panel-effects">
     <div class="effects-grid" id="effectsGrid"></div>
-    <div class="section-title" style="margin-top:16px">Triggers</div>
+    <div class="section-title section-gap">Triggers</div>
     <div class="trigger-grid">
       <div class="trigger-btn" data-trigger="prev_effect">Prev Effect</div>
       <div class="trigger-btn" data-trigger="next_effect">Next Effect</div>
@@ -160,7 +212,7 @@ body { display: flex; flex-direction: column; }
   </div>
 
   <div class="panel" id="panel-params">
-    <div id="paramHeader" style="margin-bottom:10px;padding:8px 4px;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);"></div>
+    <div id="paramHeader" class="param-header"></div>
     <div class="pp-toggle" id="ppToggle">
       <div class="param-toggle-dot"></div>
       <span>Post-Processing</span>
@@ -169,7 +221,110 @@ body { display: flex; flex-direction: column; }
   </div>
 
   <div class="panel" id="panel-layers">
+    <div class="picture-box" id="pictureBox">
+      <div class="section-title">Picture</div>
+      <div class="layer-hint" id="pictureName">No video on this scene yet.</div>
+      <div class="mode-row">
+        <button type="button" class="mode-btn" id="fitFill">Fill</button>
+        <button type="button" class="mode-btn" id="fitFit">Fit</button>
+        <button type="button" class="mode-btn" id="fitWidth">Width</button>
+        <button type="button" class="mode-btn" id="fitReset">Reset</button>
+      </div>
+      <div class="param-row">
+        <div class="param-label"><span class="param-name">Width</span><span class="param-value" id="widthVal">100%</span></div>
+        <input id="widthSlider" class="param-slider" type="range" min="25" max="300" value="100">
+      </div>
+      <div class="param-row">
+        <div class="param-label"><span class="param-name">X</span><span class="param-value" id="xVal">0</span></div>
+        <input id="posX" class="param-slider" type="range" min="-100" max="100" value="0">
+      </div>
+      <div class="param-row">
+        <div class="param-label"><span class="param-name">Y</span><span class="param-value" id="yVal">0</span></div>
+        <input id="posY" class="param-slider" type="range" min="-100" max="100" value="0">
+      </div>
+      <div class="param-row">
+        <div class="param-label"><span class="param-name">Opacity</span><span class="param-value" id="opVal">100%</span></div>
+        <input id="opSlider" class="param-slider" type="range" min="0" max="100" value="100">
+      </div>
+      <div class="param-row">
+        <div class="param-label"><span class="param-name">Speed</span><span class="param-value" id="speedVal">1.00</span></div>
+        <input id="speedSlider" class="param-slider" type="range" min="5" max="400" value="100">
+      </div>
+      <button type="button" class="perform-btn wide" id="loopToggle">Loop on</button>
+    </div>
+    <div class="layer-actions">
+      <button type="button" class="trigger-btn" id="showAllLayers">Show all</button>
+      <label class="trigger-btn" id="addMediaLabel">+ Media
+        <input type="file" id="addMedia" accept="video/mp4,video/quicktime,video/webm,image/png,image/jpeg,image/gif,image/webp,.mp4,.mov,.mkv,.webm,.png,.jpg,.jpeg,.gif,.webp" hidden>
+      </label>
+    </div>
+    <div class="layer-hint" id="layerHint">Click a layer to put only that layer on the output.</div>
     <div id="layersContainer"></div>
+  </div>
+
+  <div class="panel" id="panel-library">
+    <div class="lib-tools">
+      <input id="libSearch" type="search" placeholder="Search media">
+      <select id="libSort">
+        <option value="name">Name</option>
+        <option value="size">Size</option>
+        <option value="duration">Duration</option>
+      </select>
+    </div>
+    <div class="lib-drop" id="libDrop">Drop videos and images here</div>
+    <div class="layer-actions">
+      <label class="trigger-btn">Upload files
+        <input type="file" id="uploadFiles" accept="video/mp4,video/quicktime,video/webm,image/png,image/jpeg,image/gif,image/webp,.mp4,.mov,.mkv,.webm,.m4v,.png,.jpg,.jpeg,.gif,.webp" multiple hidden>
+      </label>
+      <label class="trigger-btn">Import folder
+        <input type="file" id="importFolder" webkitdirectory multiple hidden>
+      </label>
+    </div>
+    <div class="layer-actions">
+      <button type="button" class="trigger-btn" id="addAsLayers">Add as layers</button>
+      <button type="button" class="trigger-btn" id="replaceLayer">Replace selected layer</button>
+    </div>
+    <div class="layer-actions">
+      <button type="button" class="trigger-btn" id="revealFolder">Open media folder</button>
+      <button type="button" class="trigger-btn" id="linkFolder">Link folder</button>
+    </div>
+    <button type="button" class="perform-btn wide" id="importUploads">Import previous uploads</button>
+    <div id="libWarnings"></div>
+    <div id="uploadList"></div>
+    <div id="libraryList"></div>
+  </div>
+
+  <div class="panel" id="panel-perform">
+    <div class="perform-card">
+      <div id="performEmpty" class="layer-hint">No show is open.</div>
+      <div id="performBody" class="is-hidden">
+        <div class="clock" id="showClock">00:00:00</div>
+        <div class="cue-line"><span id="sceneNow">Scene</span><span id="sceneNext"></span></div>
+        <div class="cue-line"><span id="paletteNow">Palette</span><span class="badge auto" id="paletteMode">AUTO</span></div>
+        <div class="cue-line"><span id="paletteNext"></span></div>
+        <div class="palette-row" id="paletteButtons"></div>
+        <div class="param-row section-gap">
+          <div class="param-label"><span class="param-name">Palette strength</span><span class="param-value" id="gradeVal">75%</span></div>
+          <input id="gradeSlider" class="param-slider" type="range" min="0" max="100" value="75">
+        </div>
+        <button type="button" class="perform-btn wide" id="gradeToggle">Palette ON</button>
+        <div class="perform-grid">
+          <button type="button" class="perform-btn" id="scenePrev">Scene prev</button>
+          <button type="button" class="perform-btn" id="sceneNextBtn">Scene next</button>
+          <button type="button" class="perform-btn" id="palPrev">Palette prev</button>
+          <button type="button" class="perform-btn" id="palNext">Palette next</button>
+          <button type="button" class="perform-btn" id="showStart">Start</button>
+          <button type="button" class="perform-btn" id="showPause">Pause</button>
+          <button type="button" class="perform-btn" id="showResume">Resume</button>
+          <button type="button" class="perform-btn" id="showStop">Stop auto</button>
+          <button type="button" class="perform-btn" id="showReset">Reset</button>
+          <button type="button" class="perform-btn" id="showBlackout">Blackout off</button>
+          <button type="button" class="perform-btn" id="paletteAutoBtn">Palette auto</button>
+        </div>
+        <div class="layer-hint hint-gap" id="performAudio">Audio quiet</div>
+        <div class="notice" id="performNotice"></div>
+      </div>
+    </div>
   </div>
 
   <div class="panel" id="panel-presets">
@@ -213,6 +368,262 @@ body { display: flex; flex-direction: column; }
     btn.addEventListener('click', () => {
       send({ type: 'trigger', action: btn.dataset.trigger });
     });
+  });
+
+  document.getElementById('showAllLayers').addEventListener('click', () => {
+    send({ type: 'show_all_layers' });
+  });
+
+  const addMedia = document.getElementById('addMedia');
+  const addMediaLabel = document.getElementById('addMediaLabel');
+  addMedia.addEventListener('change', () => {
+    const file = addMedia.files && addMedia.files[0];
+    addMedia.value = '';
+    if (!file) return;
+    addMediaLabel.classList.add('busy');
+    uploadFiles([file], true).finally(() => addMediaLabel.classList.remove('busy'));
+  });
+
+  const librarySelection = [];
+  let libraryKey = '';
+
+  function formatBytes(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+    if (n >= 1048576) return Math.round(n / 1048576) + ' MB';
+    return n + ' B';
+  }
+
+  function renderSave() {
+    const status = document.getElementById('saveStatus');
+    const button = document.getElementById('saveScene');
+    const mode = (state && state.workspace_mode) || 'prepare';
+    document.getElementById('modePrepare').classList.toggle('on', mode !== 'perform');
+    document.getElementById('modePerform').classList.toggle('on', mode === 'perform');
+    button.textContent = mode === 'perform' ? 'Save Changes' : 'Save Scene';
+    const code = (state && state.save_state) || 'saved';
+    const detail = (state && state.save_detail) || '';
+    const label = { saved: 'Saved', unsaved: 'Unsaved changes', saving: 'Saving', failed: 'Save failed' }[code] || 'Saved';
+    status.textContent = code === 'failed' && detail ? label + ': ' + detail : label;
+    status.className = 'save-status ' + code;
+  }
+
+  function sortedLibrary() {
+    const items = ((state && state.library) || []).slice();
+    const query = (document.getElementById('libSearch').value || '').trim().toLowerCase();
+    const sort = document.getElementById('libSort').value;
+    const filtered = query ? items.filter((item) => item.name.toLowerCase().indexOf(query) !== -1) : items;
+    filtered.sort((a, b) => {
+      if (sort === 'size') return b.bytes - a.bytes;
+      if (sort === 'duration') return b.duration_secs - a.duration_secs;
+      return a.name.localeCompare(b.name);
+    });
+    return filtered;
+  }
+
+  let shownNotice = '';
+  function renderLibrary() {
+    const warnings = document.getElementById('libWarnings');
+    warnings.innerHTML = '';
+    const notice = (state && state.show && state.show.notice) || '';
+    if (notice) {
+      const line = document.createElement('div');
+      line.className = 'lib-warn';
+      line.textContent = notice;
+      warnings.appendChild(line);
+      if (notice !== shownNotice) {
+        shownNotice = notice;
+        uploadLine(notice);
+      }
+    }
+    ((state && state.library_warnings) || []).forEach((text) => {
+      const line = document.createElement('div');
+      line.className = 'lib-warn';
+      line.textContent = text;
+      warnings.appendChild(line);
+    });
+    const items = sortedLibrary();
+    const key = items.map((item) => item.id + ':' + item.status + ':' + item.bytes + ':' + (item.scenes || []).join(',')).join('|')
+      + '|' + (document.getElementById('libSearch').value || '')
+      + '|' + document.getElementById('libSort').value;
+    if (key === libraryKey) return;
+    libraryKey = key;
+    const list = document.getElementById('libraryList');
+    list.innerHTML = '';
+    items.forEach((item) => {
+      const row = document.createElement('label');
+      row.className = 'lib-row' + (librarySelection.indexOf(item.id) !== -1 ? ' on' : '');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = librarySelection.indexOf(item.id) !== -1;
+      box.addEventListener('change', () => {
+        const at = librarySelection.indexOf(item.id);
+        if (box.checked && at < 0) librarySelection.push(item.id);
+        if (!box.checked && at >= 0) librarySelection.splice(at, 1);
+        row.classList.toggle('on', box.checked);
+      });
+      const img = document.createElement('img');
+      if (item.thumb) img.src = '/api/media/thumb/' + encodeURIComponent(item.thumb);
+      else img.hidden = true;
+      const text = document.createElement('div');
+      const title = document.createElement('div');
+      title.className = 'lib-name';
+      title.textContent = item.name;
+      const meta = document.createElement('div');
+      meta.className = 'lib-meta';
+      const bits = [item.kind === 'video' ? 'Video' : item.kind === 'image' ? 'Image' : 'File'];
+      if (item.width) bits.push(item.width + '×' + item.height);
+      if (item.fps) bits.push(item.fps.toFixed(0) + ' fps');
+      if (item.duration_secs) bits.push(item.duration_secs.toFixed(1) + 's');
+      bits.push(formatBytes(item.bytes || 0));
+      if (item.location === 'linked') bits.push('linked');
+      if (item.status && item.status !== 'ok') bits.push(item.status + (item.detail ? ': ' + item.detail : ''));
+      if (item.scenes && item.scenes.length) bits.push('in ' + item.scenes.join(', '));
+      meta.textContent = bits.join(' · ');
+      text.appendChild(title);
+      text.appendChild(meta);
+      row.appendChild(box);
+      row.appendChild(img);
+      row.appendChild(text);
+      list.appendChild(row);
+    });
+  }
+
+  function uploadLine(name) {
+    const list = document.getElementById('uploadList');
+    const line = document.createElement('div');
+    line.className = 'upload-line';
+    line.textContent = name;
+    list.prepend(line);
+    return line;
+  }
+
+  function uploadOne(file) {
+    const line = uploadLine(file.name + ' · 0%');
+    return new Promise((resolve, reject) => {
+      const body = new FormData();
+      body.append('file', file, file.name);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/media');
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) line.textContent = file.name + ' · ' + Math.round(event.loaded * 100 / event.total) + '%';
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          let payload = {};
+          try { payload = JSON.parse(xhr.responseText); } catch (err) { payload = {}; }
+          const report = (payload.files && payload.files[0]) || {};
+          line.textContent = file.name + (report.duplicate ? ' · already in the library' : ' · stored');
+          resolve(report.id || null);
+        } else {
+          line.textContent = file.name + ' · ' + (xhr.responseText || xhr.statusText);
+          reject(new Error(xhr.responseText || xhr.statusText));
+        }
+      };
+      xhr.onerror = () => {
+        line.textContent = file.name + ' · upload failed';
+        reject(new Error('upload failed'));
+      };
+      xhr.send(body);
+    });
+  }
+
+  function uploadFiles(files, addWhenDone) {
+    const jobs = Array.from(files).map((file) => uploadOne(file).catch((err) => {
+      document.getElementById('layerHint').textContent = err.message;
+      return null;
+    }));
+    return Promise.all(jobs).then((ids) => {
+      const ready = ids.filter(Boolean);
+      if (addWhenDone && ready.length) send({ type: 'add_library_media', ids: ready });
+      send({ type: 'rescan_library' });
+    });
+  }
+
+  document.getElementById('uploadFiles').addEventListener('change', (event) => {
+    uploadFiles(event.target.files, false);
+    event.target.value = '';
+  });
+  document.getElementById('importFolder').addEventListener('change', (event) => {
+    uploadFiles(event.target.files, false);
+    event.target.value = '';
+  });
+  const libDrop = document.getElementById('libDrop');
+  libDrop.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    libDrop.classList.add('over');
+  });
+  libDrop.addEventListener('dragleave', () => libDrop.classList.remove('over'));
+  libDrop.addEventListener('drop', (event) => {
+    event.preventDefault();
+    libDrop.classList.remove('over');
+    const files = [];
+    const items = event.dataTransfer.items ? Array.from(event.dataTransfer.items) : [];
+    const walks = [];
+    function walk(entry) {
+      return new Promise((resolve) => {
+        if (!entry) { resolve(); return; }
+        if (entry.isFile) {
+          entry.file((file) => { files.push(file); resolve(); }, () => resolve());
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          const all = [];
+          const read = () => reader.readEntries((entries) => {
+            if (!entries.length) {
+              Promise.all(all.map(walk)).then(resolve);
+              return;
+            }
+            entries.forEach((child) => all.push(child));
+            read();
+          }, () => resolve());
+          read();
+        } else resolve();
+      });
+    }
+    items.forEach((item) => {
+      const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry) walks.push(walk(entry));
+      else if (item.getAsFile()) files.push(item.getAsFile());
+    });
+    Promise.all(walks).then(() => {
+      if (!files.length && event.dataTransfer.files) {
+        Array.from(event.dataTransfer.files).forEach((file) => files.push(file));
+      }
+      uploadFiles(files, false);
+    });
+  });
+  document.getElementById('addAsLayers').addEventListener('click', () => {
+    if (!librarySelection.length) {
+      uploadLine('Select one or more files, then Add as layers.');
+      return;
+    }
+    send({ type: 'add_library_media', ids: librarySelection.slice() });
+  });
+  document.getElementById('replaceLayer').addEventListener('click', () => {
+    if (librarySelection.length !== 1 || !state) {
+      uploadLine('Select one library file to replace the current layer.');
+      return;
+    }
+    send({ type: 'replace_library_media', layer: state.active_layer, id: librarySelection[0] });
+  });
+  document.getElementById('revealFolder').addEventListener('click', () => send({ type: 'reveal_media_folder' }));
+  document.getElementById('linkFolder').addEventListener('click', () => send({ type: 'link_media_folder' }));
+  document.getElementById('importUploads').addEventListener('click', () => send({ type: 'import_previous_uploads' }));
+  document.getElementById('libSearch').addEventListener('input', () => { libraryKey = ''; renderLibrary(); });
+  document.getElementById('libSort').addEventListener('change', () => { libraryKey = ''; renderLibrary(); });
+  document.getElementById('modePrepare').addEventListener('click', () => send({ type: 'set_workspace_mode', mode: 'prepare' }));
+  document.getElementById('modePerform').addEventListener('click', () => send({ type: 'set_workspace_mode', mode: 'perform' }));
+  document.getElementById('saveScene').addEventListener('click', () => send({ type: 'save_scene' }));
+  document.getElementById('speedSlider').addEventListener('input', (event) => {
+    const layer = mediaLayer();
+    if (!layer) return;
+    const speed = parseInt(event.target.value, 10) / 100;
+    document.getElementById('speedVal').textContent = speed.toFixed(2);
+    throttledSend('speed' + layer.index, { type: 'set_media_transport', layer: layer.index, speed: speed });
+  });
+  document.getElementById('loopToggle').addEventListener('click', () => {
+    const layer = mediaLayer();
+    if (!layer) return;
+    send({ type: 'set_media_transport', layer: layer.index, looping: layer.media_looping === false });
   });
 
   // Post-process toggle
@@ -315,8 +726,151 @@ body { display: flex; flex-direction: column; }
     renderEffects();
     renderParams();
     renderLayers();
+    renderPicture();
+    renderPerform();
     renderPresets();
     updatePP();
+    renderLibrary();
+    renderSave();
+  }
+
+  function mediaLayer() {
+    if (!state || !state.layers) return null;
+    const active = state.layers[state.active_layer];
+    if (active && active.media_name) return active;
+    for (let i = 0; i < state.layers.length; i++) {
+      if (state.layers[i].media_name) return state.layers[i];
+    }
+    return null;
+  }
+
+  function sendPlace(fit, width, x, y) {
+    const layer = mediaLayer();
+    if (!layer) return;
+    send({ type: 'set_media_place', layer: layer.index, fit: fit, width: width, x: x, y: y });
+  }
+
+  function readPicture() {
+    const layer = mediaLayer();
+    const fit = (layer && layer.media_fit) || 'fill';
+    const width = layer && layer.media_width != null ? layer.media_width : 1;
+    const x = layer && layer.media_pos_x != null ? layer.media_pos_x : 0;
+    const y = layer && layer.media_pos_y != null ? layer.media_pos_y : 0;
+    return { layer: layer, fit: fit, width: width, x: x, y: y };
+  }
+
+  function renderPicture() {
+    const pic = readPicture();
+    const name = document.getElementById('pictureName');
+    if (!pic.layer) {
+      name.textContent = 'No video on this scene yet.';
+      return;
+    }
+    name.textContent = pic.layer.media_name + '  ·  layer ' + (pic.layer.index + 1);
+    document.getElementById('fitFill').classList.toggle('on', pic.fit === 'fill');
+    document.getElementById('fitFit').classList.toggle('on', pic.fit === 'fit');
+    document.getElementById('fitWidth').classList.toggle('on', pic.fit === 'width');
+    const widthSlider = document.getElementById('widthSlider');
+    const posX = document.getElementById('posX');
+    const posY = document.getElementById('posY');
+    const opSlider = document.getElementById('opSlider');
+    if (document.activeElement !== widthSlider) {
+      widthSlider.value = String(Math.round(pic.width * 100));
+      document.getElementById('widthVal').textContent = widthSlider.value + '%';
+    }
+    if (document.activeElement !== posX) {
+      posX.value = String(Math.round(pic.x * 100));
+      document.getElementById('xVal').textContent = posX.value;
+    }
+    if (document.activeElement !== posY) {
+      posY.value = String(Math.round(pic.y * 100));
+      document.getElementById('yVal').textContent = posY.value;
+    }
+    if (document.activeElement !== opSlider) {
+      opSlider.value = String(Math.round(pic.layer.opacity * 100));
+      document.getElementById('opVal').textContent = opSlider.value + '%';
+    }
+    const speedSlider = document.getElementById('speedSlider');
+    const loopToggle = document.getElementById('loopToggle');
+    const speed = pic.layer.media_speed != null ? pic.layer.media_speed : 1;
+    const looping = pic.layer.media_looping !== false;
+    if (document.activeElement !== speedSlider) {
+      speedSlider.value = String(Math.round(speed * 100));
+      document.getElementById('speedVal').textContent = speed.toFixed(2);
+    }
+    loopToggle.textContent = looping ? 'Loop on' : 'Loop off';
+    loopToggle.classList.toggle('on', looping);
+  }
+
+  function clockText(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    function z(n) { return (n < 10 ? '0' : '') + n; }
+    return z(h) + ':' + z(m) + ':' + z(s);
+  }
+
+  function countdown(elapsedMs, atSecs) {
+    if (atSecs == null) return '';
+    const left = Math.max(0, atSecs * 1000 - elapsedMs);
+    return 'next in ' + clockText(left);
+  }
+
+  let paletteKey = '';
+  function renderPerform() {
+    const show = state && state.show;
+    const empty = document.getElementById('performEmpty');
+    const body = document.getElementById('performBody');
+    const open = !!(show && show.loaded);
+    empty.classList.toggle('is-hidden', open);
+    body.classList.toggle('is-hidden', !open);
+    if (!open) return;
+    document.getElementById('showClock').textContent = clockText(show.elapsed_ms || 0);
+    document.getElementById('sceneNow').textContent = show.scene || '—';
+    document.getElementById('sceneNext').textContent = show.next_scene ? (show.next_scene + ' · ' + countdown(show.elapsed_ms, show.next_scene_secs)) : '';
+    document.getElementById('paletteNow').textContent = show.palette || '—';
+    const mode = document.getElementById('paletteMode');
+    mode.textContent = show.palette_manual ? 'MANUAL' : 'AUTO';
+    mode.className = 'badge ' + (show.palette_manual ? 'manual' : 'auto');
+    document.getElementById('paletteNext').textContent = show.next_palette ? (show.next_palette + ' · ' + countdown(show.elapsed_ms, show.next_palette_secs)) : '';
+    const grade = document.getElementById('gradeSlider');
+    if (document.activeElement !== grade && show.grade_strength != null) {
+      grade.value = String(Math.round(show.grade_strength * 100));
+      document.getElementById('gradeVal').textContent = grade.value + '%';
+    }
+    const toggle = document.getElementById('gradeToggle');
+    toggle.textContent = show.grade_enabled ? 'Palette ON' : 'Palette OFF';
+    toggle.classList.toggle('on', !!show.grade_enabled);
+    const blackout = document.getElementById('showBlackout');
+    blackout.textContent = show.blackout ? 'Blackout ON' : 'Blackout off';
+    blackout.classList.toggle('on', !!show.blackout);
+    const notice = document.getElementById('performNotice');
+    const parts = [];
+    if (show.validation && show.validation !== 'READY') parts.push(show.validation);
+    if (show.notice) parts.push(show.notice);
+    notice.textContent = parts.join(' · ');
+    const ids = show.palettes || [];
+    const key = ids.join('|') + '|' + (show.palette || '');
+    if (key !== paletteKey) {
+      paletteKey = key;
+      const box = document.getElementById('paletteButtons');
+      box.innerHTML = '';
+      ids.forEach(function(id) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'perform-btn' + (id === show.palette ? ' on' : '');
+        btn.textContent = id;
+        btn.addEventListener('click', function() {
+          send({ type: 'show', action: 'select_palette', id: id });
+        });
+        box.appendChild(btn);
+      });
+    } else {
+      document.querySelectorAll('#paletteButtons .perform-btn').forEach(function(btn) {
+        btn.classList.toggle('on', btn.textContent === show.palette);
+      });
+    }
   }
 
   function renderEffects() {
@@ -342,7 +896,7 @@ body { display: flex; flex-direction: column; }
     const layer = state.layers[state.active_layer];
     const layerLabel = 'Layer ' + (state.active_layer + 1);
     const effectLabel = layer && layer.effect_name ? layer.effect_name : '(no effect)';
-    header.innerHTML = '<span style="color:var(--accent);font-weight:600;">' + layerLabel + '</span> <span style="color:var(--text2);margin:0 4px;">\u2014</span> <span>' + effectLabel + '</span>';
+    header.innerHTML = '<span class="accent">' + layerLabel + '</span><span class="muted">\u2014</span><span>' + effectLabel + '</span>';
     if (!layer || !layer.params || layer.params.length === 0) {
       paramsContainer.innerHTML = '<div class="empty-msg">No parameters</div>';
       return;
@@ -376,7 +930,6 @@ body { display: flex; flex-direction: column; }
         toggle.addEventListener('click', function() {
           p.value = p.value > 0.5 ? 0 : 1;
           toggle.classList.toggle('on', p.value > 0.5);
-          toggle.querySelector('.param-toggle-dot').style.background = p.value > 0.5 ? '#fff' : '#555';
           send({ type: 'set_param', name: p.name, value: p.value });
         });
         paramsContainer.appendChild(toggle);
@@ -384,22 +937,78 @@ body { display: flex; flex-direction: column; }
     });
   }
 
+  // Must stay in lockstep with BlendMode in gpu/layer.rs (index == as_u32).
+  // The last three are the displacement family (#1478).
+  const blendNames = ['Normal','Add','Screen','Color Dodge','Multiply','Overlay','Hard Light','Difference','Exclusion','Subtract','Displace','Refract','Lens'];
+
   function renderLayers() {
-    layersContainer.innerHTML = '';
     if (!state || !state.layers) return;
+    const cards = layersContainer.querySelectorAll('.layer-card');
+    // Full state arrives at 10Hz. Replacing the <select> closes its menu, so
+    // cards are built once and later ticks only patch text and values.
+    if (cards.length !== state.layers.length) {
+      buildLayerCards();
+      return;
+    }
+    state.layers.forEach(function(layer, i) {
+      const card = cards[i];
+      card.className = 'layer-card' + (i === state.active_layer ? ' active' : '') + (!layer.enabled ? ' disabled' : '');
+      const nameEl = card.querySelector('.layer-name');
+      const effectEl = card.querySelector('.layer-effect');
+      if (nameEl && nameEl.textContent !== layer.name) nameEl.textContent = layer.name;
+      const effectText = layerDetail(layer);
+      if (effectEl && effectEl.textContent !== effectText) effectEl.textContent = effectText;
+      const thumb = card.querySelector('.layer-thumb');
+      if (thumb) setThumb(thumb, layer.preview);
 
-    // Must stay in lockstep with BlendMode in gpu/layer.rs (index == as_u32).
-    // The last three are the displacement family (#1478).
-    const blendNames = ['Normal','Add','Screen','Color Dodge','Multiply','Overlay','Hard Light','Difference','Exclusion','Subtract','Displace','Refract','Lens'];
+      const sel = card.querySelector('select');
+      if (sel && document.activeElement !== sel && sel.value !== String(layer.blend_mode)) {
+        sel.value = String(layer.blend_mode);
+      }
+      const opSlider = card.querySelector('input[type="range"]');
+      if (opSlider && document.activeElement !== opSlider) {
+        const next = String(Math.round(layer.opacity * 100));
+        if (opSlider.value !== next) opSlider.value = next;
+      }
+      const cb = card.querySelector('input[type="checkbox"]');
+      if (cb && document.activeElement !== cb && cb.checked !== !!layer.enabled) {
+        cb.checked = !!layer.enabled;
+      }
+    });
+  }
 
+  function layerDetail(layer) {
+    if (layer.effect_name) return layer.effect_name;
+    if (layer.media_name && layer.media_name !== layer.name) return layer.media_name;
+    if (layer.media_name) return layer.media_is_video ? 'Video' : 'Image';
+    return '(empty)';
+  }
+
+  function setThumb(img, preview) {
+    if (preview) {
+      if (img.getAttribute('src') !== preview) img.src = preview;
+      img.hidden = false;
+    } else {
+      img.removeAttribute('src');
+      img.hidden = true;
+    }
+  }
+
+  function buildLayerCards() {
+    layersContainer.innerHTML = '';
     state.layers.forEach(function(layer, i) {
       const card = document.createElement('div');
       card.className = 'layer-card' + (i === state.active_layer ? ' active' : '') + (!layer.enabled ? ' disabled' : '');
 
-      // Info area (tap to select)
+      const thumb = document.createElement('img');
+      thumb.className = 'layer-thumb';
+      thumb.alt = '';
+      setThumb(thumb, layer.preview);
+      card.appendChild(thumb);
+
       const info = document.createElement('div');
       info.className = 'layer-info';
-      info.innerHTML = '<div class="layer-name">' + layer.name + '</div><div class="layer-effect">' + (layer.effect_name || '(empty)') + '</div>';
+      info.innerHTML = '<div class="layer-name">' + layer.name + '</div><div class="layer-effect">' + layerDetail(layer) + '</div>';
       info.addEventListener('click', function() {
         state.active_layer = i;
         renderLayers();
@@ -409,26 +1018,23 @@ body { display: flex; flex-direction: column; }
       });
       card.appendChild(info);
 
-      // Controls row
       const controls = document.createElement('div');
       controls.className = 'layer-controls';
 
-      // Blend
       const sel = document.createElement('select');
       sel.className = 'blend-select';
       blendNames.forEach(function(name, bi) {
         const opt = document.createElement('option');
         opt.value = bi;
         opt.textContent = name;
-        if (bi === layer.blend_mode) opt.selected = true;
         sel.appendChild(opt);
       });
+      sel.value = String(layer.blend_mode);
       sel.addEventListener('change', function() {
-        send({ type: 'set_layer_blend', layer: i, value: parseInt(sel.value) });
+        send({ type: 'set_layer_blend', layer: i, value: parseInt(sel.value, 10) });
       });
       controls.appendChild(sel);
 
-      // Opacity
       const opWrap = document.createElement('div');
       opWrap.className = 'layer-opacity';
       const opSlider = document.createElement('input');
@@ -438,13 +1044,12 @@ body { display: flex; flex-direction: column; }
       opSlider.value = Math.round(layer.opacity * 100);
       opSlider.setAttribute('touch-action', 'none');
       opSlider.addEventListener('input', function(e) {
-        var v = parseInt(e.target.value) / 100;
+        var v = parseInt(e.target.value, 10) / 100;
         throttledSend('opacity_' + i, { type: 'set_layer_opacity', layer: i, value: v });
       });
       opWrap.appendChild(opSlider);
       controls.appendChild(opWrap);
 
-      // Enable checkbox
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = layer.enabled;
@@ -503,13 +1108,16 @@ body { display: flex; flex-direction: column; }
   function updatePP() {
     if (!state) return;
     ppToggle.classList.toggle('on', state.postprocess_enabled);
-    ppToggle.querySelector('.param-toggle-dot').style.background = state.postprocess_enabled ? '#fff' : '#555';
   }
 
   function updateAudio(a) {
     var bands = [a.sub_bass, a.bass, a.low_mid, a.mid, a.upper_mid, a.presence, a.brilliance];
     for (var i = 0; i < bands.length; i++) {
       if (bars[i]) bars[i].style.height = (bands[i] * 100) + '%';
+    }
+    const audioLine = document.getElementById('performAudio');
+    if (audioLine) {
+      audioLine.textContent = (a.rms || 0) > 0.02 ? 'Audio signal' : 'Audio quiet';
     }
     if (a.bpm > 1) {
       bpmDisplay.textContent = Math.round(a.bpm) + ' BPM';
@@ -572,6 +1180,73 @@ body { display: flex; flex-direction: column; }
     if (msg.layer === state.active_layer) renderParams();
   }
 
+  function bindPicture() {
+    document.getElementById('fitFill').addEventListener('click', function() {
+      const pic = readPicture();
+      sendPlace('fill', pic.width, pic.x, pic.y);
+    });
+    document.getElementById('fitFit').addEventListener('click', function() {
+      const pic = readPicture();
+      sendPlace('fit', pic.width, pic.x, pic.y);
+    });
+    document.getElementById('fitWidth').addEventListener('click', function() {
+      const pic = readPicture();
+      sendPlace('width', pic.width, pic.x, pic.y);
+    });
+    document.getElementById('fitReset').addEventListener('click', function() {
+      const pic = readPicture();
+      sendPlace(pic.fit || 'fill', 1, 0, 0);
+    });
+    document.getElementById('widthSlider').addEventListener('input', function(e) {
+      const pic = readPicture();
+      const width = parseInt(e.target.value, 10) / 100;
+      document.getElementById('widthVal').textContent = e.target.value + '%';
+      sendPlace('width', width, pic.x, pic.y);
+    });
+    document.getElementById('posX').addEventListener('input', function(e) {
+      const pic = readPicture();
+      const x = parseInt(e.target.value, 10) / 100;
+      document.getElementById('xVal').textContent = e.target.value;
+      sendPlace(pic.fit || 'fill', pic.width, x, pic.y);
+    });
+    document.getElementById('posY').addEventListener('input', function(e) {
+      const pic = readPicture();
+      const y = parseInt(e.target.value, 10) / 100;
+      document.getElementById('yVal').textContent = e.target.value;
+      sendPlace(pic.fit || 'fill', pic.width, pic.x, y);
+    });
+    document.getElementById('opSlider').addEventListener('input', function(e) {
+      const layer = mediaLayer();
+      if (!layer) return;
+      document.getElementById('opVal').textContent = e.target.value + '%';
+      send({ type: 'set_layer_opacity', layer: layer.index, value: parseInt(e.target.value, 10) / 100 });
+    });
+    function showAction(action) {
+      return function() { send({ type: 'show', action: action }); };
+    }
+    document.getElementById('scenePrev').addEventListener('click', showAction('prev_visual'));
+    document.getElementById('sceneNextBtn').addEventListener('click', showAction('next_visual'));
+    document.getElementById('palPrev').addEventListener('click', showAction('prev_palette'));
+    document.getElementById('palNext').addEventListener('click', showAction('next_palette'));
+    document.getElementById('showStart').addEventListener('click', showAction('start'));
+    document.getElementById('showPause').addEventListener('click', showAction('pause'));
+    document.getElementById('showResume').addEventListener('click', showAction('resume'));
+    document.getElementById('showStop').addEventListener('click', showAction('stop_auto'));
+    document.getElementById('showReset').addEventListener('click', showAction('reset'));
+    document.getElementById('paletteAutoBtn').addEventListener('click', showAction('palette_auto'));
+    document.getElementById('showBlackout').addEventListener('click', showAction('toggle_blackout'));
+    document.getElementById('gradeSlider').addEventListener('input', function(e) {
+      document.getElementById('gradeVal').textContent = e.target.value + '%';
+      const on = state && state.show ? !!state.show.grade_enabled : true;
+      send({ type: 'set_grade', strength: parseInt(e.target.value, 10) / 100, enabled: on });
+    });
+    document.getElementById('gradeToggle').addEventListener('click', function() {
+      const on = !(state && state.show && state.show.grade_enabled);
+      const strength = state && state.show && state.show.grade_strength != null ? state.show.grade_strength : 0.75;
+      send({ type: 'set_grade', strength: strength, enabled: on });
+    });
+  }
+  bindPicture();
   connect();
 })();
 </script>
