@@ -121,7 +121,21 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::SelectLayer { index })
         }
+        "set_solo" => {
+            let index = v.get("index")?.as_u64()? as usize;
+            Some(WsInMessage::SetSolo { index })
+        }
+        "clear_solo" => Some(WsInMessage::ClearSolo),
         "show_all_layers" => Some(WsInMessage::ShowAllLayers),
+        "move_layer" => {
+            let from = v.get("from")?.as_u64()? as usize;
+            let to = v.get("to")?.as_u64()? as usize;
+            Some(WsInMessage::MoveLayer { from, to })
+        }
+        "resolve_pending" => {
+            let action = v.get("action")?.as_str()?.to_string();
+            Some(WsInMessage::ResolvePending { action })
+        }
         "rescan_library" => Some(WsInMessage::RescanLibrary),
         "import_previous_uploads" => Some(WsInMessage::ImportPreviousUploads),
         "reveal_media_folder" => Some(WsInMessage::RevealMediaFolder),

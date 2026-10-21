@@ -295,12 +295,17 @@ pub(crate) fn apply_param_binding(
     match def {
         crate::params::ParamDef::Float { min, max, .. } => {
             let val = min + (max - min) * value.clamp(0.0, 1.0);
-            layer.param_store.set(param_name, ParamValue::Float(val));
+            // Overlay only. Audio is modulation, not an edit: writing the
+            // authored map here marks the scene dirty every frame and the
+            // next save replaces the preset with the live modulated numbers.
+            layer
+                .param_store
+                .set_runtime(param_name, ParamValue::Float(val));
         }
         crate::params::ParamDef::Bool { .. } => {
             layer
                 .param_store
-                .set(param_name, ParamValue::Bool(value > 0.5));
+                .set_runtime(param_name, ParamValue::Bool(value > 0.5));
         }
         _ => {}
     }

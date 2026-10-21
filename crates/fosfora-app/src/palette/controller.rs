@@ -59,6 +59,25 @@ impl PaletteScheduler {
 }
 
 /// Slot-ID-keyed interpolation. A mid-transition scene change does not reset this.
+/// Colours the show may write this frame.
+///
+/// A manual palette hold returns nothing, so the render path keeps the colours
+/// applied when the operator picked that palette. The next scheduled cue clears
+/// the hold inside [`PaletteScheduler::tick`] and this starts returning the
+/// track again.
+pub fn automated_palette_colors(
+    manual: bool,
+    auto_enabled: bool,
+    cues: &[PaletteCue],
+    palettes: &HashMap<String, Palette>,
+    elapsed: Duration,
+) -> Option<HashMap<String, ParamValue>> {
+    if manual || !auto_enabled {
+        return None;
+    }
+    palette_colors_at(cues, palettes, elapsed)
+}
+
 pub fn palette_colors_at(
     cues: &[PaletteCue],
     palettes: &HashMap<String, Palette>,
@@ -266,6 +285,13 @@ mod tests {
         assert!(sched.tick(&cues, &map, Duration::from_secs(30)).is_none());
         assert!(sched.manual);
         assert_eq!(sched.active_palette_id.as_deref(), Some("b"));
+        assert!(
+            automated_palette_colors(true, true, &cues, &map, Duration::from_secs(30)).is_none(),
+            "the per-frame colour pass must not paint over a manual hold"
+        );
+        assert!(
+            automated_palette_colors(false, true, &cues, &map, Duration::from_secs(30)).is_some()
+        );
     }
 
     #[test]

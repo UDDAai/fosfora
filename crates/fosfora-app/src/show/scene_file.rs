@@ -157,19 +157,68 @@ pub fn upsert_named(presets: &mut Vec<(String, Preset)>, id: &str, preset: Prese
     }
 }
 
-/// Write `<pack>/presets/<id>.json`. The previous file is kept as `<id>.json.bak`.
+/// How many distinct previous revisions to keep per scene.
+const HISTORY_LIMIT: usize = 5;
+
+/// Write `<pack>/presets/<id>.json`.
+///
+/// A changed file pushes the previous bytes onto `recovery/history/<id>/`,
+/// newest first, capped at five distinct revisions. Identical content does
+/// not rotate that ring and does not rewrite the preset. Files under
+/// `recovery/baselines/` are never touched.
 pub fn write_scene_preset(pack_root: &Path, id: &str, preset: &Preset) -> Result<PathBuf> {
     let stem = scene_file_stem(id)?;
     let dir = pack_root.join("presets");
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{stem}.json"));
+    let json = serde_json::to_string_pretty(preset)?;
     if path.is_file() {
-        let bak = dir.join(format!("{stem}.json.bak"));
-        fs::copy(&path, &bak).with_context(|| format!("keep previous {}", path.display()))?;
+        let existing = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        if existing == json {
+            return Ok(path);
+        }
+        push_scene_history(pack_root, &stem, &existing)?;
     }
+    write_atomic(&path, &json).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+/// Park an unsaved Perform edit where a scheduled cue can continue without
+/// waiting, and without replacing the production preset.
+pub fn write_scene_draft(pack_root: &Path, id: &str, preset: &Preset) -> Result<PathBuf> {
+    let stem = scene_file_stem(id)?;
+    let dir = pack_root.join("recovery").join("drafts");
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{stem}-{stamp}.json"));
     let json = serde_json::to_string_pretty(preset)?;
     write_atomic(&path, &json).with_context(|| format!("write {}", path.display()))?;
     Ok(path)
+}
+
+fn push_scene_history(pack_root: &Path, stem: &str, previous: &str) -> Result<()> {
+    let dir = pack_root.join("recovery").join("history").join(stem);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let newest = dir.join("1.json");
+    if newest.is_file() {
+        if let Ok(text) = fs::read_to_string(&newest) {
+            if text == previous {
+                return Ok(());
+            }
+        }
+    }
+    for index in (1..HISTORY_LIMIT).rev() {
+        let from = dir.join(format!("{index}.json"));
+        let to = dir.join(format!("{}.json", index + 1));
+        if from.is_file() {
+            fs::rename(&from, &to).with_context(|| format!("rotate {}", from.display()))?;
+        }
+    }
+    write_atomic(&newest, previous).with_context(|| format!("write {}", newest.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -216,11 +265,44 @@ mod tests {
         );
         assert!((saved.layers[0].opacity - 0.9).abs() < 0.001);
         assert!((saved.layers[0].media_width - 1.3).abs() < 0.001);
+        assert!(!root.join("presets/under-ice.json.bak").exists());
         let bak: Preset = serde_json::from_str(
-            &fs::read_to_string(root.join("presets/under-ice.json.bak")).unwrap(),
+            &fs::read_to_string(root.join("recovery/history/under-ice/1.json")).unwrap(),
         )
         .unwrap();
         assert!((bak.layers[0].opacity - 0.4).abs() < 0.001);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_keeps_five_distinct_revisions_and_skips_identical_writes() {
+        let root = temp_pack("ring");
+        let baseline = root.join("recovery/baselines/under-ice-original.json");
+        fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+        fs::write(&baseline, b"do-not-touch").unwrap();
+
+        write_scene_preset(&root, "under-ice", &preset("assets/video/a.mp4", 0.1)).unwrap();
+        for opacity in [0.2, 0.3, 0.4, 0.5, 0.6, 0.7] {
+            write_scene_preset(&root, "under-ice", &preset("assets/video/a.mp4", opacity)).unwrap();
+        }
+        // The same bytes again must not walk a good copy off the ring.
+        write_scene_preset(&root, "under-ice", &preset("assets/video/a.mp4", 0.7)).unwrap();
+
+        let live: Preset =
+            serde_json::from_str(&fs::read_to_string(root.join("presets/under-ice.json")).unwrap())
+                .unwrap();
+        assert!((live.layers[0].opacity - 0.7).abs() < 0.001);
+        let history = root.join("recovery/history/under-ice");
+        let oldest: Preset =
+            serde_json::from_str(&fs::read_to_string(history.join("5.json")).unwrap()).unwrap();
+        // Six changes after the first write: 0.2 through 0.6 sit in the ring,
+        // 0.1 has rotated off, and the identical 0.7 write did not push 0.6 out.
+        assert!((oldest.layers[0].opacity - 0.2).abs() < 0.001);
+        let newest: Preset =
+            serde_json::from_str(&fs::read_to_string(history.join("1.json")).unwrap()).unwrap();
+        assert!((newest.layers[0].opacity - 0.6).abs() < 0.001);
+        assert!(!history.join("6.json").exists());
+        assert_eq!(fs::read(&baseline).unwrap(), b"do-not-touch");
         let _ = fs::remove_dir_all(&root);
     }
 

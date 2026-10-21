@@ -287,18 +287,28 @@ impl ShowController {
         palette_colors_at(&self.definition.palette_track, &self.palettes, elapsed)
     }
 
+    /// Manual NEXT/PREV walks the show's scene track and stops at either end.
+    ///
+    /// Built-in Fosfora presets live in `preset_ids` but are not Hibernation
+    /// scenes, so they must not enter this sequence. The show clock is not
+    /// moved here; `manual_set_preset` only changes which scene is current.
     fn step_preset(&self, delta: i32) -> Option<String> {
-        if self.preset_ids.is_empty() {
+        let ids: Vec<&str> = self
+            .definition
+            .scene_track
+            .iter()
+            .map(|cue| cue.preset_id.as_str())
+            .collect();
+        if ids.is_empty() {
             return None;
         }
         let current = self.scene.active_preset_id.as_deref().unwrap_or("");
-        let idx = self
-            .preset_ids
-            .iter()
-            .position(|id| id == current)
-            .unwrap_or(0);
-        let next = (idx as i32 + delta).rem_euclid(self.preset_ids.len() as i32) as usize;
-        Some(self.preset_ids[next].clone())
+        let idx = ids.iter().position(|id| *id == current)?;
+        let next = idx as i32 + delta;
+        if next < 0 || next >= ids.len() as i32 {
+            return None;
+        }
+        Some(ids[next as usize].to_string())
     }
 
     fn manual_palette(&mut self, delta: i32) -> Vec<ShowVisualEvent> {
@@ -575,6 +585,7 @@ mod tests {
         c.handle(t0, ShowCommand::Start);
         c.handle(t0 + Duration::from_secs(60), ShowCommand::NextVisual);
         assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
+        assert_eq!(c.clock.elapsed_at(t0 + Duration::from_secs(60)), Duration::from_secs(60));
         assert_eq!(c.scene.last_processed_scheduled_index, Some(0));
         assert_eq!(c.palette.last_processed_scheduled_index, Some(0));
         // The 1200s scene edge is a no-op (already showing B) …
@@ -583,6 +594,25 @@ mod tests {
         let pal_events = c.tick(t0 + Duration::from_secs(3500));
         assert!(pal_events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
+    }
+
+    #[test]
+    fn manual_next_prev_follows_the_scene_track_and_stops_at_the_ends() {
+        let mut c = controller();
+        c.preset_ids.push("builtin-not-a-scene".into());
+        let t0 = Instant::now();
+        c.handle(t0, ShowCommand::Start);
+        let clock = c.clock.elapsed_at(t0);
+        assert!(c.handle(t0, ShowCommand::PrevVisual).is_empty());
+        assert_eq!(c.scene.active_preset_id.as_deref(), Some("A"));
+        c.handle(t0, ShowCommand::NextVisual);
+        assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
+        assert!(c.handle(t0, ShowCommand::NextVisual).is_empty());
+        assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
+        assert_ne!(c.scene.active_preset_id.as_deref(), Some("builtin-not-a-scene"));
+        c.handle(t0, ShowCommand::PrevVisual);
+        assert_eq!(c.scene.active_preset_id.as_deref(), Some("A"));
+        assert_eq!(c.clock.elapsed_at(t0), clock);
     }
 
     #[test]

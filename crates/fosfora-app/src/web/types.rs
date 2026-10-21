@@ -17,10 +17,18 @@ pub enum WsInMessage {
     },
     /// Load an effect by index on the active layer.
     LoadEffect { index: usize },
-    /// Select the active layer and show only that layer on the output.
+    /// Select the active layer. Does not change visibility.
     SelectLayer { index: usize },
-    /// Turn every layer back on after a solo.
+    /// Show only this layer until Solo is cleared. Authored `enabled` flags stay.
+    SetSolo { index: usize },
+    /// Restore authored visibility.
+    ClearSolo,
+    /// Older clients sent this for "show all". It only clears Solo.
     ShowAllLayers,
+    /// Move a layer. Index 0 is the front of the picture.
+    MoveLayer { from: usize, to: usize },
+    /// Save, discard, or cancel a Perform scene change that is waiting.
+    ResolvePending { action: String },
     /// Add a media layer from a file already written to disk.
     AddMedia { path: PathBuf },
     /// Files landed in the show library. Rescan; do not create layers.
@@ -103,6 +111,13 @@ fn default_one() -> f32 {
     1.0
 }
 
+/// A Solo button press. `Clear` restores the authored visibility mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoloRequest {
+    Set(usize),
+    Clear,
+}
+
 /// Result of WebSystem::update() — mirrors OscFrameResult with extras.
 pub struct WebFrameResult {
     pub triggers: Vec<TriggerAction>,
@@ -113,7 +128,9 @@ pub struct WebFrameResult {
     pub postprocess_enabled: Option<bool>,
     pub effect_loads: Vec<usize>,
     pub select_layer: Option<usize>,
-    pub show_all_layers: bool,
+    pub solo: Option<SoloRequest>,
+    pub layer_moves: Vec<(usize, usize)>,
+    pub resolve_pending: Option<String>,
     pub add_media: Vec<PathBuf>,
     pub rescan_library: bool,
     pub import_uploads: bool,
@@ -143,7 +160,9 @@ impl WebFrameResult {
             postprocess_enabled: None,
             effect_loads: Vec::new(),
             select_layer: None,
-            show_all_layers: false,
+            solo: None,
+            layer_moves: Vec::new(),
+            resolve_pending: None,
             add_media: Vec::new(),
             rescan_library: false,
             import_uploads: false,

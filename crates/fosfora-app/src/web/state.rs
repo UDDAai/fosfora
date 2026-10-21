@@ -22,6 +22,10 @@ pub struct FullState {
     pub save_state: String,
     pub save_detail: String,
     pub workspace_mode: String,
+    pub solo_layer: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_switch: Option<String>,
+    pub save_blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show: Option<crate::show::controller::ShowSnapshot>,
 }
@@ -43,6 +47,7 @@ pub struct LayerState {
     pub opacity: f32,
     pub enabled: bool,
     pub locked: bool,
+    pub pinned: bool,
     /// Filename when this layer is a video or image. Empty for shaders.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_name: Option<String>,
@@ -168,6 +173,9 @@ pub struct WebWorkspace<'a> {
     pub save_state: &'a str,
     pub save_detail: &'a str,
     pub mode: &'a str,
+    pub solo_layer: Option<usize>,
+    pub pending_switch: Option<String>,
+    pub save_blocked: bool,
 }
 
 pub fn build_full_state(
@@ -217,6 +225,7 @@ pub fn build_full_state(
                 opacity: info.opacity,
                 enabled: info.enabled,
                 locked: info.locked,
+                pinned: info.pinned,
                 media_name: info.media_file_name.clone(),
                 media_fit: info.media_file_name.as_ref().map(|_| info.media_fit.clone()),
                 media_width: info.media_file_name.as_ref().map(|_| info.media_width_scale),
@@ -255,6 +264,9 @@ pub fn build_full_state(
         save_state: workspace.save_state.to_string(),
         save_detail: workspace.save_detail.to_string(),
         workspace_mode: workspace.mode.to_string(),
+        solo_layer: workspace.solo_layer,
+        pending_switch: workspace.pending_switch.clone(),
+        save_blocked: workspace.save_blocked,
         show: show.cloned(),
     };
 
@@ -343,7 +355,7 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
         .defs
         .iter()
         .map(|def| {
-            let value = store.values.get(def.name());
+            let value = store.get(def.name());
             match def {
                 ParamDef::Float { name, min, max, .. } => {
                     let v = match value {
@@ -611,6 +623,9 @@ mod tests {
             save_state: "saved",
             save_detail: "",
             mode: "prepare",
+            solo_layer: None,
+            pending_switch: None,
+            save_blocked: false,
         };
         let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -653,6 +668,9 @@ mod tests {
             save_state: "saved",
             save_detail: "",
             mode: "prepare",
+            solo_layer: None,
+            pending_switch: None,
+            save_blocked: false,
         };
         let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();

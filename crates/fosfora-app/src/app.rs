@@ -41,6 +41,13 @@ use crate::ui::EguiOverlay;
 use crate::ui::panels::shader_editor::ShaderEditorState;
 use crate::web::WebSystem;
 
+/// A manual scene change that is waiting for Save, Discard, or Cancel.
+#[derive(Clone)]
+enum PendingSceneChange {
+    Show(crate::show::controller::ShowCommand),
+    Preset(usize),
+}
+
 pub struct App {
     pub gpu: GpuContext,
     pub start_time: Instant,
@@ -151,6 +158,10 @@ pub struct App {
     pub save_state: crate::show::scene_file::SaveState,
     pub scene_dirty: bool,
     pub scene_dirty_at: Option<Instant>,
+    /// Scene id whose layer stack is actually on screen. Save writes this id,
+    /// never a preset that has only been requested.
+    applied_scene_id: Option<String>,
+    pending_scene_change: Option<PendingSceneChange>,
     // Webcam capture (feature-gated)
     #[cfg(feature = "webcam")]
     pub webcam_capture: Option<WebcamBackend>,
@@ -630,6 +641,8 @@ impl App {
             save_state: crate::show::scene_file::SaveState::Saved,
             scene_dirty: false,
             scene_dirty_at: None,
+            applied_scene_id: None,
+            pending_scene_change: None,
             #[cfg(feature = "webcam")]
             webcam_capture: None,
             #[cfg(feature = "webcam")]
@@ -1058,25 +1071,35 @@ impl App {
                 }
             }
 
-            // Handle layer selection from web. A click solos that layer onto
-            // the output: the row highlight alone left every layer above it
-            // covering the picture.
+            // A click only selects. Solo is a separate, unsaved output mask.
             let mut web_stack_changed = false;
+            let mut view_changed = false;
             if let Some(idx) = web_result.select_layer {
                 if idx < self.layer_stack.layers.len() {
-                    for (i, layer) in self.layer_stack.layers.iter_mut().enumerate() {
-                        layer.enabled = i == idx;
-                    }
                     self.layer_stack.active_layer = idx;
                     self.sync_active_layer();
-                    web_stack_changed = true;
+                    view_changed = true;
                 }
             }
-            if web_result.show_all_layers {
-                for layer in &mut self.layer_stack.layers {
-                    layer.enabled = true;
+            if let Some(solo) = web_result.solo {
+                match solo {
+                    crate::web::types::SoloRequest::Set(idx)
+                        if idx < self.layer_stack.layers.len() =>
+                    {
+                        self.layer_stack.solo_layer = Some(idx);
+                        view_changed = true;
+                    }
+                    crate::web::types::SoloRequest::Clear => {
+                        self.layer_stack.solo_layer = None;
+                        view_changed = true;
+                    }
+                    crate::web::types::SoloRequest::Set(_) => {}
                 }
-                web_stack_changed = true;
+            }
+            for (from, to) in web_result.layer_moves {
+                if self.move_layer(from, to) {
+                    web_stack_changed = true;
+                }
             }
             for path in web_result.add_media {
                 self.add_media_layer(path);
@@ -1139,6 +1162,10 @@ impl App {
                 self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&mode);
                 self.remember_workspace();
             }
+            if let Some(action) = web_result.resolve_pending.clone() {
+                self.resolve_pending_scene_change(&action);
+                view_changed = true;
+            }
             if web_result.save_scene {
                 let _ = self.save_open_scene();
                 web_stack_changed = true;
@@ -1152,11 +1179,9 @@ impl App {
             if edited && !web_result.save_scene {
                 self.note_scene_edit(now);
             }
-            if web_stack_changed {
-                self.broadcast_web_state(now);
-            }
 
             // Handle show commands from web
+            let had_show_commands = !web_result.show_commands.is_empty();
             for cmd in web_result.show_commands {
                 self.show_command(cmd);
             }
@@ -1177,8 +1202,8 @@ impl App {
                 self.post_process.grade.enabled = enabled;
             }
 
-            // A pack preset is a scene. Remember its id so Save Scene writes
-            // that file, and do not start the show clock.
+            // A pack preset is a scene. Save still targets the scene that is
+            // actually on screen; that id changes only when the load finishes.
             let had_preset_loads = !web_result.preset_loads.is_empty();
             for preset_idx in web_result.preset_loads {
                 let preset_name = self
@@ -1191,18 +1216,15 @@ impl App {
                         .as_ref()
                         .is_some_and(|show| show.preset_ids.iter().any(|id| id == name))
                 });
-                if pack_scene && self.scene_dirty {
-                    if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
-                        if self.save_open_scene().is_err() {
-                            continue;
-                        }
-                    } else {
-                        self.status_error = Some((
-                            "Unsaved changes were not written. Press Save Changes to keep this scene."
-                                .into(),
-                            Instant::now(),
-                        ));
-                    }
+                if pack_scene && self.hold_or_save_before_manual_switch() {
+                    self.pending_scene_change = Some(PendingSceneChange::Preset(preset_idx));
+                    self.status_error = Some((
+                        "Unsaved changes. Save, discard, or cancel before switching scenes."
+                            .into(),
+                        Instant::now(),
+                    ));
+                    view_changed = true;
+                    continue;
                 }
                 self.load_preset(preset_idx);
                 if pack_scene {
@@ -1211,17 +1233,12 @@ impl App {
                             show.scene.manual_set_preset(name);
                         }
                     }
-                    self.scene_dirty = false;
-                    self.scene_dirty_at = None;
-                    self.save_state = crate::show::scene_file::SaveState::Saved;
                     self.remember_workspace();
                 }
             }
 
-            // After preset load, broadcast full state so all clients update
-            if had_preset_loads && self.web.client_count > 0 {
-                let state_json = self.full_state_json(now);
-                self.web.broadcast_json(&state_json);
+            if edited || view_changed || had_preset_loads || had_show_commands {
+                self.broadcast_web_state(now);
             }
         }
 
@@ -2458,16 +2475,20 @@ impl App {
     ///
     /// Reordering used to leave "rms → layer 0 opacity" behind on slot 0 while the
     /// effect that binding was made for moved elsewhere.
-    pub fn move_layer(&mut self, from: usize, to: usize) {
+    pub fn move_layer(&mut self, from: usize, to: usize) -> bool {
         let n = self.layer_stack.layers.len();
         if from >= n || to >= n || from == to {
-            return;
+            return false;
+        }
+        if self.layer_stack.layers[from].pinned {
+            return false;
         }
         self.layer_stack.move_layer(from, to);
         self.binding_bus.remap_layer_targets(|old| {
             Some(crate::bindings::bus::layer_index_after_move(old, from, to))
         });
         self.sync_active_layer();
+        true
     }
 
     fn show_snapshot(&self, now: Instant) -> crate::show::controller::ShowSnapshot {
@@ -2522,6 +2543,12 @@ impl App {
             save_state: self.save_state.code(),
             save_detail: &save_detail,
             mode: self.workspace_mode.as_str(),
+            solo_layer: self.layer_stack.solo_layer,
+            pending_switch: self.pending_switch_label(),
+            save_blocked: matches!(
+                self.preset_loader.state,
+                crate::preset::loader::PresetLoadingState::Loading { .. }
+            ),
         };
         crate::web::state::build_full_state(
             &self.effect_loader.effects,
@@ -2803,13 +2830,128 @@ impl App {
         }
     }
 
-    /// Write the live stack into the show pack under the current scene id.
+    /// True when a manual scene change must not run yet.
+    ///
+    /// Prepare saves first and blocks the switch when that save fails.
+    /// Perform never writes on its own; the caller holds the change until
+    /// Save, Discard, or Cancel.
+    fn hold_or_save_before_manual_switch(&mut self) -> bool {
+        if !self.scene_dirty {
+            return false;
+        }
+        if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
+            return self.save_open_scene().is_err();
+        }
+        true
+    }
+
+    fn pending_switch_label(&self) -> Option<String> {
+        let pending = self.pending_scene_change.as_ref()?;
+        Some(match pending {
+            PendingSceneChange::Show(cmd) => match cmd {
+                crate::show::controller::ShowCommand::NextVisual => "Next scene is waiting".into(),
+                crate::show::controller::ShowCommand::PrevVisual => {
+                    "Previous scene is waiting".into()
+                }
+                crate::show::controller::ShowCommand::Start => "Start is waiting".into(),
+                crate::show::controller::ShowCommand::Reset => "Reset is waiting".into(),
+                crate::show::controller::ShowCommand::Seek { secs } => {
+                    format!("Seek to {secs}s is waiting")
+                }
+                _ => "Scene change is waiting".into(),
+            },
+            PendingSceneChange::Preset(index) => {
+                let name = self
+                    .preset_store
+                    .presets
+                    .get(*index)
+                    .map(|(name, _)| name.as_str())
+                    .unwrap_or("preset");
+                format!("Load {name} is waiting")
+            }
+        })
+    }
+
+    fn resolve_pending_scene_change(&mut self, action: &str) {
+        let Some(pending) = self.pending_scene_change.clone() else {
+            return;
+        };
+        match action {
+            "cancel" => self.pending_scene_change = None,
+            "discard" => {
+                self.pending_scene_change = None;
+                self.scene_dirty = false;
+                self.scene_dirty_at = None;
+                self.save_state = crate::show::scene_file::SaveState::Saved;
+                self.perform_pending_scene_change(pending);
+            }
+            "save" => {
+                if self.save_open_scene().is_ok() {
+                    self.pending_scene_change = None;
+                    self.perform_pending_scene_change(pending);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn perform_pending_scene_change(&mut self, pending: PendingSceneChange) {
+        match pending {
+            PendingSceneChange::Show(cmd) => self.show_command(cmd),
+            PendingSceneChange::Preset(index) => {
+                let name = self
+                    .preset_store
+                    .presets
+                    .get(index)
+                    .map(|(preset_name, _)| preset_name.clone());
+                self.load_preset(index);
+                if let Some(name) = name {
+                    if let Some(show) = self.show.as_mut() {
+                        show.scene.manual_set_preset(name);
+                    }
+                }
+                self.remember_workspace();
+            }
+        }
+    }
+
+    /// A scheduled cue must not wait on a dialog and must not replace the
+    /// production preset with unsaved Perform edits.
+    fn stash_unsaved_scene_draft(&mut self) {
+        if !self.scene_dirty {
+            return;
+        }
+        let Some(id) = self.applied_scene_id.clone() else {
+            return;
+        };
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        if let Some(preset) = self.capture_current_preset() {
+            match crate::show::scene_file::write_scene_draft(&root, &id, &preset) {
+                Ok(path) => log::info!("Kept unsaved scene draft at {}", path.display()),
+                Err(err) => log::warn!("scene draft: {err:#}"),
+            }
+        }
+        self.scene_dirty = false;
+        self.scene_dirty_at = None;
+    }
+
+    /// Write the live stack into the show pack under the applied scene id.
     pub fn save_open_scene(&mut self) -> Result<(), String> {
+        if matches!(
+            self.preset_loader.state,
+            crate::preset::loader::PresetLoadingState::Loading { .. }
+        ) {
+            let message = "Scene is still loading".to_string();
+            self.save_state = crate::show::scene_file::SaveState::Failed(message.clone());
+            self.status_error = Some((message.clone(), Instant::now()));
+            return Err(message);
+        }
         let id = self
-            .show
-            .as_ref()
-            .and_then(|show| show.scene.active_preset_id.clone())
-            .ok_or_else(|| "No scene is selected".to_string())?;
+            .applied_scene_id
+            .clone()
+            .ok_or_else(|| "Scene is still loading".to_string())?;
         self.save_scene_id(&id)
     }
 
@@ -2924,6 +3066,12 @@ impl App {
 
     fn autosave_if_due(&mut self, now: Instant) {
         if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare || !self.scene_dirty {
+            return;
+        }
+        if matches!(
+            self.preset_loader.state,
+            crate::preset::loader::PresetLoadingState::Loading { .. }
+        ) {
             return;
         }
         let Some(at) = self.scene_dirty_at else {
@@ -3704,8 +3852,11 @@ impl App {
                 );
             }
         }
+        self.layer_stack.solo_layer = None;
         if let Some((name, _)) = self.preset_store.presets.get(index) {
-            log::info!("Loaded preset '{}'", name);
+            let name = name.clone();
+            log::info!("Loaded preset '{name}'");
+            self.applied_scene_id = Some(name);
         }
     }
 
@@ -4007,10 +4158,9 @@ impl App {
             .unwrap_or_default();
         self.media_library = Some(crate::media::library::MediaLibrary::open(root));
         self.restore_editing_session();
-        // Hibernation's picture is graded from the open palette. Strength 0
-        // leaves ordinary Fosfora presets untouched; a show pack starts on.
-        self.post_process.grade.enabled = true;
-        self.post_process.grade.strength = 0.75;
+        // Grade strength comes from the saved workspace. A pack with no
+        // workspace file still starts at 0.75 with the grade on, via
+        // WorkspaceFile::fresh. Do not overwrite a restored value here.
         let opening = self.show.as_ref().and_then(|show| {
             crate::palette::controller::palette_colors_at(
                 &show.definition.palette_track,
@@ -4067,15 +4217,17 @@ impl App {
         // fill frames between cue edges without new events. Computed without
         // holding the show borrow so `apply_palette_map` can take `&mut self`.
         let colors = match self.show.as_ref() {
-            Some(show) if show.auto_enabled => {
+            Some(show) => {
                 let elapsed = show.clock.elapsed_at(now);
-                crate::palette::controller::palette_colors_at(
+                crate::palette::controller::automated_palette_colors(
+                    show.palette.manual,
+                    show.auto_enabled,
                     &show.definition.palette_track,
                     &show.palettes,
                     elapsed,
                 )
             }
-            _ => None,
+            None => None,
         };
         if let Some(colors) = colors {
             self.apply_palette_map(colors);
@@ -4088,6 +4240,7 @@ impl App {
         use crate::show::controller::ShowVisualEvent;
         match event {
             ShowVisualEvent::Scene(action) => {
+                self.stash_unsaved_scene_draft();
                 let cue_index = self
                     .timeline
                     .cues
@@ -4205,6 +4358,9 @@ fn slot_rgb(
         let Some(set) = bindings else {
             return;
         };
+        for layer in &mut self.layer_stack.layers {
+            layer.param_store.clear_runtime();
+        }
         for b in &set.bindings {
             let Some(value) = colors.get(&b.slot) else {
                 continue;
@@ -4234,18 +4390,13 @@ fn slot_rgb(
                 | crate::show::controller::ShowCommand::NextVisual
                 | crate::show::controller::ShowCommand::PrevVisual
         );
-        if switches_scene && self.scene_dirty {
-            if self.workspace_mode == crate::show::scene_file::WorkspaceMode::Prepare {
-                if self.save_open_scene().is_err() {
-                    return;
-                }
-            } else {
-                self.status_error = Some((
-                    "Unsaved changes were not written. Press Save Changes to keep this scene."
-                        .into(),
-                    Instant::now(),
-                ));
-            }
+        if switches_scene && self.hold_or_save_before_manual_switch() {
+            self.pending_scene_change = Some(PendingSceneChange::Show(cmd));
+            self.status_error = Some((
+                "Unsaved changes. Save, discard, or cancel before switching scenes.".into(),
+                Instant::now(),
+            ));
+            return;
         }
         let events = match self.show.as_mut() {
             Some(show) => show.handle(now, cmd.clone()),

@@ -126,13 +126,7 @@ pub(crate) fn execute_and_composite<'a>(
     // Headless passes None and stays chain-free until #2063.
     let mut trama = trama;
 
-    let enabled: Vec<usize> = layer_stack
-        .layers
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.enabled)
-        .map(|(i, _)| i)
-        .collect();
+    let enabled: Vec<usize> = layer_stack.visible_indices();
 
     let active_postprocess = || {
         layer_stack

@@ -4,7 +4,12 @@ use super::types::{ParamDef, ParamValue};
 
 pub struct ParamStore {
     pub defs: Vec<ParamDef>,
+    /// Authored values. Preset save reads this map, so palette playback must
+    /// not write here.
     pub values: HashMap<String, ParamValue>,
+    /// Palette playback overlay. Drawn over `values` until the next preset
+    /// load or an explicit `set` of the same parameter.
+    runtime: HashMap<String, ParamValue>,
     pub changed: bool,
 }
 
@@ -13,6 +18,7 @@ impl ParamStore {
         Self {
             defs: Vec::new(),
             values: HashMap::new(),
+            runtime: HashMap::new(),
             changed: false,
         }
     }
@@ -20,6 +26,7 @@ impl ParamStore {
     pub fn load_from_defs(&mut self, defs: &[ParamDef]) {
         self.defs = defs.to_vec();
         self.values.clear();
+        self.runtime.clear();
         self.changed = false;
         for def in defs {
             self.values
@@ -53,6 +60,7 @@ impl ParamStore {
         }
         self.defs = new_defs.to_vec();
         self.values = new_values;
+        self.runtime.clear();
         self.changed = true;
     }
 
@@ -63,17 +71,26 @@ impl ParamStore {
     }
 
     pub fn set(&mut self, name: &str, value: ParamValue) {
+        self.runtime.remove(name);
         self.values.insert(name.to_string(), value);
         self.changed = true;
     }
 
-    /// Runtime write used by palette playback — never marks the store dirty.
+    /// Palette playback overlay. Does not mark the store dirty and does not
+    /// replace the authored value that a scene save writes.
     pub fn set_runtime(&mut self, name: &str, value: ParamValue) {
-        self.values.insert(name.to_string(), value);
+        self.runtime.insert(name.to_string(), value);
     }
 
+    /// Drop palette overlays. Called before a new palette map is applied so a
+    /// parameter that is no longer bound returns to its authored value.
+    pub fn clear_runtime(&mut self) {
+        self.runtime.clear();
+    }
+
+    /// Effective value: the palette overlay when present, otherwise authored.
     pub fn get(&self, name: &str) -> Option<&ParamValue> {
-        self.values.get(name)
+        self.runtime.get(name).or_else(|| self.values.get(name))
     }
 
     pub fn reset(&mut self, name: &str) {
@@ -117,7 +134,7 @@ impl ParamStore {
             if offset >= 16 {
                 break;
             }
-            if let Some(value) = self.values.get(def.name()) {
+            if let Some(value) = self.get(def.name()) {
                 let count = value.float_count();
                 if offset + count <= 16 {
                     value.write_to(&mut buf, offset);
@@ -201,11 +218,23 @@ mod tests {
     fn set_runtime_does_not_mark_changed() {
         let mut s = ParamStore::new();
         s.load_from_defs(&test_defs());
+        s.set("speed", ParamValue::Float(0.2));
+        s.changed = false;
         s.set_runtime("speed", ParamValue::Float(0.8));
         assert!(!s.changed);
         match s.get("speed") {
             Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.8, 1e-6)),
             _ => panic!("expected Float"),
+        }
+        match s.values.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.2, 1e-6)),
+            _ => panic!("authored value was overwritten"),
+        }
+        assert!(approx_eq(s.pack_to_buffer()[0], 0.8, 1e-6));
+        s.set("speed", ParamValue::Float(0.4));
+        match s.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.4, 1e-6)),
+            _ => panic!("explicit edit did not clear the palette overlay"),
         }
     }
 

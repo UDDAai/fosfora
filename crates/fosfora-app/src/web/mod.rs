@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 
-use self::types::{WebConfig, WebFrameResult, WsInMessage};
+use self::types::{SoloRequest, WebConfig, WebFrameResult, WsInMessage};
 use crate::audio::features::AudioFeatures;
 use std::collections::HashMap;
 
@@ -175,8 +175,17 @@ impl WebSystem {
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
-                WsInMessage::ShowAllLayers => {
-                    result.show_all_layers = true;
+                WsInMessage::SetSolo { index } => {
+                    result.solo = Some(SoloRequest::Set(index));
+                }
+                WsInMessage::ClearSolo | WsInMessage::ShowAllLayers => {
+                    result.solo = Some(SoloRequest::Clear);
+                }
+                WsInMessage::MoveLayer { from, to } => {
+                    result.layer_moves.push((from, to));
+                }
+                WsInMessage::ResolvePending { action } => {
+                    result.resolve_pending = Some(action);
                 }
                 WsInMessage::AddMedia { path } => {
                     result.add_media.push(path);
@@ -304,8 +313,17 @@ impl WebSystem {
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
-                WsInMessage::ShowAllLayers => {
-                    result.show_all_layers = true;
+                WsInMessage::SetSolo { index } => {
+                    result.solo = Some(SoloRequest::Set(index));
+                }
+                WsInMessage::ClearSolo | WsInMessage::ShowAllLayers => {
+                    result.solo = Some(SoloRequest::Clear);
+                }
+                WsInMessage::MoveLayer { from, to } => {
+                    result.layer_moves.push((from, to));
+                }
+                WsInMessage::ResolvePending { action } => {
+                    result.resolve_pending = Some(action);
                 }
                 WsInMessage::AddMedia { path } => {
                     result.add_media.push(path);
