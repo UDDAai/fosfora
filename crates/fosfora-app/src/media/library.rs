@@ -1211,7 +1211,7 @@ fn pack_files(pack_root: &Path) -> Vec<SeenFile> {
 
 fn primary_files(primary: &Path) -> Vec<SeenFile> {
     let mut files = Vec::new();
-    for (folder, alias) in [("video", "video"), ("images", "images")] {
+    for folder in ["video", "images", ""] {
         let dir = primary.join(folder);
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -1227,9 +1227,14 @@ fn primary_files(primary: &Path) -> Vec<SeenFile> {
             if media_kind(name).is_none() {
                 continue;
             }
+            let kind = if folder.is_empty() {
+                if media_kind(name) == Some("video") { "video" } else { "images" }
+            } else {
+                folder
+            };
             files.push(SeenFile {
                 path,
-                id: format!("assets/{alias}/{name}"),
+                id: format!("assets/{kind}/{name}"),
                 location: "external".into(),
                 source: primary.to_string_lossy().to_string(),
             });
@@ -1448,8 +1453,19 @@ pub fn resolve_pack_media_path(pack_root: &Path, stored: &str) -> PathBuf {
             })
             .collect();
         if !rest.as_os_str().is_empty() {
-            let external = root.join(kind).join(rest);
-            if external.is_file() || !pack_path.is_file() {
+            let external = root.join(kind).join(&rest);
+            if external.is_file() {
+                return external;
+            }
+            // Existing iCloud folders may contain a flat set of files.
+            // Accept those without forcing a destructive reorganisation.
+            if rest.components().count() == 1 {
+                let flat = root.join(&rest);
+                if flat.is_file() {
+                    return flat;
+                }
+            }
+            if !pack_path.is_file() {
                 return external;
             }
         }
@@ -1467,20 +1483,32 @@ pub fn virtual_media_path(pack_root: &Path, media: &Path) -> Option<String> {
         let real_media = fs::canonicalize(media).ok()?;
         real_media.strip_prefix(real_root).ok()?.to_path_buf()
     };
-    let rest = relative.as_path();
-    let mut parts = rest.components();
-    let kind = match parts.next()? {
-        std::path::Component::Normal(name) if name == "video" || name == "images" => name,
+    let mut parts = relative.components();
+    let first = parts.next()?;
+    let mut tail = PathBuf::new();
+    let kind = match first {
+        std::path::Component::Normal(name) if name == "video" || name == "images" => {
+            for part in parts {
+                if let std::path::Component::Normal(name) = part {
+                    tail.push(name);
+                } else {
+                    return None;
+                }
+            }
+            name.to_string_lossy().into_owned()
+        }
+        // A flat primary directory is supported as well as video/ and images/.
+        std::path::Component::Normal(name) if parts.next().is_none() => {
+            let kind = media_kind(name.to_str()?)?;
+            tail.push(name);
+            if kind == "video" { "video".into() } else { "images".into() }
+        }
         _ => return None,
     };
-    let tail: PathBuf = parts.map(|part| match part {
-        std::path::Component::Normal(name) => Some(name),
-        _ => None,
-    }).collect::<Option<PathBuf>>()?;
     if tail.as_os_str().is_empty() {
         return None;
     }
-    Some(format!("assets/{}/{}", kind.to_string_lossy(), tail.to_string_lossy()).replace('\\', "/"))
+    Some(format!("assets/{kind}/{}", tail.to_string_lossy()).replace('\\', "/"))
 }
 
 fn load_sources(pack_root: &Path) -> SourcePaths {
@@ -1506,6 +1534,9 @@ struct SourcePaths {
 fn watch_dirs(folders: &[PathBuf], files: &[PathBuf], primary: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = folders.to_vec();
     if let Some(primary) = primary {
+        if primary.is_dir() {
+            dirs.push(primary.to_path_buf());
+        }
         for subfolder in ["video", "images"] {
             let path = primary.join(subfolder);
             if path.is_dir() {
