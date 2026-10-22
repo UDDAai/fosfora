@@ -420,6 +420,27 @@ fn is_websocket_upgrade(request: &str) -> bool {
     lower.contains("upgrade: websocket") || lower.contains("upgrade:websocket")
 }
 
+/// Pages the controller keeps in the address bar. A refresh of `/layers` must
+/// receive the same document as `/`, or the browser is sent back to Layers' root.
+fn is_control_document(path: &str) -> bool {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let path = if path.len() > 1 {
+        path.trim_end_matches('/')
+    } else {
+        path
+    };
+    matches!(
+        path,
+        "/" | "/index.html"
+            | "/control"
+            | "/layers"
+            | "/look"
+            | "/picture"
+            | "/library"
+            | "/show"
+    )
+}
+
 fn serve_http(stream: &mut TcpStream, request: &str) {
     // Parse the request path
     let path = request
@@ -428,11 +449,14 @@ fn serve_http(stream: &mut TcpStream, request: &str) {
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
 
-    let (status, content_type, body) = match path {
-        "/" | "/index.html" | "/control" => {
-            let html = get_html_content();
-            ("200 OK", "text/html; charset=utf-8", html)
-        }
+    if is_control_document(path) {
+        let html = get_html_content();
+        let _ = write_http(stream, "200 OK", "text/html; charset=utf-8", &html);
+        return;
+    }
+
+    let bare = path.split('?').next().unwrap_or(path);
+    let (status, content_type, body) = match bare {
         "/health" => (
             "200 OK",
             "application/json",
@@ -506,6 +530,25 @@ impl Write for ReplayStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_controller_page_is_served_in_place() {
+        for path in [
+            "/",
+            "/layers",
+            "/look",
+            "/picture",
+            "/library",
+            "/show",
+            "/layers?kept=1",
+            "/control",
+        ] {
+            assert!(is_control_document(path), "{path}");
+        }
+        assert!(!is_control_document("/health"));
+        assert!(!is_control_document("/api/media"));
+        assert!(!is_control_document("/ws"));
+    }
 
     #[test]
     fn upload_names_stay_a_single_segment() {
