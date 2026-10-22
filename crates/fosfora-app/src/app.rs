@@ -4411,7 +4411,14 @@ impl App {
             // p2-ownership conflict scan belongs on the controller so the bus
             // guard, validator, and tests share one implementation.
             let conflicts = controller.palette_conflicts(external);
-            controller.validate(&pack.presets, &media, &conflicts)
+            let mut report = controller.validate(&pack.presets, &media, &conflicts);
+            report.issues.extend(
+                crate::show::validation::validate_audio_binding_targets(
+                    &pack.presets,
+                    &pack.audio_bindings,
+                ),
+            );
+            report
         };
         log::info!(
             "Show pack '{}' loaded: {} scene cues, {} palette cues — {}",
