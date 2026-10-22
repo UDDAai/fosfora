@@ -85,6 +85,10 @@ struct CachedProbe {
 
 #[derive(Default, Serialize, Deserialize)]
 struct SourceFile {
+    /// Local-only override for the show's video/ and images/ directories.
+    /// Stored in gitignored media-sources.json, never in authored presets.
+    #[serde(default)]
+    primary_media_root: Option<String>,
     #[serde(default)]
     linked_folders: Vec<String>,
     /// Individual files registered from Finder. The bytes stay at this path.
@@ -106,6 +110,7 @@ pub struct MediaLibrary {
     pub pack_root: PathBuf,
     pub items: Vec<LibraryItem>,
     pub warnings: Vec<String>,
+    primary_media_root: Option<PathBuf>,
     linked_folders: Vec<PathBuf>,
     linked_files: Vec<PathBuf>,
     hidden: Vec<String>,
@@ -178,7 +183,11 @@ impl MediaLibrary {
         let sources = load_sources(&pack_root);
         let watch = start_watch(
             &pack_root,
-            &watch_dirs(&sources.linked_folders, &sources.linked_files),
+            &watch_dirs(
+                &sources.linked_folders,
+                &sources.linked_files,
+                sources.primary_media_root.as_deref(),
+            ),
         );
         // The last scan's list shows at once; a fresh scan replaces it.
         let cached = fs::read_to_string(library_json_path(&pack_root))
@@ -189,6 +198,7 @@ impl MediaLibrary {
             pack_root,
             items: cached,
             warnings: Vec::new(),
+            primary_media_root: sources.primary_media_root,
             linked_folders: sources.linked_folders,
             linked_files: sources.linked_files,
             hidden: sources.hidden,
@@ -357,6 +367,14 @@ impl MediaLibrary {
                 used.join(", ")
             ));
         }
+        if item.location == "external" {
+            // This is the user's primary iCloud/other external library.
+            // Removing files from it would also delete them on synced devices.
+            return Err(format!(
+                "{} belongs to the external media folder. Manage or archive it in Finder; Fosfora will not delete it.",
+                item.name
+            ));
+        }
         if item.location == "linked" {
             let path = PathBuf::from(&item.path);
             let canon = fs::canonicalize(&path).unwrap_or(path);
@@ -426,7 +444,11 @@ impl MediaLibrary {
         self.write_sources();
         if let Some(watch) = start_watch(
             &self.pack_root,
-            &watch_dirs(&self.linked_folders, &self.linked_files),
+            &watch_dirs(
+                &self.linked_folders,
+                &self.linked_files,
+                self.primary_media_root.as_deref(),
+            ),
         ) {
             self.watch = Some(watch);
         }
@@ -443,6 +465,7 @@ impl MediaLibrary {
 
     fn write_sources(&self) {
         let file = SourceFile {
+            primary_media_root: self.primary_media_root.as_ref().map(|path| path.to_string_lossy().to_string()),
             linked_folders: self
                 .linked_folders
                 .iter()
@@ -459,8 +482,14 @@ impl MediaLibrary {
     }
 
     pub fn reveal_in_finder(&self) -> Result<(), String> {
-        let dir = self.pack_root.join("assets");
-        let _ = fs::create_dir_all(&dir);
+        let dir = self.primary_media_root.clone()
+            .unwrap_or_else(|| self.pack_root.join("assets"));
+        if self.primary_media_root.is_some() && !dir.is_dir() {
+            return Err(format!("The configured media folder is unavailable: {}", dir.display()));
+        }
+        if self.primary_media_root.is_none() {
+            let _ = fs::create_dir_all(&dir);
+        }
         open_folder(&dir)
     }
 
@@ -476,7 +505,7 @@ impl MediaLibrary {
         if let Some(item) = self.items.iter().find(|item| item.id == id) {
             return item_file(&self.pack_root, item);
         }
-        let direct = self.pack_root.join(id);
+        let direct = resolve_pack_media_path(&self.pack_root, id);
         direct.is_file().then_some(direct)
     }
 }
@@ -898,14 +927,10 @@ fn describe_file(
     Some(LibraryItem {
         id: seen.id.clone(),
         name,
-        path: if seen.location == "pack" {
-            seen.path
-                .strip_prefix(pack_root)
-                .unwrap_or(&seen.path)
-                .to_string_lossy()
-                .replace('\\', "/")
-        } else {
+        path: if seen.location == "linked" {
             seen.path.to_string_lossy().to_string()
+        } else {
+            seen.id.clone()
         },
         kind: probe.kind,
         bytes: meta.len(),
@@ -1218,7 +1243,7 @@ fn item_file(pack_root: &Path, item: &LibraryItem) -> Option<PathBuf> {
     let path = if item.location == "linked" {
         PathBuf::from(&item.path)
     } else {
-        pack_root.join(&item.path)
+        resolve_pack_media_path(pack_root, &item.path)
     };
     path.is_file().then_some(path)
 }
@@ -1306,12 +1331,81 @@ fn load_cache(pack_root: &Path) -> ProbeCache {
         .unwrap_or_default()
 }
 
+/// Optional primary media directory, usually on an external disk or iCloud Drive.
+/// This is local configuration: the config file is excluded from show-pack Git.
+pub fn primary_media_root(pack_root: &Path) -> Option<PathBuf> {
+    let candidate = load_sources(pack_root).primary_media_root?;
+    candidate.is_absolute().then_some(candidate)
+}
+
+/// Keep saved paths portable even when the physical media lives outside the
+/// show pack. Only assets/video/* and assets/images/* are redirected.
+pub fn resolve_pack_media_path(pack_root: &Path, stored: &str) -> PathBuf {
+    let path = Path::new(stored);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let pack_path = pack_root.join(path);
+    let mut components = path.components();
+    let in_media = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(a)), Some(std::path::Component::Normal(kind)))
+            if a == "assets" && (kind == "video" || kind == "images") =>
+        {
+            Some(kind.to_os_string())
+        }
+        _ => None,
+    };
+    if let (Some(kind), Some(root)) = (in_media, primary_media_root(pack_root)) {
+        // Reject traversal; only ordinary file components can extend the media root.
+        let rest: PathBuf = components
+            .filter_map(|part| match part {
+                std::path::Component::Normal(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        if !rest.as_os_str().is_empty() {
+            let external = root.join(kind).join(rest);
+            if external.is_file() || !pack_path.is_file() {
+                return external;
+            }
+        }
+    }
+    pack_path
+}
+
+/// Convert a primary-library absolute path back into the stable stored alias.
+pub fn virtual_media_path(pack_root: &Path, media: &Path) -> Option<String> {
+    let root = primary_media_root(pack_root)?;
+    let relative = if let Ok(relative) = media.strip_prefix(&root) {
+        relative.to_path_buf()
+    } else {
+        let real_root = fs::canonicalize(&root).ok()?;
+        let real_media = fs::canonicalize(media).ok()?;
+        real_media.strip_prefix(real_root).ok()?.to_path_buf()
+    };
+    let rest = relative.as_path();
+    let mut parts = rest.components();
+    let kind = match parts.next()? {
+        std::path::Component::Normal(name) if name == "video" || name == "images" => name,
+        _ => return None,
+    };
+    let tail: PathBuf = parts.map(|part| match part {
+        std::path::Component::Normal(name) => Some(name),
+        _ => None,
+    }).collect::<Option<PathBuf>>()?;
+    if tail.as_os_str().is_empty() {
+        return None;
+    }
+    Some(format!("assets/{}/{}", kind.to_string_lossy(), tail.to_string_lossy()).replace('\\', "/"))
+}
+
 fn load_sources(pack_root: &Path) -> SourcePaths {
     let file = fs::read_to_string(pack_root.join("media-sources.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<SourceFile>(&text).ok())
         .unwrap_or_default();
     SourcePaths {
+        primary_media_root: file.primary_media_root.map(PathBuf::from),
         linked_folders: file.linked_folders.into_iter().map(PathBuf::from).collect(),
         linked_files: file.linked_files.into_iter().map(PathBuf::from).collect(),
         hidden: file.hidden,
@@ -1319,13 +1413,22 @@ fn load_sources(pack_root: &Path) -> SourcePaths {
 }
 
 struct SourcePaths {
+    primary_media_root: Option<PathBuf>,
     linked_folders: Vec<PathBuf>,
     linked_files: Vec<PathBuf>,
     hidden: Vec<String>,
 }
 
-fn watch_dirs(folders: &[PathBuf], files: &[PathBuf]) -> Vec<PathBuf> {
+fn watch_dirs(folders: &[PathBuf], files: &[PathBuf], primary: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = folders.to_vec();
+    if let Some(primary) = primary {
+        for subfolder in ["video", "images"] {
+            let path = primary.join(subfolder);
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
     for path in files {
         if let Some(parent) = path.parent() {
             if parent.is_dir() && !dirs.iter().any(|dir| dir == parent) {
