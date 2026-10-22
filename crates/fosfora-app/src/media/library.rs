@@ -381,7 +381,7 @@ impl MediaLibrary {
         // Preserve imported footage even if an unsaved scene still refers to it.
         // A hidden recovery directory inside the pack keeps the move on the same
         // volume and allows the operator to restore the original file later.
-        let recovery = self.pack_root.join("recovery").join("removed-media");
+        let recovery = self.pack_root.join("recovery").join("history").join("removed-media");
         fs::create_dir_all(&recovery).map_err(|err| err.to_string())?;
         let dest = unique_dest(&recovery, &item.name);
         fs::rename(&path, &dest).map_err(|err| err.to_string())?;
@@ -1767,7 +1767,7 @@ mod tests {
         let notice = lib.remove_item(&spare).unwrap();
         assert!(notice.contains("recover it at"));
         assert!(!root.join("assets/images/spare.png").exists());
-        assert!(root.join("recovery/removed-media/spare.png").exists());
+        assert!(root.join("recovery/history/removed-media/spare.png").exists());
         assert!(lib.items.iter().all(|item| item.name != "spare.png"));
         let _ = fs::remove_dir_all(&root);
     }
