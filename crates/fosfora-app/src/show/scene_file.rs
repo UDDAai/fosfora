@@ -134,11 +134,15 @@ pub fn portable_media_path(pack_root: &Path, stored: &str) -> String {
     } else {
         pack_root.join(path)
     };
-    if let Ok(rel) = absolute.strip_prefix(pack_root) {
-        return rel.to_string_lossy().replace('\\', "/");
-    }
+    // Prefer a configured media-root alias even if the external folder is
+    // physically nested under the pack (as in a test fixture or local worktree).
+    // Otherwise a path such as "cloud library/video/clip.mp4" leaks into the
+    // saved preset instead of its portable assets/video/clip.mp4 identity.
     if let Some(alias) = crate::media::library::virtual_media_path(pack_root, &absolute) {
         return alias;
+    }
+    if let Ok(rel) = absolute.strip_prefix(pack_root) {
+        return rel.to_string_lossy().replace('\\', "/");
     }
     stored.replace('\\', "/")
 }
