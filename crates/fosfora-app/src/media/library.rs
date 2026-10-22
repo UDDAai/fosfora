@@ -484,8 +484,8 @@ impl MediaLibrary {
     pub fn reveal_in_finder(&self) -> Result<(), String> {
         let dir = self.primary_media_root.clone()
             .unwrap_or_else(|| self.pack_root.join("assets"));
-        if self.primary_media_root.is_some() && !dir.is_dir() {
-            return Err(format!("The configured media folder is unavailable: {}", dir.display()));
+        if self.primary_media_root.is_some() && (!dir.is_absolute() || !dir.is_dir()) {
+            return Err(format!("The configured media folder must be an available absolute path: {}", dir.display()));
         }
         if self.primary_media_root.is_none() {
             let _ = fs::create_dir_all(&dir);
@@ -527,9 +527,9 @@ fn scan_library(request: &ScanRequest) -> (Vec<LibraryItem>, Vec<String>) {
     // The configured primary library takes precedence over legacy pack
     // assets with the same virtual path, without deleting either source.
     if let Some(primary) = primary_media_root(pack_root) {
-        if !primary.is_dir() {
+        if !primary.is_absolute() || !primary.is_dir() {
             warnings.push(format!(
-                "Primary media folder is unavailable (check iCloud download/offline status): {}",
+                "Primary media folder is invalid or unavailable (use an absolute, fully downloaded path): {}",
                 primary.display()
             ));
             for old in previous.iter().filter(|item| item.location == "external") {
@@ -732,8 +732,8 @@ pub fn commit_upload(pack_root: &Path, partial: &Path, original_name: &str) -> R
     // Never create a replacement cloud folder elsewhere if iCloud has gone
     // missing: the operator needs an actionable error, not split libraries.
     if let Some(root) = primary.as_ref() {
-        if !root.is_dir() {
-            return Err(format!("Primary media folder is unavailable: {}", root.display()));
+        if !root.is_absolute() || !root.is_dir() {
+            return Err(format!("Primary media folder must be an available absolute path: {}", root.display()));
         }
     }
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -742,7 +742,10 @@ pub fn commit_upload(pack_root: &Path, partial: &Path, original_name: &str) -> R
         // The upload temp lives under the show pack, potentially on another
         // filesystem. Copy to a hidden sibling first, then publish atomically.
         let stage = dir.join(format!(".fosfora-incoming-{}", incoming_token()));
-        fs::copy(partial, &stage).map_err(|e| e.to_string())?;
+        if let Err(err) = fs::copy(partial, &stage) {
+            let _ = fs::remove_file(&stage);
+            return Err(err.to_string());
+        }
         if let Err(err) = fs::rename(&stage, &dest) {
             let _ = fs::remove_file(&stage);
             return Err(err.to_string());
@@ -1329,12 +1332,14 @@ fn find_fingerprint(pack_root: &Path, fingerprint: &str) -> Option<(String, Stri
     // Reuse the background scanner's fingerprints for iCloud assets: reading
     // every clip again could trigger downloads just to check a new upload.
     for cached in load_cache(pack_root).entries {
-        if cached.fingerprint == fingerprint
-            && !cached.fingerprint.is_empty()
-            && resolve_pack_media_path(pack_root, &cached.path).is_file()
-        {
-            let name = Path::new(&cached.path).file_name()?.to_string_lossy().to_string();
-            return Some((cached.path, name));
+        if cached.fingerprint == fingerprint && !cached.fingerprint.is_empty() {
+            let path = resolve_pack_media_path(pack_root, &cached.path);
+            if fs::metadata(&path).ok().is_some_and(|meta| {
+                meta.len() == cached.bytes && modified_ms(&meta) == cached.modified_ms
+            }) {
+                let name = Path::new(&cached.path).file_name()?.to_string_lossy().to_string();
+                return Some((cached.path, name));
+            }
         }
     }
     // Retain the old uncached fallback for small, local show-pack imports.
@@ -1423,8 +1428,9 @@ fn load_cache(pack_root: &Path) -> ProbeCache {
 /// Optional primary media directory, usually on an external disk or iCloud Drive.
 /// This is local configuration: the config file is excluded from show-pack Git.
 pub fn primary_media_root(pack_root: &Path) -> Option<PathBuf> {
-    let candidate = load_sources(pack_root).primary_media_root?;
-    candidate.is_absolute().then_some(candidate)
+    // Return even an invalid value, so uploads will refuse it rather than
+    // silently writing to the bundled directory and splitting the library.
+    load_sources(pack_root).primary_media_root
 }
 
 /// Keep saved paths portable even when the physical media lives outside the
@@ -1445,13 +1451,18 @@ pub fn resolve_pack_media_path(pack_root: &Path, stored: &str) -> PathBuf {
         _ => None,
     };
     if let (Some(kind), Some(root)) = (in_media, primary_media_root(pack_root)) {
+        if !root.is_absolute() {
+            return pack_path;
+        }
         // Reject traversal; only ordinary file components can extend the media root.
-        let rest: PathBuf = components
-            .filter_map(|part| match part {
-                std::path::Component::Normal(name) => Some(name),
-                _ => None,
-            })
-            .collect();
+        let mut rest = PathBuf::new();
+        for component in components {
+            if let std::path::Component::Normal(name) = component {
+                rest.push(name);
+            } else {
+                return pack_path;
+            }
+        }
         if !rest.as_os_str().is_empty() {
             let external = root.join(kind).join(&rest);
             if external.is_file() {
@@ -1476,6 +1487,9 @@ pub fn resolve_pack_media_path(pack_root: &Path, stored: &str) -> PathBuf {
 /// Convert a primary-library absolute path back into the stable stored alias.
 pub fn virtual_media_path(pack_root: &Path, media: &Path) -> Option<String> {
     let root = primary_media_root(pack_root)?;
+    if !root.is_absolute() {
+        return None;
+    }
     let relative = if let Ok(relative) = media.strip_prefix(&root) {
         relative.to_path_buf()
     } else {
