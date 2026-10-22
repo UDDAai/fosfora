@@ -23,6 +23,9 @@ fn get_html_content() -> String {
     include_str!("../../../../assets/web/control.html").to_string()
 }
 
+/// Uploads streamed at the same time. More get 503 and the browser retries.
+const MAX_UPLOADS: usize = 2;
+
 /// Spawn the accept loop thread. Returns (shutdown_flag, thread_handle).
 pub fn spawn_accept_loop(
     port: u16,
@@ -40,6 +43,7 @@ pub fn spawn_accept_loop(
     log::info!("Web control server listening on http://0.0.0.0:{port}");
 
     let client_counter = Arc::new(AtomicUsize::new(0));
+    let uploads = Arc::new(AtomicUsize::new(0));
 
     let handle = thread::Builder::new()
         .name("fosfora-web-accept".into())
@@ -52,16 +56,33 @@ pub fn spawn_accept_loop(
                     Ok((stream, addr)) => {
                         log::debug!("Web connection from {addr}");
                         let _ = stream.set_nonblocking(false);
-                        handle_connection(
-                            stream,
-                            addr,
-                            &inbound_tx,
-                            &clients,
-                            &latest_state,
-                            &shutdown,
-                            &client_counter,
-                            &dropped,
-                        );
+                        // Each request runs on its own thread so a large upload
+                        // never holds up the page, thumbnails or a reconnect.
+                        let inbound_tx = inbound_tx.clone();
+                        let clients = clients.clone();
+                        let latest_state = latest_state.clone();
+                        let shutdown = shutdown.clone();
+                        let client_counter = client_counter.clone();
+                        let dropped = dropped.clone();
+                        let uploads = uploads.clone();
+                        let spawned = thread::Builder::new()
+                            .name("fosfora-web-request".into())
+                            .spawn(move || {
+                                handle_connection(
+                                    stream,
+                                    addr,
+                                    &inbound_tx,
+                                    &clients,
+                                    &latest_state,
+                                    &shutdown,
+                                    &client_counter,
+                                    &dropped,
+                                    &uploads,
+                                );
+                            });
+                        if let Err(err) = spawned {
+                            log::warn!("Web request thread did not start: {err}");
+                        }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         // No pending connection — sleep briefly before retrying
@@ -90,6 +111,7 @@ fn handle_connection(
     shutdown: &Arc<AtomicBool>,
     client_counter: &Arc<AtomicUsize>,
     dropped: &Arc<AtomicU64>,
+    uploads: &Arc<AtomicUsize>,
 ) {
     // Peek at the first bytes to determine if this is a WebSocket upgrade or plain HTTP
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -112,7 +134,19 @@ fn handle_connection(
             );
             return;
         }
+        // At most two uploads stream at once; the browser sends two at a time.
+        if uploads.fetch_add(1, Ordering::AcqRel) >= MAX_UPLOADS {
+            uploads.fetch_sub(1, Ordering::AcqRel);
+            let _ = write_http(
+                &mut stream,
+                "503 Service Unavailable",
+                "text/plain",
+                "two uploads are already running; try again when one finishes",
+            );
+            return;
+        }
         handle_media_upload(&mut stream, &buf[..n], inbound_tx);
+        uploads.fetch_sub(1, Ordering::AcqRel);
         return;
     }
 

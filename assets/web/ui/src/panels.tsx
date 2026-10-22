@@ -608,12 +608,28 @@ export function LibraryPanel() {
 
   async function upload(files: FileList | null) {
     if (!files?.length) return
-    for (const file of files) {
-      const body = new FormData()
-      body.append('file', file, file.name)
-      const response = await fetch('/api/media', { method: 'POST', body })
-      setNote(response.ok ? `${file.name} stored` : `${file.name} failed`)
+    // Two files at a time. The engine refuses a third with 503 so a long
+    // import never stalls the controls.
+    const queue = [...files]
+    let stored = 0
+    async function sendOne(file: File) {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const body = new FormData()
+        body.append('file', file, file.name)
+        const response = await fetch('/api/media', { method: 'POST', body })
+        if (response.status !== 503) {
+          if (response.ok) stored += 1
+          setNote(response.ok ? `${file.name} stored (${stored} of ${files!.length})` : `${file.name} failed: ${await response.text()}`)
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      setNote(`${file.name} was not sent: the engine stayed busy`)
     }
+    async function worker() {
+      for (let file = queue.shift(); file; file = queue.shift()) await sendOne(file)
+    }
+    await Promise.all([worker(), worker()])
     send({ type: 'rescan_library' })
   }
 
