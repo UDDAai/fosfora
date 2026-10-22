@@ -173,6 +173,8 @@ pub struct App {
     /// Bumped whenever a scene replaces the layer stack. A clip that finishes
     /// decoding for an older stack is dropped, not added to the new scene.
     scene_generation: u64,
+    /// Once-a-second frame-time summary for the log (`perf ...` lines).
+    frame_stats: FrameStats,
     // Webcam capture (feature-gated)
     #[cfg(feature = "webcam")]
     pub webcam_capture: Option<WebcamBackend>,
@@ -268,6 +270,50 @@ impl ShowCmd {
             ShowCmd::PrevPalette => C::PrevPalette,
             ShowCmd::PaletteAuto => C::PaletteAuto,
         }
+    }
+}
+
+/// Frame times between log lines. A spike is a frame over 33 ms (two
+/// vsyncs at 60 Hz) or 50 ms; `max_ms` is the worst single frame.
+#[derive(Default)]
+struct FrameStats {
+    since: Option<Instant>,
+    frames: u32,
+    total: std::time::Duration,
+    max: std::time::Duration,
+    over_33: u32,
+    over_50: u32,
+}
+
+impl FrameStats {
+    fn record(&mut self, now: Instant, frame: std::time::Duration) -> Option<String> {
+        let since = *self.since.get_or_insert(now);
+        self.frames += 1;
+        self.total += frame;
+        self.max = self.max.max(frame);
+        if frame.as_millis() > 33 {
+            self.over_33 += 1;
+        }
+        if frame.as_millis() > 50 {
+            self.over_50 += 1;
+        }
+        let span = now.saturating_duration_since(since);
+        if span.as_secs_f32() < 1.0 {
+            return None;
+        }
+        let line = format!(
+            "fps={:.1} avg_ms={:.2} max_ms={:.1} over33={} over50={}",
+            self.frames as f32 / span.as_secs_f32(),
+            self.total.as_secs_f32() * 1000.0 / self.frames.max(1) as f32,
+            self.max.as_secs_f32() * 1000.0,
+            self.over_33,
+            self.over_50,
+        );
+        *self = Self {
+            since: Some(now),
+            ..Self::default()
+        };
+        Some(line)
     }
 }
 
@@ -664,6 +710,7 @@ impl App {
             pending_scene_change: None,
             media_jobs: crate::media::jobs::MediaJobs::new(media_budget),
             scene_generation: 0,
+            frame_stats: FrameStats::default(),
             #[cfg(feature = "webcam")]
             webcam_capture: None,
             #[cfg(feature = "webcam")]
@@ -768,8 +815,19 @@ impl App {
         // the emission accumulator dumps the entire stall's budget at once
         // (#1796 live finding: every real mouse click white-flashed Tide).
         // Momentary slow-motion during a stall beats a white flash.
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
+        let frame_time = now.duration_since(self.last_frame);
+        let dt = frame_time.as_secs_f32().min(0.05);
         self.last_frame = now;
+        if let Some(line) = self.frame_stats.record(now, frame_time) {
+            let budget = self.media_jobs.budget();
+            log::info!(
+                "perf {line} decoded={} resident={} loading={} budget={}",
+                crate::media::library::format_bytes(self.decoded_media_bytes()),
+                crate::media::library::format_bytes(budget.resident()),
+                crate::media::library::format_bytes(budget.in_flight()),
+                crate::media::library::format_bytes(budget.limit()),
+            );
+        }
 
         // A watch that failed at startup is noted once, on the first frame,
         // so the six seconds start when there is a window to show them in.
