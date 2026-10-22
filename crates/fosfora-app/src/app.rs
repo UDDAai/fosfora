@@ -3870,7 +3870,7 @@ impl App {
             // path lives in `obstacle_image_path` but is not an image.
             if lp.obstacle_model == Some(true) {
                 if let Some(ref model_path) = lp.obstacle_image_path {
-                    let path = std::path::PathBuf::from(model_path);
+                    let path = self.resolve_show_media_path(model_path);
                     if path.exists() {
                         if let Some(layer) = self.layer_stack.layers.get_mut(i) {
                             if let Some(effect) = layer.as_effect_mut() {
@@ -3911,7 +3911,7 @@ impl App {
             }
             // Restore obstacle collision state
             else if let Some(ref obstacle_path) = lp.obstacle_image_path {
-                let path = std::path::PathBuf::from(obstacle_path);
+                let path = self.resolve_show_media_path(obstacle_path);
                 if path.exists() {
                     match image::open(&path) {
                         Ok(img) => {
