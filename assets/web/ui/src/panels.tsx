@@ -59,7 +59,8 @@ export function SectionInfo({ label, text }: { label: string; text: string }) {
 function mayBeMedia(event: DragEvent) {
   const types = [...event.dataTransfer.types]
   if (types.length === 0) return true
-  return types.includes(MEDIA_MIME) || types.includes('text/plain') || types.includes('Text')
+  return types.includes(MEDIA_MIME) || types.includes('text/plain') || types.includes('Text') ||
+    types.includes('Files') || types.includes('text/uri-list')
 }
 
 function readMediaDrag(event: DragEvent) {
@@ -122,6 +123,7 @@ export function LayersPanel() {
   const dragRef = useRef<LayerDrag | null>(null)
   const [drag, setDrag] = useState<LayerDrag | null>(null)
   const [dropAt, setDropAt] = useState<number | 'new' | null>(null)
+  const [mediaNotice, setMediaNotice] = useState<string | null>(null)
   const gap = 12
 
   function beginDrag(event: PointerEvent<HTMLButtonElement>, index: number) {
@@ -187,14 +189,62 @@ export function LayersPanel() {
     setDropAt(null)
   }
 
+  async function uploadFinderFile(file: File) {
+    const limit = 512 * 1024 * 1024
+    if (file.size > limit) {
+      setMediaNotice(file.name + ' is over the 512 MB upload limit. Nothing was added.')
+      return
+    }
+    setMediaNotice('Uploading ' + file.name + ' to the show library…')
+    try {
+      const body = new FormData()
+      body.append('file', file, file.name)
+      const response = await fetch('/api/media', { method: 'POST', body })
+      if (!response.ok) {
+        const reason = await response.text()
+        throw new Error(reason || 'HTTP ' + response.status)
+      }
+      const result = (await response.json()) as {
+        files?: Array<{ id?: string; ok?: boolean }>
+      }
+      const id = result.files?.find((item) => item.ok && item.id)?.id
+      if (!id) throw new Error('The server did not confirm a stored media file')
+      // Uploads are already committed to the configured external media
+      // folder, but the background Library index may not yet include them.
+      // add_media accepts the portable ID and resolves it within the pack.
+      send({ type: 'add_media', path: id })
+      send({ type: 'rescan_library' })
+      setMediaNotice(file.name + ' stored. Fosfora is decoding it; the new layer appears when ready. If decoding fails, check the Show notice.')
+    } catch (error) {
+      setMediaNotice(file.name + ' was not added: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+
   function dropMedia(event: DragEvent, index: number | 'new') {
     setDropAt(null)
     const id = readMediaDrag(event)
-    if (!id) return
+    if (id) {
+      event.preventDefault()
+      event.stopPropagation()
+      setMediaNotice(null)
+      if (index === 'new') send({ type: 'add_library_media', ids: [id] })
+      else send({ type: 'replace_library_media', layer: index, id })
+      return
+    }
+
+    if (!isFinderDrop(event)) return
     event.preventDefault()
     event.stopPropagation()
-    if (index === 'new') send({ type: 'add_library_media', ids: [id] })
-    else send({ type: 'replace_library_media', layer: index, id })
+    const files = [...event.dataTransfer.files]
+    if (index !== 'new') {
+      setMediaNotice('To replace a layer, first add the Finder file to Library, then drag the Library item onto that layer.')
+    } else if (files.length !== 1) {
+      setMediaNotice(files.length === 0
+        ? 'No readable Finder file was provided. Drop the file into Library first.'
+        : 'Drop one Finder file at a time to create a layer.')
+    } else {
+      void uploadFinderFile(files[0])
+    }
   }
 
   return (
@@ -204,7 +254,7 @@ export function LayersPanel() {
           <span className="text-sm font-medium">Layers</span>
           <SectionInfo
             label="About layers"
-            text="Click a layer to choose what Look and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. This works from a second window on this same page. Solo shows only the selected layer and is not saved."
+            text="Click a layer to choose what Look and Picture edit. That click does not change the picture. Opacity, blend, and enable do. Drag the grip to reorder; the top of the list is in front. Drop a Library item on a layer to replace it, or on the dashed row to add. A Finder file dropped on the dashed row is uploaded and then decoded; it may take time to appear. Solo shows only one layer and is not saved."
           />
         </div>
         <Button
@@ -224,8 +274,9 @@ export function LayersPanel() {
         onDragLeave={leaveMedia}
         onDrop={(event) => dropMedia(event, 'new')}
       >
-        Drop a library item here to add a layer
+        Drop a Library or Finder file here to add a layer
       </div>
+      {mediaNotice ? <p role="status" className="text-xs text-muted-foreground">{mediaNotice}</p> : null}
       <div className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
       {layers.map((layer, index) => {
         const selected = index === state?.active_layer
