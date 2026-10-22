@@ -232,6 +232,51 @@ architect and design and not need to write out everything. Wild times.
 
 Give it a try! Let me know how I can make it better for you.
 
+## Hibernation: external or iCloud media library (opt-in)
+
+The show pack remains authoritative for `show.json`, scene presets and palettes.
+Video clips and images can live in one external folder instead of the pack's
+`assets/video/` and `assets/images/` directories. This is particularly
+useful with iCloud Drive or a large external disk.
+
+1. Create the desired folder in Finder, for example
+   `~/Library/Mobile Documents/com~apple~CloudDocs/VJ-Movies/vj-library`.
+   Fosfora accepts media **directly in this folder**, or in optional
+   `video/` and `images/` subfolders.
+2. In the show directory (beside `show.json`), create or edit the
+   **Git-ignored local file** `media-sources.json`:
+   ```json
+   {
+     "primary_media_root": "/Users/YOUR_USER/Library/Mobile Documents/com~apple~CloudDocs/VJ-Movies/vj-library"
+   }
+   ```
+   Use a real absolute macOS path; JSON does not expand `~` or `$HOME`.
+   Existing `linked_folders`, `linked_files`, or `hidden` values may remain.
+3. Restart Fosfora with the normal `--show /path/to/show.json` argument.
+   The Media Library and *Open media folder* use the configured folder.
+   New uploads and copied imports go into `video/` or `images/` there,
+   while existing files in the folder's top level remain visible.
+4. Presets still save **portable** references such as
+   `assets/video/thaw.mp4`. Fosfora resolves these to the external
+   directory when the file exists there, or to a legacy copy inside the
+   show pack if not. A different Mac must configure its own primary media
+   root or have the files inside the show pack.
+5. Back up originals before copying the old assets into iCloud. Do not
+   remove old copies until all scenes and imports have been verified.
+
+**Offline performance:** iCloud Drive may keep cloud-only placeholders.
+In Finder choose *Keep Downloaded* for the library and confirm all needed
+clips and stills are fully present before rehearsal. Test with the network
+disconnected: a cloud-only clip must never be relied on during performance.
+iCloud syncing is not a substitute for a separately verified backup.
+A large iCloud sync or hydration may make library probing or decoding slower.
+
+Only video/still-image media paths and compatible particle image/video
+references are redirected. Built-in effects, shaders, presets, palette files,
+show timing and 3D/splat assets remain in their existing locations.
+An explicitly external primary-library file is never deleted by the
+browser's Trash action; manage it in Finder instead.
+
 ## Contributing
 
 New effects are the easiest way in — a WGSL shader plus a small JSON file, and it shows up in the

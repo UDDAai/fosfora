@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::clock::{ClockTransport, ShowClock};
@@ -79,12 +79,7 @@ impl ShowController {
     /// load uses this so a pack-relative `media_path` is not looked up from
     /// the process working directory.
     pub fn resolve_path(&self, stored: &str) -> PathBuf {
-        let p = Path::new(stored);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.pack_root.join(p)
-        }
+        crate::media::library::resolve_pack_media_path(&self.pack_root, stored)
     }
 
     pub fn validate(

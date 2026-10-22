@@ -137,13 +137,25 @@ pub fn portable_media_path(pack_root: &Path, stored: &str) -> String {
     if let Ok(rel) = absolute.strip_prefix(pack_root) {
         return rel.to_string_lossy().replace('\\', "/");
     }
+    if let Some(alias) = crate::media::library::virtual_media_path(pack_root, &absolute) {
+        return alias;
+    }
     stored.replace('\\', "/")
 }
 
 pub fn relativize_preset(pack_root: &Path, preset: &mut Preset) {
     for layer in &mut preset.layers {
-        if let Some(path) = layer.media_path.as_mut() {
-            *path = portable_media_path(pack_root, path);
+        // Particle source images/videos and obstacle image textures can also
+        // live in the primary external media root. Preserve their aliases.
+        for field in [
+            &mut layer.media_path,
+            &mut layer.particle_video_path,
+            &mut layer.particle_image_path,
+            &mut layer.obstacle_image_path,
+        ] {
+            if let Some(path) = field.as_mut() {
+                *path = portable_media_path(pack_root, path);
+            }
         }
     }
 }
@@ -241,6 +253,31 @@ mod tests {
             r#"{{"layers":[{{"effect_name":"","opacity":{opacity},"media_path":"{path}","media_fit":"fill","media_width":1.3,"media_pos_x":0.2,"media_pos_y":-0.1,"media_speed":0.8,"media_looping":true}}]}}"#
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn external_primary_paths_become_pack_relative_without_copying() {
+        let root = temp_pack("primary_external");
+        let cloud = root.join("cloud library");
+        fs::create_dir_all(cloud.join("video")).unwrap();
+        fs::create_dir_all(cloud.join("images")).unwrap();
+        let clip = cloud.join("video/clip.mp4");
+        let still = cloud.join("images/plate.png");
+        fs::write(&clip, b"frames").unwrap();
+        fs::write(&still, b"still").unwrap();
+        fs::write(
+            root.join("media-sources.json"),
+            serde_json::json!({"primary_media_root":cloud.to_string_lossy()}).to_string(),
+        ).unwrap();
+        let mut scene = preset(&clip.to_string_lossy(), 1.0);
+        scene.layers[0].particle_image_path = Some(still.to_string_lossy().to_string());
+        relativize_preset(&root, &mut scene);
+        assert_eq!(scene.layers[0].media_path.as_deref(), Some("assets/video/clip.mp4"));
+        assert_eq!(scene.layers[0].particle_image_path.as_deref(), Some("assets/images/plate.png"));
+        write_scene_preset(&root, "test-scene", &scene).unwrap();
+        assert!(clip.exists());
+        assert!(still.exists());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
