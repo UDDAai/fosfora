@@ -71,6 +71,9 @@ struct ProbeCache {
 #[derive(Clone, Serialize, Deserialize)]
 struct CachedProbe {
     path: String,
+    /// Physical file used when probing. Invalidate cache on media-root switch.
+    #[serde(default)]
+    source_path: String,
     bytes: u64,
     modified_ms: u64,
     fingerprint: String,
@@ -942,7 +945,10 @@ fn describe_file(
     let meta = fs::metadata(&seen.path).ok()?;
     let modified_ms = modified_ms(&meta);
     let cached = cache.entries.iter().find(|entry| {
-        entry.path == seen.id && entry.bytes == meta.len() && entry.modified_ms == modified_ms
+        entry.path == seen.id
+            && entry.source_path == seen.path.to_string_lossy()
+            && entry.bytes == meta.len()
+            && entry.modified_ms == modified_ms
     });
     let probe = if let Some(hit) = cached {
         hit.clone()
@@ -951,6 +957,7 @@ fn describe_file(
         let fingerprint = file_fingerprint(&seen.path).unwrap_or_default();
         let entry = CachedProbe {
             path: seen.id.clone(),
+            source_path: seen.path.to_string_lossy().to_string(),
             bytes: meta.len(),
             modified_ms,
             fingerprint,
@@ -1334,7 +1341,7 @@ fn find_fingerprint(pack_root: &Path, fingerprint: &str) -> Option<(String, Stri
     for cached in load_cache(pack_root).entries {
         if cached.fingerprint == fingerprint && !cached.fingerprint.is_empty() {
             let path = resolve_pack_media_path(pack_root, &cached.path);
-            if fs::metadata(&path).ok().is_some_and(|meta| {
+            if cached.source_path == path.to_string_lossy() && fs::metadata(&path).ok().is_some_and(|meta| {
                 meta.len() == cached.bytes && modified_ms(&meta) == cached.modified_ms
             }) {
                 let name = Path::new(&cached.path).file_name()?.to_string_lossy().to_string();
