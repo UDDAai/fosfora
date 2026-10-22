@@ -47,9 +47,15 @@ pub struct PresetLoader {
     request_tx: Option<Sender<PresetDecodeRequest>>,
     result_rx: Receiver<PresetDecodeResult>,
     generation: u64,
+    /// The newest request that has not yet entered the decode queue.
+    pending: Option<PresetDecodeRequest>,
     pub state: PresetLoadingState,
     _thread: Option<JoinHandle<()>>,
 }
+
+/// Test-only pause inside a decode job so a newer request can arrive mid-flight.
+#[cfg(test)]
+static TEST_DECODE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl PresetLoader {
     pub fn new() -> Self {
@@ -67,6 +73,7 @@ impl PresetLoader {
             request_tx: Some(request_tx),
             result_rx,
             generation: 0,
+            pending: None,
             state: PresetLoadingState::Idle,
             _thread: Some(handle),
         }
@@ -88,24 +95,43 @@ impl PresetLoader {
             preset_index,
         };
 
-        let request = PresetDecodeRequest {
+        self.pending = Some(PresetDecodeRequest {
             preset_index,
             preset,
             media_jobs,
             generation: current_gen,
-        };
+        });
+        self.flush_pending();
+    }
 
-        if let Some(ref tx) = self.request_tx {
-            match tx.try_send(request) {
-                Ok(()) => {}
-                Err(err) => {
-                    // Channel full — drain stale result and yield to let decode thread proceed
-                    let _ = self.result_rx.try_recv();
-                    thread::yield_now();
-                    // Retry with the recovered request; if still full, generation counter
-                    // ensures the stale request will be discarded by the decode thread.
-                    let _ = tx.try_send(err.into_inner());
-                }
+    /// Drop every request that is not already decoding. The in-flight decode
+    /// keeps its old generation and is discarded when it returns.
+    pub fn supersede(&mut self) {
+        self.generation += 1;
+        self.pending = None;
+        self.state = PresetLoadingState::Idle;
+    }
+
+    /// Push the newest pending request onto the decode queue. If the queue is
+    /// full the request stays pending and is retried on the next poll.
+    fn flush_pending(&mut self) {
+        let Some(tx) = self.request_tx.as_ref() else {
+            return;
+        };
+        let Some(request) = self.pending.take() else {
+            return;
+        };
+        if request.generation != self.generation {
+            return;
+        }
+        match tx.try_send(request) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(request)) => {
+                self.pending = Some(request);
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                log::warn!("Preset loader queue is closed; the latest preset was not decoded");
+                self.state = PresetLoadingState::Idle;
             }
         }
     }
@@ -113,26 +139,27 @@ impl PresetLoader {
     /// Poll for a completed decode result. Returns Some if a result matching
     /// the current generation is available.
     pub fn try_recv(&mut self) -> Option<PresetDecodeResult> {
-        match self.result_rx.try_recv() {
-            Ok(result) => {
-                if result.generation == self.generation {
+        self.flush_pending();
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) if result.generation == self.generation => {
                     self.state = PresetLoadingState::Idle;
-                    Some(result)
-                } else {
-                    // Stale result from cancelled request — discard
+                    self.pending = None;
+                    return Some(result);
+                }
+                Ok(result) => {
                     log::debug!(
                         "Discarded stale preset decode result (gen {} vs current {})",
                         result.generation,
                         self.generation
                     );
-                    None
                 }
-            }
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                log::warn!("Preset loader thread disconnected");
-                self.state = PresetLoadingState::Idle;
-                None
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    log::warn!("Preset loader thread disconnected");
+                    self.state = PresetLoadingState::Idle;
+                    return None;
+                }
             }
         }
     }
@@ -169,6 +196,13 @@ impl PresetLoader {
 
                 let num_jobs = request.media_jobs.len();
                 for job_idx in 0..num_jobs {
+                    #[cfg(test)]
+                    {
+                        let delay = TEST_DECODE_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
+                        if delay > 0 {
+                            thread::sleep(std::time::Duration::from_millis(delay));
+                        }
+                    }
                     // Check for cancellation between jobs
                     if let Ok(newer) = request_rx.try_recv() {
                         log::debug!(
@@ -200,6 +234,12 @@ impl PresetLoader {
                 if cancelled {
                     continue 'decode;
                 }
+                // A newer request can arrive during the last job. It must win
+                // before this result is published.
+                if let Ok(newer) = request_rx.try_recv() {
+                    request = newer;
+                    continue 'decode;
+                }
 
                 let result = PresetDecodeResult {
                     preset_index: request.preset_index,
@@ -208,11 +248,11 @@ impl PresetLoader {
                     generation: request.generation,
                 };
 
-                // Send result (if channel full, old result is stale — try to drain it)
-                if result_tx.try_send(result).is_err() {
-                    // Result channel full — this shouldn't happen often since main thread
-                    // drains each frame, but handle it gracefully
-                    log::debug!("Preset loader: result channel full, dropping result");
+                // Block until the frame loop takes the result. Dropping it
+                // leaves the loader stuck on Loading for that generation.
+                if result_tx.send(result).is_err() {
+                    log::debug!("Preset loader thread exiting (result channel closed)");
+                    return;
                 }
                 break;
             }
@@ -357,5 +397,51 @@ mod tests {
         // The result from gen 1 should be discarded
         let result = loader.try_recv();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn rapid_requests_apply_the_latest_preset() {
+        let _guard = DelayGuard;
+        TEST_DECODE_DELAY_MS.store(80, std::sync::atomic::Ordering::Relaxed);
+        let mut loader = PresetLoader::new();
+        let preset = empty_preset();
+        let job = vec![(0, PathBuf::from("/nonexistent/a.png"))];
+        loader.request_load(0, preset.clone(), job.clone(), "A".into());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        loader.request_load(1, preset.clone(), job.clone(), "B".into());
+        loader.request_load(2, preset, job, "C".into());
+
+        let mut applied = None;
+        for _ in 0..50 {
+            if let Some(result) = loader.try_recv() {
+                applied = Some(result.preset_index);
+            }
+            if applied == Some(2) && matches!(loader.state, PresetLoadingState::Idle) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        assert_eq!(applied, Some(2), "the last requested preset must be the one applied");
+        assert!(matches!(loader.state, PresetLoadingState::Idle));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(loader.try_recv().is_none(), "a later decode must not overwrite C");
+        assert!(matches!(loader.state, PresetLoadingState::Idle));
+    }
+
+    struct DelayGuard;
+    impl Drop for DelayGuard {
+        fn drop(&mut self) {
+            TEST_DECODE_DELAY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn empty_preset() -> Preset {
+        Preset {
+            layers: vec![],
+            active_layer: 0,
+            postprocess: Default::default(),
+            volumetric: None,
+            master_chain: None,
+        }
     }
 }

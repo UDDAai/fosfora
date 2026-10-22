@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender};
 use tungstenite::WebSocket;
@@ -18,6 +18,7 @@ pub fn run_client<S: Read + Write>(
     initial_state: String,
     shutdown: Arc<AtomicBool>,
     client_id: usize,
+    dropped: Arc<AtomicU64>,
 ) {
     log::info!("WebSocket client {} connected", client_id);
 
@@ -41,7 +42,10 @@ pub fn run_client<S: Read + Write>(
         match ws.read() {
             Ok(Message::Text(text)) => {
                 if let Some(msg) = parse_client_message(text.as_ref()) {
-                    let _ = inbound_tx.try_send(msg);
+                    if inbound_tx.try_send(msg).is_err() {
+                        let count = dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                        log::warn!("Browser command queue is full; dropped command {count}");
+                    }
                 }
             }
             Ok(Message::Close(_)) => {
@@ -53,7 +57,10 @@ pub fn run_client<S: Read + Write>(
             }
             Ok(Message::Binary(data)) => {
                 if let Some(msg) = parse_binary_preview(&data) {
-                    let _ = inbound_tx.try_send(msg);
+                    if inbound_tx.try_send(msg).is_err() {
+                        let count = dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                        log::warn!("Browser command queue is full; dropped command {count}");
+                    }
                 }
             }
             Ok(_) => {} // Pong, etc.
@@ -132,6 +139,10 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let to = v.get("to")?.as_u64()? as usize;
             Some(WsInMessage::MoveLayer { from, to })
         }
+        "remove_layer" => {
+            let index = v.get("index")?.as_u64()? as usize;
+            Some(WsInMessage::RemoveLayer { index })
+        }
         "resolve_pending" => {
             let action = v.get("action")?.as_str()?.to_string();
             Some(WsInMessage::ResolvePending { action })
@@ -140,6 +151,19 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
         "import_previous_uploads" => Some(WsInMessage::ImportPreviousUploads),
         "reveal_media_folder" => Some(WsInMessage::RevealMediaFolder),
         "link_media_folder" => Some(WsInMessage::LinkMediaFolder),
+        "link_library_files" => {
+            let paths = v
+                .get("paths")?
+                .as_array()?
+                .iter()
+                .filter_map(|path| path.as_str().map(str::to_string))
+                .collect();
+            Some(WsInMessage::LinkLibraryFiles { paths })
+        }
+        "remove_library_item" => {
+            let id = v.get("id")?.as_str()?.to_string();
+            Some(WsInMessage::RemoveLibraryItem { id })
+        }
         "save_scene" => Some(WsInMessage::SaveScene),
         "set_workspace_mode" => {
             let mode = v.get("mode")?.as_str()?.to_string();

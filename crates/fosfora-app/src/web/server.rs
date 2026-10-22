@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -30,6 +30,7 @@ pub fn spawn_accept_loop(
     clients: Arc<Mutex<Vec<Sender<String>>>>,
     latest_state: Arc<Mutex<String>>,
     shutdown: Arc<AtomicBool>,
+    dropped: Arc<AtomicU64>,
 ) -> anyhow::Result<JoinHandle<()>> {
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr)?;
@@ -59,6 +60,7 @@ pub fn spawn_accept_loop(
                             &latest_state,
                             &shutdown,
                             &client_counter,
+                            &dropped,
                         );
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -87,6 +89,7 @@ fn handle_connection(
     latest_state: &Arc<Mutex<String>>,
     shutdown: &Arc<AtomicBool>,
     client_counter: &Arc<AtomicUsize>,
+    dropped: &Arc<AtomicU64>,
 ) {
     // Peek at the first bytes to determine if this is a WebSocket upgrade or plain HTTP
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -114,6 +117,21 @@ fn handle_connection(
     }
 
     if let Some(path) = request_path(&request) {
+        if path == "/api/media/finder-drag" {
+            if !super::upload::peer_is_loopback(peer) {
+                let _ = write_http(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "media paths are only available on this computer",
+                );
+                return;
+            }
+            let paths = crate::media::library::finder_drag_paths();
+            let body = serde_json::to_string(&paths).unwrap_or_else(|_| "[]".into());
+            let _ = write_http(&mut stream, "200 OK", "application/json", &body);
+            return;
+        }
         if path == "/api/media" || path.starts_with("/api/media/thumb/") {
             serve_library_get(&mut stream, path);
             return;
@@ -145,11 +163,12 @@ fn handle_connection(
 
                 let tx = inbound_tx.clone();
                 let flag = shutdown.clone();
+                let dropped = dropped.clone();
 
                 thread::Builder::new()
                     .name(format!("fosfora-web-client-{client_id}"))
                     .spawn(move || {
-                        client::run_client(ws, tx, outbound_rx, state, flag, client_id);
+                        client::run_client(ws, tx, outbound_rx, state, flag, client_id, dropped);
                     })
                     .ok();
             }

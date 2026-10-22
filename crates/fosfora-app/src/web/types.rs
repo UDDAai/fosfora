@@ -27,6 +27,8 @@ pub enum WsInMessage {
     ShowAllLayers,
     /// Move a layer. Index 0 is the front of the picture.
     MoveLayer { from: usize, to: usize },
+    /// Remove one layer. The last remaining layer is kept.
+    RemoveLayer { index: usize },
     /// Save, discard, or cancel a Perform scene change that is waiting.
     ResolvePending { action: String },
     /// Add a media layer from a file already written to disk.
@@ -39,6 +41,10 @@ pub enum WsInMessage {
     RevealMediaFolder,
     /// Ask for a native folder dialog and remember that folder as a linked source.
     LinkMediaFolder,
+    /// Register Finder paths in place. The files are not copied.
+    LinkLibraryFiles { paths: Vec<String> },
+    /// Remove one library entry. A linked original stays on disk.
+    RemoveLibraryItem { id: String },
     /// Add library items as new layers, in this order. Nothing is added if the
     /// batch does not fit.
     AddLibraryMedia { ids: Vec<String> },
@@ -130,12 +136,15 @@ pub struct WebFrameResult {
     pub select_layer: Option<usize>,
     pub solo: Option<SoloRequest>,
     pub layer_moves: Vec<(usize, usize)>,
+    pub layer_removes: Vec<usize>,
     pub resolve_pending: Option<String>,
     pub add_media: Vec<PathBuf>,
     pub rescan_library: bool,
     pub import_uploads: bool,
     pub reveal_media: bool,
     pub link_folder: bool,
+    pub link_library_files: Vec<Vec<String>>,
+    pub remove_library: Vec<String>,
     pub add_library: Vec<Vec<String>>,
     pub replace_library: Vec<(usize, String)>,
     pub media_transport: Vec<(usize, Option<f32>, Option<bool>)>,
@@ -162,12 +171,15 @@ impl WebFrameResult {
             select_layer: None,
             solo: None,
             layer_moves: Vec::new(),
+            layer_removes: Vec::new(),
             resolve_pending: None,
             add_media: Vec::new(),
             rescan_library: false,
             import_uploads: false,
             reveal_media: false,
             link_folder: false,
+            link_library_files: Vec::new(),
+            remove_library: Vec::new(),
             add_library: Vec::new(),
             replace_library: Vec::new(),
             media_transport: Vec::new(),

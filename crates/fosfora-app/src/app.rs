@@ -161,6 +161,12 @@ pub struct App {
     /// Scene id whose layer stack is actually on screen. Save writes this id,
     /// never a preset that has only been requested.
     applied_scene_id: Option<String>,
+    /// Last preset the operator asked for. Stays distinct from `applied_scene_id`
+    /// until the load finishes.
+    requested_preset: Option<String>,
+    /// Why the last preset load did not fully apply. Cleared on the next request.
+    load_error: Option<String>,
+    reported_command_drops: u64,
     pending_scene_change: Option<PendingSceneChange>,
     // Webcam capture (feature-gated)
     #[cfg(feature = "webcam")]
@@ -642,6 +648,9 @@ impl App {
             scene_dirty: false,
             scene_dirty_at: None,
             applied_scene_id: None,
+            requested_preset: None,
+            load_error: None,
+            reported_command_drops: 0,
             pending_scene_change: None,
             #[cfg(feature = "webcam")]
             webcam_capture: None,
@@ -992,14 +1001,15 @@ impl App {
             }
         }
 
-        // Drain WebSocket messages (runs after OSC — last-write-wins)
-        if let Some(layer) = self.layer_stack.active_mut() {
-            let locked = layer.locked;
-            let web_result = if locked {
-                self.web.update_triggers_only()
-            } else {
-                let (defs, values, changed) = layer.param_store.split_borrow();
-                self.web.update(values, changed, defs)
+        // Drain WebSocket messages even when no layer is active. Leaving them
+        // in the bounded queue made later commands disappear with no report.
+        {
+            let web_result = match self.layer_stack.active_mut() {
+                Some(layer) if !layer.locked => {
+                    let (defs, values, changed) = layer.param_store.split_borrow();
+                    self.web.update(values, changed, defs)
+                }
+                _ => self.web.update_triggers_only(),
             };
             self.pending_web_triggers = web_result.triggers;
             let had_layer_edits = !web_result.layer_params.is_empty()
@@ -1074,6 +1084,15 @@ impl App {
             // A click only selects. Solo is a separate, unsaved output mask.
             let mut web_stack_changed = false;
             let mut view_changed = false;
+            let drops = self.web.command_drops();
+            if drops != self.reported_command_drops {
+                self.reported_command_drops = drops;
+                self.status_error = Some((
+                    format!("{drops} browser commands were dropped because the queue was full"),
+                    now,
+                ));
+                view_changed = true;
+            }
             if let Some(idx) = web_result.select_layer {
                 if idx < self.layer_stack.layers.len() {
                     self.layer_stack.active_layer = idx;
@@ -1099,6 +1118,27 @@ impl App {
             for (from, to) in web_result.layer_moves {
                 if self.move_layer(from, to) {
                     web_stack_changed = true;
+                }
+            }
+            let mut removes = web_result.layer_removes;
+            removes.sort_unstable_by(|left, right| right.cmp(left));
+            removes.dedup();
+            for index in removes {
+                if self.layer_stack.layers.get(index).is_some_and(|layer| layer.pinned) {
+                    self.status_error = Some((
+                        "That layer is pinned and was not removed".into(),
+                        now,
+                    ));
+                    view_changed = true;
+                    continue;
+                }
+                let before = self.layer_stack.layers.len();
+                self.remove_layer(index);
+                if self.layer_stack.layers.len() < before {
+                    web_stack_changed = true;
+                } else {
+                    self.status_error = Some(("The last layer stays".into(), now));
+                    view_changed = true;
                 }
             }
             for path in web_result.add_media {
@@ -1155,6 +1195,23 @@ impl App {
                 {
                     if let Some(library) = &mut self.media_library {
                         library.link_folder(folder);
+                    }
+                }
+            }
+            for paths in web_result.link_library_files.clone() {
+                let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+                if let Some(library) = &mut self.media_library {
+                    match library.link_paths(&paths) {
+                        Ok(message) => self.status_error = Some((message, now)),
+                        Err(err) => self.status_error = Some((err, now)),
+                    }
+                }
+            }
+            for id in &web_result.remove_library {
+                if let Some(library) = &mut self.media_library {
+                    match library.remove_item(id) {
+                        Ok(message) => self.status_error = Some((message, now)),
+                        Err(err) => self.status_error = Some((err, now)),
                     }
                 }
             }
@@ -2468,6 +2525,13 @@ impl App {
         }
         self.binding_bus
             .remap_layer_targets(|old| crate::bindings::bus::layer_index_after_remove(old, index));
+        if let Some(id) = self.applied_scene_id.clone() {
+            if let Some(show) = self.show.as_mut() {
+                if let Some(set) = show.bindings.get_mut(&id) {
+                    crate::palette::bindings::drop_layer_index(set, index);
+                }
+            }
+        }
         self.sync_active_layer();
     }
 
@@ -2481,12 +2545,20 @@ impl App {
             return false;
         }
         if self.layer_stack.layers[from].pinned {
+            self.status_error = Some(("That layer is pinned and was not moved".into(), Instant::now()));
             return false;
         }
         self.layer_stack.move_layer(from, to);
         self.binding_bus.remap_layer_targets(|old| {
             Some(crate::bindings::bus::layer_index_after_move(old, from, to))
         });
+        if let Some(id) = self.applied_scene_id.clone() {
+            if let Some(show) = self.show.as_mut() {
+                if let Some(set) = show.bindings.get_mut(&id) {
+                    crate::palette::bindings::remap_layer_indices(set, from, to);
+                }
+            }
+        }
         self.sync_active_layer();
         true
     }
@@ -2549,6 +2621,26 @@ impl App {
                 self.preset_loader.state,
                 crate::preset::loader::PresetLoadingState::Loading { .. }
             ),
+            engine_commit: crate::web::state::engine_commit().to_string(),
+            engine_pid: std::process::id(),
+            engine_exe: std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
+            show_path: self
+                .show
+                .as_ref()
+                .map(|show| show.pack_root.display().to_string())
+                .unwrap_or_default(),
+            applied_preset: self.applied_scene_id.clone(),
+            requested_preset: self.requested_preset.clone(),
+            loading_preset: match &self.preset_loader.state {
+                crate::preset::loader::PresetLoadingState::Loading { preset_name, .. } => {
+                    Some(preset_name.clone())
+                }
+                crate::preset::loader::PresetLoadingState::Idle => None,
+            },
+            load_error: self.load_error.clone(),
+            command_drops: self.web.command_drops(),
         };
         crate::web::state::build_full_state(
             &self.effect_loader.effects,
@@ -2975,6 +3067,14 @@ impl App {
             self.status_error = Some((format!("Save failed: {message}"), Instant::now()));
             return Err(message);
         }
+        if let Some(set) = self.show.as_ref().and_then(|show| show.bindings.get(id).cloned()) {
+            if let Err(err) = crate::palette::bindings::save_set(&pack_root, &set) {
+                self.status_error = Some((
+                    format!("Scene saved, but the palette binding was not: {err}"),
+                    Instant::now(),
+                ));
+            }
+        }
         crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
         if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == id) {
             self.preset_store.current_preset = Some(index);
@@ -2994,10 +3094,11 @@ impl App {
         let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
             return;
         };
-        let scene = self
-            .show
-            .as_ref()
-            .and_then(|show| show.scene.active_preset_id.clone());
+        let scene = self.applied_scene_id.clone().or_else(|| {
+            self.show
+                .as_ref()
+                .and_then(|show| show.scene.active_preset_id.clone())
+        });
         let file = crate::show::scene_file::WorkspaceFile {
             scene,
             mode: self.workspace_mode.as_str().to_string(),
@@ -3138,9 +3239,13 @@ impl App {
     }
 
     fn load_preset_inner(&mut self, index: usize) {
+        self.load_error = None;
         let preset = match self.preset_store.load(index) {
             Some(p) => p.clone(),
-            None => return,
+            None => {
+                self.load_error = Some(format!("Preset {index} is not in this show"));
+                return;
+            }
         };
 
         let preset_name = self
@@ -3149,6 +3254,7 @@ impl App {
             .get(index)
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
+        self.requested_preset = Some(preset_name.clone());
 
         // Load preset-scoped bindings and migrate old 3-part targets to 4-part format.
         // With a show pack open, the pack's audio-bindings/<preset>.bindings.json
@@ -3192,13 +3298,15 @@ impl App {
                 } else {
                     let msg = format!("Missing media '{media_path}' on layer {i}");
                     log::warn!("{msg}");
-                    self.status_error = Some((msg, Instant::now()));
+                    self.note_load_error(msg);
                 }
             }
         }
 
         if media_jobs.is_empty() {
-            // Fast path: no media to decode, apply immediately
+            // A synchronous load must invalidate a decode that is already running,
+            // or that older preset can finish afterwards and replace this one.
+            self.preset_loader.supersede();
             self.apply_preset_immediately(index, &preset, std::collections::HashMap::new());
         } else {
             // Async path: decode media in background
@@ -3313,7 +3421,9 @@ impl App {
                                 true
                             }
                             MediaDecodeResult::Err(e) => {
-                                log::warn!("Pre-decoded media failed for layer {}: {}", i, e);
+                                let msg = format!("Could not read media on layer {i}: {e}");
+                                log::warn!("{msg}");
+                                self.note_load_error(msg);
                                 false
                             }
                         }
@@ -3324,7 +3434,7 @@ impl App {
                     } else {
                         let msg = format!("Missing media '{media_path}' on layer {i}");
                         log::warn!("{msg}");
-                        self.status_error = Some((msg, Instant::now()));
+                        self.note_load_error(msg);
                         false
                     };
 
@@ -3858,6 +3968,15 @@ impl App {
             log::info!("Loaded preset '{name}'");
             self.applied_scene_id = Some(name);
         }
+        self.remember_workspace();
+    }
+
+    fn note_load_error(&mut self, message: String) {
+        self.status_error = Some((message.clone(), Instant::now()));
+        self.load_error = Some(match self.load_error.take() {
+            Some(earlier) if !earlier.is_empty() => format!("{earlier}; {message}"),
+            _ => message,
+        });
     }
 
     /// Create a MediaLayer from an already-decoded MediaSource (GPU resource creation only).
@@ -4346,10 +4465,11 @@ fn slot_rgb(
         if let Some(c) = Self::slot_rgb(&colors, "color-4") {
             self.post_process.grade.accent = c;
         }
+        let applied = self.applied_scene_id.clone();
         let Some(show) = self.show.as_ref() else {
             return;
         };
-        let active = show.scene.active_preset_id.clone();
+        let active = applied.or_else(|| show.scene.active_preset_id.clone());
         let bindings = active
             .as_deref()
             .and_then(|id| show.bindings.get(id))
@@ -4359,7 +4479,7 @@ fn slot_rgb(
             return;
         };
         for layer in &mut self.layer_stack.layers {
-            layer.param_store.clear_runtime();
+            layer.param_store.clear_palette();
         }
         for b in &set.bindings {
             let Some(value) = colors.get(&b.slot) else {
@@ -4367,7 +4487,7 @@ fn slot_rgb(
             };
             if let Some(layer) = self.layer_stack.layers.get_mut(b.layer) {
                 if !layer.locked {
-                    layer.param_store.set_runtime(&b.parameter, value.clone());
+                    layer.param_store.set_palette(&b.parameter, value.clone());
                 }
             }
         }

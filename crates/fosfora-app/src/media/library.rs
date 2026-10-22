@@ -88,6 +88,12 @@ struct CachedProbe {
 struct SourceFile {
     #[serde(default)]
     linked_folders: Vec<String>,
+    /// Individual files registered from Finder. The bytes stay at this path.
+    #[serde(default)]
+    linked_files: Vec<String>,
+    /// Library ids hidden by the trash icon. The files on disk stay.
+    #[serde(default)]
+    hidden: Vec<String>,
 }
 
 struct SeenFile {
@@ -102,6 +108,8 @@ pub struct MediaLibrary {
     pub items: Vec<LibraryItem>,
     pub warnings: Vec<String>,
     linked_folders: Vec<PathBuf>,
+    linked_files: Vec<PathBuf>,
+    hidden: Vec<String>,
     watch: Option<LibraryWatch>,
 }
 
@@ -116,15 +124,22 @@ impl MediaLibrary {
         let _ = fs::create_dir_all(pack_root.join("assets/images"));
         let _ = fs::create_dir_all(pack_root.join("assets/.thumbs"));
         let _ = fs::create_dir_all(pack_root.join("assets/.incoming"));
-        let linked_folders = load_sources(&pack_root);
-        let watch = start_watch(&pack_root, &linked_folders);
+        let sources = load_sources(&pack_root);
+        let watch = start_watch(
+            &pack_root,
+            &watch_dirs(&sources.linked_folders, &sources.linked_files),
+        );
         let mut lib = Self {
             pack_root,
             items: Vec::new(),
             warnings: Vec::new(),
-            linked_folders,
+            linked_folders: sources.linked_folders,
+            linked_files: sources.linked_files,
+            hidden: sources.hidden,
             watch,
         };
+        lib.prune_hidden();
+        lib.write_sources();
         lib.rescan();
         lib
     }
@@ -182,12 +197,41 @@ impl MediaLibrary {
             }
         }
 
+        for path in &self.linked_files {
+            if !path.is_file() {
+                warnings.push(format!(
+                    "Linked media file is missing: {}",
+                    path.display()
+                ));
+                let id = linked_file_id(path);
+                for old in previous.iter().filter(|item| item.id == id) {
+                    let mut kept = old.clone();
+                    kept.status = "missing".into();
+                    kept.detail = "Linked file is not available".into();
+                    if !items.iter().any(|item| item.id == kept.id) {
+                        items.push(kept);
+                    }
+                }
+                continue;
+            }
+            if let Some(seen) = linked_file_seen(path) {
+                if let Some(item) = describe_file(&seen, &cache, &mut next_cache, &self.pack_root)
+                {
+                    items.push(item);
+                }
+            }
+        }
+
         for item in &mut items {
             item.scenes = scenes_for(item, &scenes);
         }
         items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        let hidden = self.hidden.clone();
+        items.retain(|item| !hidden.iter().any(|id| id == &item.id));
         let mut seen_ids = std::collections::HashSet::new();
         items.retain(|item| seen_ids.insert(item.id.clone()));
+        let mut seen_paths = std::collections::HashSet::new();
+        items.retain(|item| seen_paths.insert(item.path.clone()));
 
         let _ = write_json(&cache_path(&self.pack_root), &next_cache);
         let _ = write_json(&library_json_path(&self.pack_root), &items);
@@ -196,21 +240,161 @@ impl MediaLibrary {
     }
 
     pub fn link_folder(&mut self, folder: PathBuf) {
+        let folder = fs::canonicalize(&folder).unwrap_or(folder);
         if !self.linked_folders.iter().any(|have| have == &folder) {
             self.linked_folders.push(folder);
         }
+        self.persist_sources();
+    }
+
+    /// Remember files or folders where they already are. Nothing is copied.
+    pub fn link_paths(&mut self, paths: &[PathBuf]) -> Result<String, String> {
+        let mut added = Vec::new();
+        let mut already = Vec::new();
+        let mut problems = Vec::new();
+        for path in paths {
+            match self.stage_link(path) {
+                Ok(true) => added.push(display_name(path)),
+                Ok(false) => already.push(display_name(path)),
+                Err(message) => problems.push(message),
+            }
+        }
+        if !added.is_empty() {
+            self.persist_sources();
+        }
+        if added.is_empty() && already.is_empty() {
+            return Err(if problems.is_empty() {
+                "Nothing was registered.".into()
+            } else {
+                problems.join(" ")
+            });
+        }
+        let mut message = if !added.is_empty() {
+            format!(
+                "Registered {}. It stays where it is and was not copied.",
+                added.join(", ")
+            )
+        } else {
+            format!(
+                "{} is already in the library. It was not copied.",
+                already.join(", ")
+            )
+        };
+        if !problems.is_empty() {
+            message.push(' ');
+            message.push_str(&problems.join(" "));
+        }
+        Ok(message)
+    }
+
+    /// Drop a library entry. A linked file stays on disk. A show-pack copy is
+    /// deleted only when no scene names it.
+    pub fn remove_item(&mut self, id: &str) -> Result<String, String> {
+        let item = self
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| "That library item is not in the list".to_string())?;
+        let used = scenes_naming(&self.pack_root, &item);
+        if !used.is_empty() {
+            return Err(format!(
+                "{} is used by {} and was not removed",
+                item.name,
+                used.join(", ")
+            ));
+        }
+        if item.location == "linked" {
+            let path = PathBuf::from(&item.path);
+            let canon = fs::canonicalize(&path).unwrap_or(path);
+            self.linked_files
+                .retain(|have| have != &canon && have.to_string_lossy() != item.path);
+            for hide in related_ids(&canon, &item.id) {
+                if !self.hidden.iter().any(|id| id == &hide) {
+                    self.hidden.push(hide);
+                }
+            }
+            self.persist_sources();
+            return Ok(format!(
+                "Removed {} from the library. The file was left where it is.",
+                item.name
+            ));
+        }
+        let Some(path) = removable_pack_file(&self.pack_root, &item) else {
+            return Err(
+                "That file is outside the show media folders and was not removed".into(),
+            );
+        };
+        fs::remove_file(&path).map_err(|err| err.to_string())?;
+        self.rescan();
+        Ok(format!(
+            "Removed {} from the show media folder.",
+            item.name
+        ))
+    }
+
+    fn stage_link(&mut self, path: &Path) -> Result<bool, String> {
+        let canon = fs::canonicalize(path).map_err(|_| format!("{} is not available", path.display()))?;
+        for hide in related_ids(&canon, "") {
+            self.hidden.retain(|id| id != &hide);
+        }
+        if canon.is_dir() {
+            if self.linked_folders.iter().any(|have| have == &canon) {
+                return Ok(false);
+            }
+            self.linked_folders.push(canon);
+            return Ok(true);
+        }
+        let name = canon
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        if media_kind(name).is_none() {
+            return Err(format!("{name} is not a video or image"));
+        }
+        if self.linked_files.iter().any(|have| have == &canon) || path_is_in_pack(&self.pack_root, &canon)
+        {
+            return Ok(false);
+        }
+        self.linked_files.push(canon);
+        Ok(true)
+    }
+
+    fn persist_sources(&mut self) {
+        self.prune_hidden();
+        self.write_sources();
+        if let Some(watch) = start_watch(
+            &self.pack_root,
+            &watch_dirs(&self.linked_folders, &self.linked_files),
+        ) {
+            self.watch = Some(watch);
+        }
+        self.rescan();
+    }
+
+    fn prune_hidden(&mut self) {
+        self.hidden.retain(|id| {
+            self.linked_folders.iter().any(|folder| {
+                id.starts_with(&format!("linked:{}:", folder.to_string_lossy()))
+            })
+        });
+    }
+
+    fn write_sources(&self) {
         let file = SourceFile {
             linked_folders: self
                 .linked_folders
                 .iter()
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|path| path.to_string_lossy().to_string())
                 .collect(),
+            linked_files: self
+                .linked_files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+            hidden: self.hidden.clone(),
         };
         let _ = write_json(&self.pack_root.join("media-sources.json"), &file);
-        if let Some(watch) = start_watch(&self.pack_root, &self.linked_folders) {
-            self.watch = Some(watch);
-        }
-        self.rescan();
     }
 
     pub fn reveal_in_finder(&self) -> Result<(), String> {
@@ -957,12 +1141,237 @@ fn load_cache(pack_root: &Path) -> ProbeCache {
         .unwrap_or_default()
 }
 
-fn load_sources(pack_root: &Path) -> Vec<PathBuf> {
-    fs::read_to_string(pack_root.join("media-sources.json"))
+fn load_sources(pack_root: &Path) -> SourcePaths {
+    let file = fs::read_to_string(pack_root.join("media-sources.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<SourceFile>(&text).ok())
-        .map(|file| file.linked_folders.into_iter().map(PathBuf::from).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    SourcePaths {
+        linked_folders: file.linked_folders.into_iter().map(PathBuf::from).collect(),
+        linked_files: file.linked_files.into_iter().map(PathBuf::from).collect(),
+        hidden: file.hidden,
+    }
+}
+
+struct SourcePaths {
+    linked_folders: Vec<PathBuf>,
+    linked_files: Vec<PathBuf>,
+    hidden: Vec<String>,
+}
+
+fn watch_dirs(folders: &[PathBuf], files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = folders.to_vec();
+    for path in files {
+        if let Some(parent) = path.parent() {
+            if parent.is_dir() && !dirs.iter().any(|dir| dir == parent) {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+    dirs
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file")
+        .to_string()
+}
+
+fn linked_file_id(path: &Path) -> String {
+    format!("file:{}", path.to_string_lossy())
+}
+
+fn linked_file_seen(path: &Path) -> Option<SeenFile> {
+    let name = path.file_name()?.to_str()?;
+    if media_kind(name).is_none() {
+        return None;
+    }
+    Some(SeenFile {
+        id: linked_file_id(path),
+        path: path.to_path_buf(),
+        location: "linked".into(),
+        source: path
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    })
+}
+
+fn related_ids(path: &Path, item_id: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    if !item_id.is_empty() {
+        ids.push(item_id.to_string());
+    }
+    ids.push(linked_file_id(path));
+    if let (Some(parent), Some(name)) = (
+        path.parent(),
+        path.file_name().and_then(|name| name.to_str()),
+    ) {
+        ids.push(format!("linked:{}:{name}", parent.to_string_lossy()));
+    }
+    ids
+}
+
+fn path_is_in_pack(pack_root: &Path, path: &Path) -> bool {
+    let Ok(root) = fs::canonicalize(pack_root) else {
+        return false;
+    };
+    path.starts_with(root)
+}
+
+fn scenes_naming(pack_root: &Path, item: &LibraryItem) -> Vec<String> {
+    let mut used = Vec::new();
+    for (scene, media) in scenes_using_media(pack_root) {
+        if (media == item.path || media == item.id) && !used.contains(&scene) {
+            used.push(scene);
+        }
+    }
+    used
+}
+
+fn removable_pack_file(pack_root: &Path, item: &LibraryItem) -> Option<PathBuf> {
+    if item.location != "pack" {
+        return None;
+    }
+    let path = fs::canonicalize(pack_root.join(&item.path)).ok()?;
+    for dir in ["assets/video", "assets/images"] {
+        let Ok(root) = fs::canonicalize(pack_root.join(dir)) else {
+            continue;
+        };
+        if path.starts_with(&root) && path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Paths currently on the Finder drag pasteboard. Empty when nothing is dragging
+/// or the pasteboard has no media. This does not read or copy file bytes.
+pub fn finder_drag_paths() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut paths = Vec::new();
+        for line in macos_drag_paths() {
+            let Some(path) = drag_line_to_path(&line) else {
+                continue;
+            };
+            let text = path.to_string_lossy().to_string();
+            if !paths.contains(&text) {
+                paths.push(text);
+            }
+        }
+        paths
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_drag_paths() -> Vec<String> {
+    let script = r#"use framework "Foundation"
+set pb to current application's NSPasteboard's pasteboardWithName:"NSDragPboard"
+set collected to ""
+try
+  set boardItems to pb's pasteboardItems()
+  set n to count of boardItems
+  repeat with i from 0 to (n - 1)
+    set one to (boardItems's objectAtIndex:i)
+    try
+      set raw to (one's stringForType:"public.file-url")
+      if raw is not missing value then set collected to collected & (raw as text) & linefeed
+    end try
+  end repeat
+end try
+try
+  set names to pb's propertyListForType:"NSFilenamesPboardType"
+  repeat with oneName in names
+    set collected to collected & (oneName as text) & linefeed
+  end repeat
+end try
+return collected"#;
+    let Ok(mut child) = std::process::Command::new("osascript")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    {
+        use std::io::Write;
+        let Some(mut stdin) = child.stdin.take() else {
+            return Vec::new();
+        };
+        if stdin.write_all(script.as_bytes()).is_err() {
+            return Vec::new();
+        }
+    }
+    let Ok(output) = child.wait_with_output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn drag_line_to_path(line: &str) -> Option<PathBuf> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let path = if line.starts_with("file:") {
+        file_url_to_path(line)?
+    } else if line.starts_with('/') {
+        PathBuf::from(line)
+    } else {
+        return None;
+    };
+    let canon = fs::canonicalize(&path).ok()?;
+    if canon.is_dir() {
+        return Some(canon);
+    }
+    let name = canon.file_name()?.to_str()?;
+    media_kind(name)?;
+    canon.is_file().then_some(canon)
+}
+
+fn file_url_to_path(url: &str) -> Option<PathBuf> {
+    let rest = url.trim().strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    Some(PathBuf::from(percent_decode(rest)))
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
@@ -1121,5 +1530,76 @@ mod tests {
         assert!(message.contains("b.mp4"));
         assert!(message.contains("free layer"));
         assert!(admission_error(0, 0, 8, &clips[..1]).is_none());
+    }
+
+    #[test]
+    fn a_file_url_keeps_spaces() {
+        let path = file_url_to_path("file:///Users/me/My%20Clip.mov").unwrap();
+        assert_eq!(path, PathBuf::from("/Users/me/My Clip.mov"));
+    }
+
+    #[test]
+    fn linking_a_file_does_not_copy_it_and_trash_leaves_it() {
+        let root = temp_pack("linkfile");
+        let outside = std::env::temp_dir().join(format!(
+            "fosfora_outside_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([4, 5, 6, 255]))
+            .save(outside.join("kept.png"))
+            .unwrap();
+        let mut lib = MediaLibrary::open(root.clone());
+        let message = lib.link_paths(&[outside.join("kept.png")]).unwrap();
+        assert!(message.contains("was not copied"));
+        assert!(outside.join("kept.png").is_file());
+        assert!(!root.join("assets/images/kept.png").exists());
+        let item = lib.items.iter().find(|item| item.name == "kept.png").unwrap();
+        assert_eq!(item.location, "linked");
+        let id = item.id.clone();
+        let removed = lib.remove_item(&id).unwrap();
+        assert!(removed.contains("left where it is"));
+        assert!(outside.join("kept.png").is_file());
+        assert!(lib.items.iter().all(|item| item.name != "kept.png"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn trash_deletes_an_unused_pack_file_and_refuses_one_a_scene_names() {
+        let root = temp_pack("trash");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 1, 1, 255]))
+            .save(root.join("assets/images/spare.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([2, 2, 2, 255]))
+            .save(root.join("assets/images/plate.png"))
+            .unwrap();
+        fs::write(
+            root.join("presets/under-ice.json"),
+            r#"{"layers":[{"media_path":"assets/images/plate.png"}]}"#,
+        )
+        .unwrap();
+        let mut lib = MediaLibrary::open(root.clone());
+        let spare = lib
+            .items
+            .iter()
+            .find(|item| item.name == "spare.png")
+            .unwrap()
+            .id
+            .clone();
+        let plate = lib
+            .items
+            .iter()
+            .find(|item| item.name == "plate.png")
+            .unwrap()
+            .id
+            .clone();
+        assert!(lib.remove_item(&plate).unwrap_err().contains("under-ice"));
+        assert!(root.join("assets/images/plate.png").is_file());
+        lib.remove_item(&spare).unwrap();
+        assert!(!root.join("assets/images/spare.png").exists());
+        assert!(lib.items.iter().all(|item| item.name != "spare.png"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

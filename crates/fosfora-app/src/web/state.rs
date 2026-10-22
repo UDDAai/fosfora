@@ -26,8 +26,21 @@ pub struct FullState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_switch: Option<String>,
     pub save_blocked: bool,
+    pub engine_commit: String,
+    pub engine_pid: u32,
+    pub engine_exe: String,
+    pub show_path: String,
+    pub applied_preset: Option<String>,
+    pub requested_preset: Option<String>,
+    pub loading_preset: Option<String>,
+    pub load_error: Option<String>,
+    pub command_drops: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show: Option<crate::show::controller::ShowSnapshot>,
+}
+
+pub fn engine_commit() -> &'static str {
+    option_env!("FOSFORA_GIT_SHA").unwrap_or("unknown")
 }
 
 #[derive(Serialize)]
@@ -77,6 +90,10 @@ pub struct ParamInfo {
     #[serde(rename = "type")]
     pub param_type: &'static str,
     pub value: f64,
+    /// Authored value, normalized the same way as `value`.
+    pub authored: f64,
+    /// `palette`, `audio`, or `authored`.
+    pub control: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +193,15 @@ pub struct WebWorkspace<'a> {
     pub solo_layer: Option<usize>,
     pub pending_switch: Option<String>,
     pub save_blocked: bool,
+    pub engine_commit: String,
+    pub engine_pid: u32,
+    pub engine_exe: String,
+    pub show_path: String,
+    pub applied_preset: Option<String>,
+    pub requested_preset: Option<String>,
+    pub loading_preset: Option<String>,
+    pub load_error: Option<String>,
+    pub command_drops: u64,
 }
 
 pub fn build_full_state(
@@ -267,6 +293,15 @@ pub fn build_full_state(
         solo_layer: workspace.solo_layer,
         pending_switch: workspace.pending_switch.clone(),
         save_blocked: workspace.save_blocked,
+        engine_commit: workspace.engine_commit.clone(),
+        engine_pid: workspace.engine_pid,
+        engine_exe: workspace.engine_exe.clone(),
+        show_path: workspace.show_path.clone(),
+        applied_preset: workspace.applied_preset.clone(),
+        requested_preset: workspace.requested_preset.clone(),
+        loading_preset: workspace.loading_preset.clone(),
+        load_error: workspace.load_error.clone(),
+        command_drops: workspace.command_drops,
         show: show.cloned(),
     };
 
@@ -350,29 +385,38 @@ pub fn build_presets_changed(preset_store: &PresetStore) -> String {
     .unwrap_or_default()
 }
 
+fn normalize_float(value: f32, min: f32, max: f32) -> f64 {
+    let range = max - min;
+    if range > 0.0 {
+        ((value - min) / range) as f64
+    } else {
+        0.0
+    }
+}
+
 fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
     store
         .defs
         .iter()
         .map(|def| {
             let value = store.get(def.name());
+            let authored = store.values.get(def.name());
             match def {
                 ParamDef::Float { name, min, max, .. } => {
                     let v = match value {
-                        Some(ParamValue::Float(f)) => *f as f64,
-                        _ => *min as f64,
+                        Some(ParamValue::Float(f)) => *f,
+                        _ => *min,
                     };
-                    // Normalize to 0-1
-                    let range = *max - *min;
-                    let normalized = if range > 0.0 {
-                        (v as f32 - *min) / range
-                    } else {
-                        0.0
+                    let saved = match authored {
+                        Some(ParamValue::Float(f)) => *f,
+                        _ => *min,
                     };
                     ParamInfo {
                         name: name.clone(),
                         param_type: "float",
-                        value: normalized as f64,
+                        value: normalize_float(v, *min, *max),
+                        authored: normalize_float(saved, *min, *max),
+                        control: store.control_of(name),
                         min: Some(*min as f64),
                         max: Some(*max as f64),
                     }
@@ -382,10 +426,16 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
                         Some(ParamValue::Bool(b)) if *b => 1.0,
                         _ => 0.0,
                     };
+                    let saved = match authored {
+                        Some(ParamValue::Bool(b)) if *b => 1.0,
+                        _ => 0.0,
+                    };
                     ParamInfo {
                         name: name.clone(),
                         param_type: "bool",
                         value: v,
+                        authored: saved,
+                        control: store.control_of(name),
                         min: None,
                         max: None,
                     }
@@ -394,6 +444,8 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
                     name: name.clone(),
                     param_type: "color",
                     value: 0.0,
+                    authored: 0.0,
+                    control: store.control_of(name),
                     min: None,
                     max: None,
                 },
@@ -401,6 +453,8 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
                     name: name.clone(),
                     param_type: "point2d",
                     value: 0.0,
+                    authored: 0.0,
+                    control: store.control_of(name),
                     min: None,
                     max: None,
                 },
@@ -626,6 +680,15 @@ mod tests {
             solo_layer: None,
             pending_switch: None,
             save_blocked: false,
+            engine_commit: "test".into(),
+            engine_pid: 1,
+            engine_exe: "fosfora".into(),
+            show_path: "show".into(),
+            applied_preset: None,
+            requested_preset: None,
+            loading_preset: None,
+            load_error: None,
+            command_drops: 0,
         };
         let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -671,6 +734,15 @@ mod tests {
             solo_layer: None,
             pending_switch: None,
             save_blocked: false,
+            engine_commit: "test".into(),
+            engine_pid: 1,
+            engine_exe: "fosfora".into(),
+            show_path: "show".into(),
+            applied_preset: None,
+            requested_preset: None,
+            loading_preset: None,
+            load_error: None,
+            command_drops: 0,
         };
         let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();

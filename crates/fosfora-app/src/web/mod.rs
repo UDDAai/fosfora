@@ -5,7 +5,7 @@ pub mod upload;
 pub mod state;
 pub mod types;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -28,6 +28,7 @@ pub struct WebSystem {
     latest_state: Arc<Mutex<String>>,
     pub config: WebConfig,
     pub client_count: usize,
+    dropped: Arc<AtomicU64>,
     pub last_activity: Option<Instant>,
     last_audio_broadcast: Instant,
     last_state_broadcast: Instant,
@@ -51,6 +52,7 @@ impl WebSystem {
             latest_state: Arc::new(Mutex::new(String::new())),
             config,
             client_count: 0,
+            dropped: Arc::new(AtomicU64::new(0)),
             last_activity: None,
             last_audio_broadcast: Instant::now(),
             last_state_broadcast: Instant::now(),
@@ -78,6 +80,7 @@ impl WebSystem {
             clients.clone(),
             self.latest_state.clone(),
             shutdown.clone(),
+            self.dropped.clone(),
         ) {
             Ok(handle) => {
                 self.inbound_tx = tx;
@@ -109,6 +112,10 @@ impl WebSystem {
             clients.clear();
         }
         self.client_count = 0;
+    }
+
+    pub fn command_drops(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Restart server (e.g., after port change).
@@ -184,6 +191,9 @@ impl WebSystem {
                 WsInMessage::MoveLayer { from, to } => {
                     result.layer_moves.push((from, to));
                 }
+                WsInMessage::RemoveLayer { index } => {
+                    result.layer_removes.push(index);
+                }
                 WsInMessage::ResolvePending { action } => {
                     result.resolve_pending = Some(action);
                 }
@@ -201,6 +211,12 @@ impl WebSystem {
                 }
                 WsInMessage::LinkMediaFolder => {
                     result.link_folder = true;
+                }
+                WsInMessage::LinkLibraryFiles { paths } => {
+                    result.link_library_files.push(paths);
+                }
+                WsInMessage::RemoveLibraryItem { id } => {
+                    result.remove_library.push(id);
                 }
                 WsInMessage::AddLibraryMedia { ids } => {
                     result.add_library.push(ids);
@@ -322,6 +338,9 @@ impl WebSystem {
                 WsInMessage::MoveLayer { from, to } => {
                     result.layer_moves.push((from, to));
                 }
+                WsInMessage::RemoveLayer { index } => {
+                    result.layer_removes.push(index);
+                }
                 WsInMessage::ResolvePending { action } => {
                     result.resolve_pending = Some(action);
                 }
@@ -339,6 +358,12 @@ impl WebSystem {
                 }
                 WsInMessage::LinkMediaFolder => {
                     result.link_folder = true;
+                }
+                WsInMessage::LinkLibraryFiles { paths } => {
+                    result.link_library_files.push(paths);
+                }
+                WsInMessage::RemoveLibraryItem { id } => {
+                    result.remove_library.push(id);
                 }
                 WsInMessage::AddLibraryMedia { ids } => {
                     result.add_library.push(ids);
