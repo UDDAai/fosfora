@@ -157,19 +157,30 @@ pub fn decode_all_frames(
     path: &Path,
     meta: &VideoMeta,
 ) -> Result<(Vec<DecodedFrame>, Vec<u32>), String> {
-    let frame_size = (meta.width as usize) * (meta.height as usize) * 4;
-    let delay_ms = (1000.0 / meta.fps).round() as u32;
-
-    // Estimate RAM and warn
-    let est_frames = meta.frame_count() as usize;
-    // The memory check was made against the probed count. A stream that
-    // decodes far past it is stopped rather than allowed to grow.
-    let frame_cap = est_frames + est_frames / 4 + 8;
-    let est_ram_mb = (est_frames * frame_size) / (1024 * 1024);
+    let frame_size = (meta.width as usize)
+        .checked_mul(meta.height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|&n| n > 0)
+        .ok_or("Video has invalid decoded frame dimensions")?;
+    if !meta.fps.is_finite() || meta.fps <= 0.0 {
+        return Err("Video has an invalid frame rate".into());
+    }
+    let delay_ms = (1000.0 / meta.fps).round().max(1.0) as u32;
+    let est_frames = usize::try_from(meta.frame_count())
+        .map_err(|_| "Video has too many frames to pre-decode")?;
+    // A variable-frame-rate container can under-report its frame count.
+    // Tolerate a modest mismatch but never grow beyond the per-clip RAM cap.
+    let estimated_cap = est_frames.saturating_add(est_frames / 4).saturating_add(8);
+    let memory_cap = (super::library::MAX_CLIP_RAM / frame_size as u64) as usize;
+    let frame_cap = estimated_cap.min(memory_cap);
+    if frame_cap == 0 {
+        return Err("Even one decoded video frame exceeds the clip memory budget".into());
+    }
     log::info!(
-        "Pre-decoding video: ~{} frames, ~{}MB RAM",
+        "Pre-decoding {}: ~{} frames, ~{}MB RAM",
+        path.display(),
         est_frames,
-        est_ram_mb,
+        est_frames.saturating_mul(frame_size) / (1024 * 1024),
     );
 
     let tool = VideoToolchain::global(None);
@@ -181,7 +192,7 @@ pub fn decode_all_frames(
                 tool.status_line()
             )
         })?
-        .args(["-i"])
+        .args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
         .args([
             "-f",
@@ -190,50 +201,116 @@ pub fn decode_all_frames(
             "rgba",
             "-s",
             &format!("{}x{}", meta.width, meta.height),
-            "-v",
-            "quiet",
             "pipe:1",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
+        .map_err(|e| format!("Failed to start ffmpeg for {}: {e}", path.display()))?;
+
+    // Drain stderr while reading video frames. Otherwise a decoder emitting
+    // errors can fill its pipe and block forever. Keep only a bounded excerpt.
+    let stderr = child.stderr.take();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut diagnostic = String::new();
+        if let Some(mut stderr) = stderr {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let remaining = 8192usize.saturating_sub(diagnostic.len());
+                        if remaining > 0 {
+                            let keep = remaining.min(n);
+                            diagnostic.push_str(&String::from_utf8_lossy(&chunk[..keep]));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        diagnostic
+    });
 
     let mut stdout = child.stdout.take().ok_or("ffmpeg: no stdout pipe")?;
-
-    let mut frames = Vec::with_capacity(est_frames);
-    let mut delays_ms = Vec::with_capacity(est_frames);
+    let mut frames = Vec::with_capacity(est_frames.min(frame_cap));
+    let mut delays_ms = Vec::with_capacity(est_frames.min(frame_cap));
     let mut buf = vec![0u8; frame_size];
+    let mut failure: Option<String> = None;
 
-    while stdout.read_exact(&mut buf).is_ok() {
+    'decode: loop {
+        let mut filled = 0;
+        while filled < frame_size {
+            match stdout.read(&mut buf[filled..]) {
+                Ok(0) if filled == 0 => break 'decode,
+                Ok(0) => {
+                    failure = Some(format!(
+                        "ffmpeg stopped halfway through frame {} ({} of {} bytes)",
+                        frames.len() + 1,
+                        filled,
+                        frame_size
+                    ));
+                    break 'decode;
+                }
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    failure = Some(format!("ffmpeg frame-read failed: {e}"));
+                    break 'decode;
+                }
+            }
+        }
         if frames.len() >= frame_cap {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "decoded more than {frame_cap} frames; the probe said {est_frames}"
+            failure = Some(format!(
+                "Video decoded more than {frame_cap} frames (ffprobe estimated {est_frames}); \
+                 use a shorter clip or lower resolution"
             ));
+            break;
         }
         frames.push(DecodedFrame {
             data: buf.clone(),
             width: meta.width,
             height: meta.height,
         });
-        delays_ms.push(delay_ms.max(1));
+        delays_ms.push(delay_ms);
     }
 
-    let _ = child.wait();
-
+    drop(stdout);
+    if failure.is_some() {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| format!("ffmpeg process wait failed: {e}"))?;
+    let diagnostic = stderr_reader.join().unwrap_or_default();
+    let detail = diagnostic.trim();
+    if let Some(failure) = failure {
+        return Err(format!(
+            "{}: {failure}{}",
+            path.display(),
+            if detail.is_empty() { String::new() } else { format!("; ffmpeg: {detail}") }
+        ));
+    }
+    if !status.success() {
+        return Err(format!(
+            "ffmpeg failed to decode {} ({status}){}",
+            path.display(),
+            if detail.is_empty() { String::new() } else { format!(": {detail}") }
+        ));
+    }
     if frames.is_empty() {
-        return Err("ffmpeg decoded zero frames".to_string());
+        return Err(format!(
+            "ffmpeg decoded zero frames from {}{}",
+            path.display(),
+            if detail.is_empty() { String::new() } else { format!(": {detail}") }
+        ));
     }
 
     log::info!(
         "Decoded {} video frames ({}MB)",
         frames.len(),
-        (frames.len() * frame_size) / (1024 * 1024),
+        frames.len().saturating_mul(frame_size) / (1024 * 1024),
     );
-
     Ok((frames, delays_ms))
 }
 
