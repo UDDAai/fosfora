@@ -3706,7 +3706,7 @@ impl App {
                 Some(crate::gpu::particle::SourceSpec::Video(video_path)) => {
                     #[cfg(feature = "video")]
                     {
-                        let path = std::path::PathBuf::from(&video_path);
+                        let path = self.resolve_show_media_path(&video_path);
                         if path.exists() && crate::media::video::ffmpeg_available() {
                             match crate::media::video::probe_video(&path) {
                                 Ok(meta) => {
@@ -3818,6 +3818,8 @@ impl App {
                     }
                 }
                 Some(crate::gpu::particle::SourceSpec::Image(img_path)) => {
+                    let image_path = self.resolve_show_media_path(&img_path);
+                    let resolved = image_path.to_string_lossy();
                     if let Some(ps) = self
                         .layer_stack
                         .layers
@@ -3829,7 +3831,7 @@ impl App {
                             &self.gpu.device,
                             &self.gpu.queue,
                             ps,
-                            &img_path,
+                            &resolved,
                             i,
                         );
                     }
