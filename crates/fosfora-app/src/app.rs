@@ -3582,7 +3582,7 @@ impl App {
             if !is_webcam_layer {
                 if let Some(ref media_path) = lp.media_path {
                     let path = self.resolve_show_media_path(media_path);
-                    // Try pre-decoded media first, fall back to sync decode
+                    // Use only media prepared by the background loader; never decode here
                     let loaded = if let Some(decode_result) = decoded_media.remove(&i) {
                         match decode_result {
                             MediaDecodeResult::Ok(source) => {
