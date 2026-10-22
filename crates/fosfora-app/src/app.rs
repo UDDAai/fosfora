@@ -4301,27 +4301,56 @@ impl App {
                 pack.bindings.clone(),
                 preset_ids,
             );
-            // Media preflight (p1-validator): every preset layer media_path
-            // and particle video path becomes one MediaEstimate — exists via
-            // pack-root-relative resolution, RAM via the shared RGBA formula.
+            // Startup-only show preflight: ffprobe actual media instead of
+            // pretending every clip is 720p at 15 fps for eight seconds.
+            // This runs once before rendering begins; runtime decode jobs
+            // enforce the shared RAM budget again for each requested load.
             let mut media: Vec<crate::show::validation::MediaEstimate> = Vec::new();
-            for preset in pack.presets.values() {
+            let mut media_problems: Vec<String> = Vec::new();
+            let mut preset_bytes: Vec<u64> = Vec::new();
+            for (preset_id, preset) in &pack.presets {
+                let mut bytes = 0u64;
                 for layer in &preset.layers {
                     for stored in [&layer.media_path, &layer.particle_video_path]
                         .into_iter()
                         .flatten()
                     {
+                        let path = controller.resolve_path(stored);
+                        let exists = path.is_file();
+                        let estimated = if exists {
+                            let plan = crate::media::library::plan_clip(&path);
+                            if let Some(problem) = plan.problem {
+                                media_problems.push(format!(
+                                    "{preset_id} / {stored}: {problem}"
+                                ));
+                            }
+                            plan.ram_bytes
+                        } else {
+                            0
+                        };
+                        bytes = bytes.saturating_add(estimated);
                         media.push(crate::show::validation::MediaEstimate {
-                            path: stored.clone(),
-                            exists: crate::show::validation::media_exists(
-                                &controller.pack_root,
-                                stored,
-                            ),
-                            estimated_ram_bytes:
-                                crate::show::validation::estimate_rgba_ram(1280, 720, 15.0, 8.0),
+                            path: format!("{preset_id}: {stored}"),
+                            exists,
+                            estimated_ram_bytes: estimated,
                         });
                     }
                 }
+                preset_bytes.push(bytes);
+            }
+            // Worst case: the outgoing scene and a requested incoming preset
+            // are both in RAM. Allow GPU target headroom; the live budget also
+            // accounts for resident textures and concurrent background jobs.
+            let peak = crate::show::validation::max_concurrent_preset_bytes(&preset_bytes);
+            let limit = self.media_jobs.budget().limit();
+            let headroom = 512u64 * 1024 * 1024;
+            if peak.saturating_add(headroom) > limit {
+                media_problems.push(format!(
+                    "The two largest presets need {} decoded plus {} GPU headroom, over the {} show budget",
+                    crate::media::library::format_bytes(peak),
+                    crate::media::library::format_bytes(headroom),
+                    crate::media::library::format_bytes(limit),
+                ));
             }
             // Ownership validation (p2-ownership): collect every external
             // control path targeting a palette-owned color param. MIDI/OSC
@@ -4411,7 +4440,13 @@ impl App {
             // p2-ownership conflict scan belongs on the controller so the bus
             // guard, validator, and tests share one implementation.
             let conflicts = controller.palette_conflicts(external);
-            controller.validate(&pack.presets, &media, &conflicts)
+            let mut report = controller.validate(&pack.presets, &media, &conflicts);
+            report.issues.extend(
+                media_problems
+                    .into_iter()
+                    .map(|message| crate::show::validation::ValidationIssue { message }),
+            );
+            report
         };
         log::info!(
             "Show pack '{}' loaded: {} scene cues, {} palette cues — {}",
