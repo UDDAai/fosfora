@@ -4308,18 +4308,47 @@ impl App {
             let mut media: Vec<crate::show::validation::MediaEstimate> = Vec::new();
             let mut media_problems: Vec<String> = Vec::new();
             let mut preset_bytes: Vec<u64> = Vec::new();
+            // READY describes the scheduled performance, not every draft or
+            // optional library preset. The latter are checked by the loader
+            // if the operator explicitly selects them.
+            let scheduled: std::collections::HashSet<&str> = pack
+                .definition
+                .scene_track
+                .iter()
+                .map(|cue| cue.preset_id.as_str())
+                .collect();
+            // One clip may be referenced by several scenes. Avoid repeated
+            // ffprobe/image-dimensions calls to local or iCloud media.
+            let mut probes: std::collections::HashMap<
+                std::path::PathBuf,
+                crate::media::library::ClipPlan,
+            > = std::collections::HashMap::new();
             for (preset_id, preset) in &pack.presets {
+                if !scheduled.contains(preset_id.as_str()) {
+                    continue;
+                }
                 let mut bytes = 0u64;
                 for layer in &preset.layers {
-                    for stored in [&layer.media_path, &layer.particle_video_path]
-                        .into_iter()
-                        .flatten()
-                    {
+                    // Include still-image particle sources and image obstacles;
+                    // 3D obstacle models are not decodable RGBA media clips.
+                    let paths = [
+                        layer.media_path.as_ref(),
+                        layer.particle_video_path.as_ref(),
+                        layer.particle_image_path.as_ref(),
+                        if layer.obstacle_model.unwrap_or(false) {
+                            None
+                        } else {
+                            layer.obstacle_image_path.as_ref()
+                        },
+                    ];
+                    for stored in paths.into_iter().flatten() {
                         let path = controller.resolve_path(stored);
                         let exists = path.is_file();
                         let estimated = if exists {
-                            let plan = crate::media::library::plan_clip(&path);
-                            if let Some(problem) = plan.problem {
+                            let plan = probes
+                                .entry(path.clone())
+                                .or_insert_with(|| crate::media::library::plan_clip(&path));
+                            if let Some(problem) = plan.problem.as_ref() {
                                 media_problems.push(format!(
                                     "{preset_id} / {stored}: {problem}"
                                 ));
@@ -4346,7 +4375,7 @@ impl App {
             let headroom = 512u64 * 1024 * 1024;
             if peak.saturating_add(headroom) > limit {
                 media_problems.push(format!(
-                    "The two largest presets need {} decoded plus {} GPU headroom, over the {} show budget",
+                    "The two largest scheduled presets need {} decoded plus {} GPU headroom, over the {} show budget",
                     crate::media::library::format_bytes(peak),
                     crate::media::library::format_bytes(headroom),
                     crate::media::library::format_bytes(limit),
