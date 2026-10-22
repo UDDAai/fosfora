@@ -1231,14 +1231,24 @@ fn primary_files(primary: &Path) -> Vec<SeenFile> {
             if !path.is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            // Own the name before moving path into SeenFile. Borrowing it
+            // from path.file_name() would keep path borrowed across the move.
+            let Some(name) = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+            else {
                 continue;
             };
-            if media_kind(name).is_none() {
+            if media_kind(&name).is_none() {
                 continue;
             }
             let kind = if folder.is_empty() {
-                if media_kind(name) == Some("video") { "video" } else { "images" }
+                if media_kind(&name) == Some("video") {
+                    "video"
+                } else {
+                    "images"
+                }
             } else {
                 folder
             };
