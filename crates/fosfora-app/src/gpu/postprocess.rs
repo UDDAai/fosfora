@@ -60,6 +60,34 @@ impl AlphaMode {
     }
 }
 
+/// Palette grade of the composited frame. Strength 0 leaves the picture unchanged.
+///
+/// Roles, matching the show pack's six swatches: color-1 shadows, color-2
+/// midtones, color-3 highlights, color-4 accent. color-5 and color-6 stay on
+/// the per-effect bindings.
+#[derive(Debug, Clone, Copy)]
+pub struct PaletteGrade {
+    pub enabled: bool,
+    pub strength: f32,
+    pub shadow: [f32; 3],
+    pub mid: [f32; 3],
+    pub high: [f32; 3],
+    pub accent: [f32; 3],
+}
+
+impl Default for PaletteGrade {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strength: 0.0,
+            shadow: [0.0; 3],
+            mid: [0.5; 3],
+            high: [1.0; 3],
+            accent: [1.0; 3],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 struct PostParams {
@@ -73,7 +101,22 @@ struct PostParams {
     alpha_mode: f32,
     tonemap_mode: f32, // 0 = ACES (house look), 1 = linear passthrough (SuperSplat-faithful)
     grain_rate: f32,   // grain updates per second; <= 0 = every frame (see #1983)
-    _pad: [f32; 3],
+    // All f32 so the WGSL struct stays tightly packed. 24 floats = 96 bytes.
+    grade_strength: f32,
+    shadow_r: f32,
+    shadow_g: f32,
+    shadow_b: f32,
+    mid_r: f32,
+    mid_g: f32,
+    mid_b: f32,
+    high_r: f32,
+    high_g: f32,
+    high_b: f32,
+    accent_r: f32,
+    accent_g: f32,
+    accent_b: f32,
+    _end0: f32,
+    _end1: f32,
 }
 
 pub struct PostProcessChain {
@@ -97,6 +140,7 @@ pub struct PostProcessChain {
     blur_h_params_buffer: wgpu::Buffer,
     blur_v_params_buffer: wgpu::Buffer,
     post_params_buffer: wgpu::Buffer,
+    pub grade: PaletteGrade,
     // Stored for potential resize rebuilds
     #[allow(dead_code)]
     surface_format: TextureFormat,
@@ -203,6 +247,7 @@ impl PostProcessChain {
             blur_h_params_buffer,
             blur_v_params_buffer,
             post_params_buffer,
+            grade: PaletteGrade::default(),
             surface_format,
             hdr_format,
         }
@@ -321,7 +366,25 @@ impl PostProcessChain {
             } else {
                 0.0
             },
-            _pad: [0.0; 3],
+            grade_strength: if self.grade.enabled {
+                self.grade.strength.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            shadow_r: self.grade.shadow[0],
+            shadow_g: self.grade.shadow[1],
+            shadow_b: self.grade.shadow[2],
+            mid_r: self.grade.mid[0],
+            mid_g: self.grade.mid[1],
+            mid_b: self.grade.mid[2],
+            high_r: self.grade.high[0],
+            high_g: self.grade.high[1],
+            high_b: self.grade.high[2],
+            accent_r: self.grade.accent[0],
+            accent_g: self.grade.accent[1],
+            accent_b: self.grade.accent[2],
+            _end0: 0.0,
+            _end1: 0.0,
         };
         queue.write_buffer(
             &self.post_params_buffer,
@@ -880,7 +943,21 @@ mod tests {
             alpha_mode: 2.0, // passthrough
             tonemap_mode: 1.0,
             grain_rate: 0.0,
-            _pad: [0.0; 3],
+            grade_strength: 0.0,
+            shadow_r: 0.0,
+            shadow_g: 0.0,
+            shadow_b: 0.0,
+            mid_r: 0.0,
+            mid_g: 0.0,
+            mid_b: 0.0,
+            high_r: 0.0,
+            high_g: 0.0,
+            high_b: 0.0,
+            accent_r: 0.0,
+            accent_g: 0.0,
+            accent_b: 0.0,
+            _end0: 0.0,
+            _end1: 0.0,
         };
         let out = probe_composite_scene(&device, &queue, params, &scene);
         for (i, (&got, &want)) in out.iter().zip(scene.iter()).enumerate() {
@@ -903,7 +980,21 @@ mod tests {
             alpha_mode: 0.0,
             tonemap_mode: 1.0,
             grain_rate,
-            _pad: [0.0; 3],
+            grade_strength: 0.0,
+            shadow_r: 0.0,
+            shadow_g: 0.0,
+            shadow_b: 0.0,
+            mid_r: 0.0,
+            mid_g: 0.0,
+            mid_b: 0.0,
+            high_r: 0.0,
+            high_g: 0.0,
+            high_b: 0.0,
+            accent_r: 0.0,
+            accent_g: 0.0,
+            accent_b: 0.0,
+            _end0: 0.0,
+            _end1: 0.0,
         }
     }
 

@@ -17,6 +17,30 @@ pub struct FullState {
     pub presets: Vec<PresetInfo>,
     pub current_preset: Option<usize>,
     pub postprocess_enabled: bool,
+    pub library: Vec<crate::media::library::LibraryItem>,
+    pub library_warnings: Vec<String>,
+    pub save_state: String,
+    pub save_detail: String,
+    pub workspace_mode: String,
+    pub solo_layer: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_switch: Option<String>,
+    pub save_blocked: bool,
+    pub engine_commit: String,
+    pub engine_pid: u32,
+    pub engine_exe: String,
+    pub show_path: String,
+    pub applied_preset: Option<String>,
+    pub requested_preset: Option<String>,
+    pub loading_preset: Option<String>,
+    pub load_error: Option<String>,
+    pub command_drops: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show: Option<crate::show::controller::ShowSnapshot>,
+}
+
+pub fn engine_commit() -> &'static str {
+    option_env!("FOSFORA_GIT_SHA").unwrap_or("unknown")
 }
 
 #[derive(Serialize)]
@@ -36,6 +60,27 @@ pub struct LayerState {
     pub opacity: f32,
     pub enabled: bool,
     pub locked: bool,
+    pub pinned: bool,
+    /// Filename when this layer is a video or image. Empty for shaders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_fit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_pos_x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_pos_y: Option<f32>,
+    /// JPEG data URL. Present for video and still layers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(default)]
+    pub media_is_video: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_speed: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_looping: Option<bool>,
     pub params: Vec<ParamInfo>,
 }
 
@@ -45,6 +90,10 @@ pub struct ParamInfo {
     #[serde(rename = "type")]
     pub param_type: &'static str,
     pub value: f64,
+    /// Authored value, normalized the same way as `value`.
+    pub authored: f64,
+    /// `palette`, `audio`, or `authored`.
+    pub control: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +184,26 @@ pub struct PresetsChanged {
 /// Per-layer tuple: (params, effect_index, blend_mode, opacity, enabled, locked).
 pub type LayerTuple<'a> = (&'a ParamStore, Option<usize>, BlendMode, f32, bool, bool);
 
+pub struct WebWorkspace<'a> {
+    pub library: &'a [crate::media::library::LibraryItem],
+    pub warnings: &'a [String],
+    pub save_state: &'a str,
+    pub save_detail: &'a str,
+    pub mode: &'a str,
+    pub solo_layer: Option<usize>,
+    pub pending_switch: Option<String>,
+    pub save_blocked: bool,
+    pub engine_commit: String,
+    pub engine_pid: u32,
+    pub engine_exe: String,
+    pub show_path: String,
+    pub applied_preset: Option<String>,
+    pub requested_preset: Option<String>,
+    pub loading_preset: Option<String>,
+    pub load_error: Option<String>,
+    pub command_drops: u64,
+}
+
 pub fn build_full_state(
     effects: &[PfxEffect],
     layer_infos: &[LayerInfo],
@@ -142,6 +211,8 @@ pub fn build_full_state(
     layers: &[LayerTuple<'_>],
     preset_store: &PresetStore,
     postprocess_enabled: bool,
+    show: Option<&crate::show::controller::ShowSnapshot>,
+    workspace: &WebWorkspace<'_>,
 ) -> String {
     let effect_list: Vec<EffectInfo> = effects
         .iter()
@@ -180,6 +251,16 @@ pub fn build_full_state(
                 opacity: info.opacity,
                 enabled: info.enabled,
                 locked: info.locked,
+                pinned: info.pinned,
+                media_name: info.media_file_name.clone(),
+                media_fit: info.media_file_name.as_ref().map(|_| info.media_fit.clone()),
+                media_width: info.media_file_name.as_ref().map(|_| info.media_width_scale),
+                media_pos_x: info.media_file_name.as_ref().map(|_| info.media_pos_x),
+                media_pos_y: info.media_file_name.as_ref().map(|_| info.media_pos_y),
+                preview: info.media_preview.clone(),
+                media_is_video: info.media_is_video,
+                media_speed: info.media_file_name.as_ref().map(|_| info.media_speed),
+                media_looping: info.media_file_name.as_ref().map(|_| info.media_looping),
                 params,
             }
         })
@@ -204,6 +285,24 @@ pub fn build_full_state(
         presets,
         current_preset: preset_store.current_preset,
         postprocess_enabled,
+        library: workspace.library.to_vec(),
+        library_warnings: workspace.warnings.to_vec(),
+        save_state: workspace.save_state.to_string(),
+        save_detail: workspace.save_detail.to_string(),
+        workspace_mode: workspace.mode.to_string(),
+        solo_layer: workspace.solo_layer,
+        pending_switch: workspace.pending_switch.clone(),
+        save_blocked: workspace.save_blocked,
+        engine_commit: workspace.engine_commit.clone(),
+        engine_pid: workspace.engine_pid,
+        engine_exe: workspace.engine_exe.clone(),
+        show_path: workspace.show_path.clone(),
+        applied_preset: workspace.applied_preset.clone(),
+        requested_preset: workspace.requested_preset.clone(),
+        loading_preset: workspace.loading_preset.clone(),
+        load_error: workspace.load_error.clone(),
+        command_drops: workspace.command_drops,
+        show: show.cloned(),
     };
 
     serde_json::to_string(&state).unwrap_or_default()
@@ -286,29 +385,38 @@ pub fn build_presets_changed(preset_store: &PresetStore) -> String {
     .unwrap_or_default()
 }
 
+fn normalize_float(value: f32, min: f32, max: f32) -> f64 {
+    let range = max - min;
+    if range > 0.0 {
+        ((value - min) / range) as f64
+    } else {
+        0.0
+    }
+}
+
 fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
     store
         .defs
         .iter()
         .map(|def| {
-            let value = store.values.get(def.name());
+            let value = store.get(def.name());
+            let authored = store.values.get(def.name());
             match def {
                 ParamDef::Float { name, min, max, .. } => {
                     let v = match value {
-                        Some(ParamValue::Float(f)) => *f as f64,
-                        _ => *min as f64,
+                        Some(ParamValue::Float(f)) => *f,
+                        _ => *min,
                     };
-                    // Normalize to 0-1
-                    let range = *max - *min;
-                    let normalized = if range > 0.0 {
-                        (v as f32 - *min) / range
-                    } else {
-                        0.0
+                    let saved = match authored {
+                        Some(ParamValue::Float(f)) => *f,
+                        _ => *min,
                     };
                     ParamInfo {
                         name: name.clone(),
                         param_type: "float",
-                        value: normalized as f64,
+                        value: normalize_float(v, *min, *max),
+                        authored: normalize_float(saved, *min, *max),
+                        control: store.control_of(name),
                         min: Some(*min as f64),
                         max: Some(*max as f64),
                     }
@@ -318,10 +426,16 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
                         Some(ParamValue::Bool(b)) if *b => 1.0,
                         _ => 0.0,
                     };
+                    let saved = match authored {
+                        Some(ParamValue::Bool(b)) if *b => 1.0,
+                        _ => 0.0,
+                    };
                     ParamInfo {
                         name: name.clone(),
                         param_type: "bool",
                         value: v,
+                        authored: saved,
+                        control: store.control_of(name),
                         min: None,
                         max: None,
                     }
@@ -330,6 +444,8 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
                     name: name.clone(),
                     param_type: "color",
                     value: 0.0,
+                    authored: 0.0,
+                    control: store.control_of(name),
                     min: None,
                     max: None,
                 },
@@ -337,6 +453,8 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
                     name: name.clone(),
                     param_type: "point2d",
                     value: 0.0,
+                    authored: 0.0,
+                    control: store.control_of(name),
                     min: None,
                     max: None,
                 },
@@ -477,6 +595,13 @@ mod tests {
             media_is_animated: false,
             media_is_video: false,
             media_is_live: false,
+            media_fit: String::new(),
+            media_width_scale: 1.0,
+            media_pos_x: 0.0,
+            media_pos_y: 0.0,
+            media_speed: 1.0,
+            media_looping: true,
+            media_preview: None,
             chain: None,
             needs_layer_below: false,
         };
@@ -522,5 +647,114 @@ mod tests {
         assert_eq!(presets.len(), 2);
         assert!(presets[0]["builtin"].as_bool().unwrap());
         assert!(!presets[1]["builtin"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn full_state_includes_show_snapshot_when_present() {
+        let store = PresetStore::new();
+        let snap = crate::show::controller::ShowSnapshot {
+            loaded: true,
+            auto_enabled: true,
+            running: true,
+            elapsed_ms: 120_000,
+            scene: Some("deep-sleep".into()),
+            next_scene: Some("under-ice".into()),
+            palette: Some("earth".into()),
+            next_palette: Some("deep-blue".into()),
+            next_scene_secs: Some(1200),
+            next_palette_secs: Some(3500),
+            palette_manual: false,
+            palettes: vec!["earth".into(), "deep-blue".into()],
+            blackout: false,
+            validation: "READY".into(),
+            grade_enabled: true,
+            grade_strength: 0.75,
+            notice: String::new(),
+        };
+        let workspace = WebWorkspace {
+            library: &[],
+            warnings: &[],
+            save_state: "saved",
+            save_detail: "",
+            mode: "prepare",
+            solo_layer: None,
+            pending_switch: None,
+            save_blocked: false,
+            engine_commit: "test".into(),
+            engine_pid: 1,
+            engine_exe: "fosfora".into(),
+            show_path: "show".into(),
+            applied_preset: None,
+            requested_preset: None,
+            loading_preset: None,
+            load_error: None,
+            command_drops: 0,
+        };
+        let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "state");
+        assert_eq!(v["show"]["scene"], "deep-sleep");
+        assert_eq!(v["show"]["palette"], "earth");
+        assert_eq!(v["show"]["elapsed_ms"], 120000);
+        assert_eq!(v["show"]["auto_enabled"], true);
+    }
+
+    #[test]
+    fn full_state_at_01_47_23_shows_correct_mid_show_state() {
+        // Phase 3 CHECKPOINT: a browser refresh at 01:47:23 (6443s) must
+        // render the full show state — reconnect is harmless. At 6443s the
+        // scene track sits on pulse-below (3600s cue) with thaw next, and
+        // the palette track sits on deep-blue (3500s cue) with plum next.
+        let store = PresetStore::new();
+        let snap = crate::show::controller::ShowSnapshot {
+            loaded: true,
+            auto_enabled: true,
+            running: true,
+            elapsed_ms: 6_443_000,
+            scene: Some("pulse-below".into()),
+            next_scene: Some("thaw".into()),
+            palette: Some("deep-blue".into()),
+            next_palette: Some("plum".into()),
+            next_scene_secs: Some(7200),
+            next_palette_secs: Some(6900),
+            palette_manual: false,
+            palettes: vec!["deep-blue".into(), "earth".into(), "plum".into()],
+            blackout: false,
+            validation: "READY".into(),
+            grade_enabled: true,
+            grade_strength: 0.75,
+            notice: String::new(),
+        };
+        let workspace = WebWorkspace {
+            library: &[],
+            warnings: &[],
+            save_state: "saved",
+            save_detail: "",
+            mode: "prepare",
+            solo_layer: None,
+            pending_switch: None,
+            save_blocked: false,
+            engine_commit: "test".into(),
+            engine_pid: 1,
+            engine_exe: "fosfora".into(),
+            show_path: "show".into(),
+            applied_preset: None,
+            requested_preset: None,
+            loading_preset: None,
+            load_error: None,
+            command_drops: 0,
+        };
+        let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["show"]["loaded"], true);
+        assert_eq!(v["show"]["auto_enabled"], true);
+        assert_eq!(v["show"]["running"], true);
+        assert_eq!(v["show"]["elapsed_ms"], 6_443_000);
+        assert_eq!(v["show"]["scene"], "pulse-below");
+        assert_eq!(v["show"]["next_scene"], "thaw");
+        assert_eq!(v["show"]["palette"], "deep-blue");
+        assert_eq!(v["show"]["next_palette"], "plum");
+        assert_eq!(v["show"]["blackout"], false);
+        assert_eq!(v["show"]["validation"], "READY");
     }
 }

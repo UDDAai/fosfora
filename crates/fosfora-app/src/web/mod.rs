@@ -1,17 +1,18 @@
 pub mod client;
 pub mod server;
+pub mod upload;
 #[allow(dead_code)]
 pub mod state;
 pub mod types;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 
-use self::types::{WebConfig, WebFrameResult, WsInMessage};
+use self::types::{SoloRequest, WebConfig, WebFrameResult, WsInMessage};
 use crate::audio::features::AudioFeatures;
 use std::collections::HashMap;
 
@@ -27,6 +28,7 @@ pub struct WebSystem {
     latest_state: Arc<Mutex<String>>,
     pub config: WebConfig,
     pub client_count: usize,
+    dropped: Arc<AtomicU64>,
     pub last_activity: Option<Instant>,
     last_audio_broadcast: Instant,
     last_state_broadcast: Instant,
@@ -50,6 +52,7 @@ impl WebSystem {
             latest_state: Arc::new(Mutex::new(String::new())),
             config,
             client_count: 0,
+            dropped: Arc::new(AtomicU64::new(0)),
             last_activity: None,
             last_audio_broadcast: Instant::now(),
             last_state_broadcast: Instant::now(),
@@ -77,6 +80,7 @@ impl WebSystem {
             clients.clone(),
             self.latest_state.clone(),
             shutdown.clone(),
+            self.dropped.clone(),
         ) {
             Ok(handle) => {
                 self.inbound_tx = tx;
@@ -108,6 +112,10 @@ impl WebSystem {
             clients.clear();
         }
         self.client_count = 0;
+    }
+
+    pub fn command_drops(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Restart server (e.g., after port change).
@@ -163,6 +171,7 @@ impl WebSystem {
             match msg {
                 WsInMessage::SetParam { name, value } => {
                     apply_param(param_values, param_changed, param_defs, &name, value);
+                    result.touched_params = true;
                 }
                 WsInMessage::SetLayerParam { layer, name, value } => {
                     result.layer_params.push((layer, name, value));
@@ -172,6 +181,72 @@ impl WebSystem {
                 }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
+                }
+                WsInMessage::SetSolo { index } => {
+                    result.solo = Some(SoloRequest::Set(index));
+                }
+                WsInMessage::ClearSolo | WsInMessage::ShowAllLayers => {
+                    result.solo = Some(SoloRequest::Clear);
+                }
+                WsInMessage::MoveLayer { from, to } => {
+                    result.layer_moves.push((from, to));
+                }
+                WsInMessage::RemoveLayer { index } => {
+                    result.layer_removes.push(index);
+                }
+                WsInMessage::ResolvePending { action } => {
+                    result.resolve_pending = Some(action);
+                }
+                WsInMessage::AddMedia { path } => {
+                    result.add_media.push(path);
+                }
+                WsInMessage::RescanLibrary => {
+                    result.rescan_library = true;
+                }
+                WsInMessage::ImportPreviousUploads => {
+                    result.import_uploads = true;
+                }
+                WsInMessage::RevealMediaFolder => {
+                    result.reveal_media = true;
+                }
+                WsInMessage::LinkMediaFolder => {
+                    result.link_folder = true;
+                }
+                WsInMessage::LinkLibraryFiles { paths } => {
+                    result.link_library_files.push(paths);
+                }
+                WsInMessage::RemoveLibraryItem { id } => {
+                    result.remove_library.push(id);
+                }
+                WsInMessage::AddLibraryMedia { ids } => {
+                    result.add_library.push(ids);
+                }
+                WsInMessage::ReplaceLibraryMedia { layer, id } => {
+                    result.replace_library.push((layer, id));
+                }
+                WsInMessage::SetMediaTransport {
+                    layer,
+                    speed,
+                    looping,
+                } => {
+                    result.media_transport.push((layer, speed, looping));
+                }
+                WsInMessage::SaveScene => {
+                    result.save_scene = true;
+                }
+                WsInMessage::SetWorkspaceMode { mode } => {
+                    result.workspace_mode = Some(mode);
+                }
+                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                    result.media_place.push((layer, fit, width, x, y));
+                }
+                WsInMessage::SetGrade { strength, enabled } => {
+                    if strength.is_some() {
+                        result.grade_strength = strength;
+                    }
+                    if enabled.is_some() {
+                        result.grade_enabled = enabled;
+                    }
                 }
                 WsInMessage::SetLayerOpacity { layer, value } => {
                     result.layer_opacity.push((layer, value));
@@ -201,6 +276,9 @@ impl WebSystem {
                 }
                 WsInMessage::BindPreview { source, jpeg_data } => {
                     self.preview_images.insert(source, jpeg_data);
+                }
+                WsInMessage::ShowCommand(cmd) => {
+                    result.show_commands.push(cmd);
                 }
             }
         }
@@ -251,11 +329,80 @@ impl WebSystem {
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
+                WsInMessage::SetSolo { index } => {
+                    result.solo = Some(SoloRequest::Set(index));
+                }
+                WsInMessage::ClearSolo | WsInMessage::ShowAllLayers => {
+                    result.solo = Some(SoloRequest::Clear);
+                }
+                WsInMessage::MoveLayer { from, to } => {
+                    result.layer_moves.push((from, to));
+                }
+                WsInMessage::RemoveLayer { index } => {
+                    result.layer_removes.push(index);
+                }
+                WsInMessage::ResolvePending { action } => {
+                    result.resolve_pending = Some(action);
+                }
+                WsInMessage::AddMedia { path } => {
+                    result.add_media.push(path);
+                }
+                WsInMessage::RescanLibrary => {
+                    result.rescan_library = true;
+                }
+                WsInMessage::ImportPreviousUploads => {
+                    result.import_uploads = true;
+                }
+                WsInMessage::RevealMediaFolder => {
+                    result.reveal_media = true;
+                }
+                WsInMessage::LinkMediaFolder => {
+                    result.link_folder = true;
+                }
+                WsInMessage::LinkLibraryFiles { paths } => {
+                    result.link_library_files.push(paths);
+                }
+                WsInMessage::RemoveLibraryItem { id } => {
+                    result.remove_library.push(id);
+                }
+                WsInMessage::AddLibraryMedia { ids } => {
+                    result.add_library.push(ids);
+                }
+                WsInMessage::ReplaceLibraryMedia { layer, id } => {
+                    result.replace_library.push((layer, id));
+                }
+                WsInMessage::SetMediaTransport {
+                    layer,
+                    speed,
+                    looping,
+                } => {
+                    result.media_transport.push((layer, speed, looping));
+                }
+                WsInMessage::SaveScene => {
+                    result.save_scene = true;
+                }
+                WsInMessage::SetWorkspaceMode { mode } => {
+                    result.workspace_mode = Some(mode);
+                }
+                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                    result.media_place.push((layer, fit, width, x, y));
+                }
+                WsInMessage::SetGrade { strength, enabled } => {
+                    if strength.is_some() {
+                        result.grade_strength = strength;
+                    }
+                    if enabled.is_some() {
+                        result.grade_enabled = enabled;
+                    }
+                }
                 WsInMessage::LoadPreset { index } => {
                     result.preset_loads.push(index);
                 }
                 WsInMessage::BindPreview { source, jpeg_data } => {
                     self.preview_images.insert(source, jpeg_data);
+                }
+                WsInMessage::ShowCommand(cmd) => {
+                    result.show_commands.push(cmd);
                 }
                 _ => {} // Skip active-layer param application
             }

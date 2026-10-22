@@ -4,7 +4,12 @@ use super::types::{ParamDef, ParamValue};
 
 pub struct ParamStore {
     pub defs: Vec<ParamDef>,
+    /// Authored values. Preset save reads this map, so playback must not write here.
     pub values: HashMap<String, ParamValue>,
+    /// Audio-binding overlay. Independent of the palette overlay.
+    audio: HashMap<String, ParamValue>,
+    /// Palette-automation overlay. Wins over audio for the same parameter.
+    palette: HashMap<String, ParamValue>,
     pub changed: bool,
 }
 
@@ -13,6 +18,8 @@ impl ParamStore {
         Self {
             defs: Vec::new(),
             values: HashMap::new(),
+            audio: HashMap::new(),
+            palette: HashMap::new(),
             changed: false,
         }
     }
@@ -20,6 +27,8 @@ impl ParamStore {
     pub fn load_from_defs(&mut self, defs: &[ParamDef]) {
         self.defs = defs.to_vec();
         self.values.clear();
+        self.audio.clear();
+        self.palette.clear();
         self.changed = false;
         for def in defs {
             self.values
@@ -53,6 +62,8 @@ impl ParamStore {
         }
         self.defs = new_defs.to_vec();
         self.values = new_values;
+        self.audio.clear();
+        self.palette.clear();
         self.changed = true;
     }
 
@@ -63,12 +74,45 @@ impl ParamStore {
     }
 
     pub fn set(&mut self, name: &str, value: ParamValue) {
+        self.audio.remove(name);
+        self.palette.remove(name);
         self.values.insert(name.to_string(), value);
         self.changed = true;
     }
 
+    /// Audio-binding overlay. Does not mark the store dirty and does not
+    /// replace the authored value that a scene save writes.
+    pub fn set_runtime(&mut self, name: &str, value: ParamValue) {
+        self.audio.insert(name.to_string(), value);
+    }
+
+    /// Palette-automation overlay. Does not mark the store dirty.
+    pub fn set_palette(&mut self, name: &str, value: ParamValue) {
+        self.palette.insert(name.to_string(), value);
+    }
+
+    /// Drop palette overlays only. Audio overlays stay.
+    pub fn clear_palette(&mut self) {
+        self.palette.clear();
+    }
+
+    /// Who currently draws this parameter: `palette`, `audio`, or `authored`.
+    pub fn control_of(&self, name: &str) -> &'static str {
+        if self.palette.contains_key(name) {
+            "palette"
+        } else if self.audio.contains_key(name) {
+            "audio"
+        } else {
+            "authored"
+        }
+    }
+
+    /// Effective value. Palette wins over audio, and either wins over authored.
     pub fn get(&self, name: &str) -> Option<&ParamValue> {
-        self.values.get(name)
+        self.palette
+            .get(name)
+            .or_else(|| self.audio.get(name))
+            .or_else(|| self.values.get(name))
     }
 
     pub fn reset(&mut self, name: &str) {
@@ -112,7 +156,7 @@ impl ParamStore {
             if offset >= 16 {
                 break;
             }
-            if let Some(value) = self.values.get(def.name()) {
+            if let Some(value) = self.get(def.name()) {
                 let count = value.float_count();
                 if offset + count <= 16 {
                     value.write_to(&mut buf, offset);
@@ -190,6 +234,55 @@ mod tests {
         assert!(!s.changed);
         s.set("speed", ParamValue::Float(0.8));
         assert!(s.changed);
+    }
+
+    #[test]
+    fn set_runtime_does_not_mark_changed() {
+        let mut s = ParamStore::new();
+        s.load_from_defs(&test_defs());
+        s.set("speed", ParamValue::Float(0.2));
+        s.changed = false;
+        s.set_runtime("speed", ParamValue::Float(0.8));
+        assert!(!s.changed);
+        match s.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.8, 1e-6)),
+            _ => panic!("expected Float"),
+        }
+        match s.values.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.2, 1e-6)),
+            _ => panic!("authored value was overwritten"),
+        }
+        assert!(approx_eq(s.pack_to_buffer()[0], 0.8, 1e-6));
+        s.set("speed", ParamValue::Float(0.4));
+        match s.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.4, 1e-6)),
+            _ => panic!("explicit edit did not clear the palette overlay"),
+        }
+    }
+
+    #[test]
+    fn palette_clear_leaves_audio_overlay() {
+        let mut s = ParamStore::new();
+        s.load_from_defs(&test_defs());
+        s.set("speed", ParamValue::Float(0.2));
+        s.set_runtime("speed", ParamValue::Float(0.34));
+        s.set_palette("speed", ParamValue::Float(0.9));
+        assert_eq!(s.control_of("speed"), "palette");
+        match s.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.9, 1e-6)),
+            _ => panic!("palette overlay missing"),
+        }
+        s.clear_palette();
+        assert_eq!(s.control_of("speed"), "audio");
+        match s.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.34, 1e-6)),
+            _ => panic!("audio overlay was cleared with the palette"),
+        }
+        match s.values.get("speed") {
+            Some(ParamValue::Float(v)) => assert!(approx_eq(*v, 0.2, 1e-6)),
+            _ => panic!("authored value changed"),
+        }
+        assert!(approx_eq(s.pack_to_buffer()[0], 0.34, 1e-6));
     }
 
     #[test]

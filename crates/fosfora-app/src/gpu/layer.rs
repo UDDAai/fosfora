@@ -533,6 +533,14 @@ pub struct LayerInfo {
     #[allow(dead_code)]
     pub media_is_video: bool,
     pub media_is_live: bool,
+    pub media_fit: String,
+    pub media_width_scale: f32,
+    pub media_pos_x: f32,
+    pub media_pos_y: f32,
+    pub media_speed: f32,
+    pub media_looping: bool,
+    /// JPEG data URL of the media's first frame, when this row is a video or still.
+    pub media_preview: Option<String>,
     /// The layer's trama chain, when it has one worth mentioning.
     pub chain: Option<ChainBadge>,
     /// An enabled layer whose effect reads the layers beneath it (`@backdrop`)
@@ -545,6 +553,9 @@ pub struct LayerInfo {
 pub struct LayerStack {
     pub layers: Vec<Layer>,
     pub active_layer: usize,
+    /// Temporary output isolation. Not part of a saved preset: the authored
+    /// `enabled` flags stay put, and this clears when a scene is loaded.
+    pub solo_layer: Option<usize>,
 }
 
 impl LayerStack {
@@ -552,6 +563,7 @@ impl LayerStack {
         Self {
             layers: Vec::new(),
             active_layer: 0,
+            solo_layer: None,
         }
     }
 
@@ -563,9 +575,17 @@ impl LayerStack {
         self.layers.remove(index);
         self.active_layer =
             adjusted_active_after_remove(self.active_layer, index, self.layers.len());
+        self.solo_layer = match self.solo_layer {
+            Some(solo) if solo == index => None,
+            Some(solo) if solo > index => Some(solo - 1),
+            other => other,
+        };
     }
 
     /// Move a layer from `from` to `to` position.
+    ///
+    /// Index 0 is the front of the picture (composited last). Dragging a row
+    /// upward raises its priority.
     pub fn move_layer(&mut self, from: usize, to: usize) {
         if from >= self.layers.len() || to >= self.layers.len() || from == to {
             return;
@@ -573,6 +593,17 @@ impl LayerStack {
         let layer = self.layers.remove(from);
         self.layers.insert(to, layer);
         self.active_layer = adjusted_active_after_move(self.active_layer, from, to);
+        self.solo_layer = self
+            .solo_layer
+            .map(|solo| adjusted_active_after_move(solo, from, to));
+    }
+
+    /// Layers that contribute to the output this frame.
+    ///
+    /// Solo shows that one layer even when its authored `enabled` flag is off.
+    /// An out-of-range solo falls back to the authored mask.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        visible_layer_indices(self.layers.len(), |i| self.layers[i].enabled, self.solo_layer)
     }
 
     pub fn active(&self) -> Option<&Layer> {
@@ -589,17 +620,34 @@ impl LayerStack {
             .iter()
             .enumerate()
             .map(|(i, l)| {
-                let (is_media, media_file_name, media_is_animated, media_is_video, media_is_live) =
-                    match &l.content {
-                        LayerContent::Media(m) => (
-                            true,
-                            Some(m.file_name.clone()),
-                            m.is_animated(),
-                            m.is_video(),
-                            m.is_live(),
-                        ),
-                        _ => (false, None, false, false, false),
-                    };
+                let (
+                    is_media,
+                    media_file_name,
+                    media_is_animated,
+                    media_is_video,
+                    media_is_live,
+                    media_fit,
+                    media_width_scale,
+                    media_pos_x,
+                    media_pos_y,
+                    media_speed,
+                    media_looping,
+                ) = match &l.content {
+                    LayerContent::Media(m) => (
+                        true,
+                        Some(m.file_name.clone()),
+                        m.is_animated(),
+                        m.is_video(),
+                        m.is_live(),
+                        m.fit.as_str().to_string(),
+                        m.width_scale,
+                        m.pos_x,
+                        m.pos_y,
+                        m.transport.speed,
+                        m.transport.looping,
+                    ),
+                    _ => (false, None, false, false, false, String::new(), 1.0, 0.0, 0.0, 1.0, true),
+                };
                 LayerInfo {
                     name: l.name.clone(),
                     custom_name: l.custom_name.clone(),
@@ -621,6 +669,16 @@ impl LayerStack {
                     media_is_animated,
                     media_is_video,
                     media_is_live,
+                    media_fit,
+                    media_width_scale,
+                    media_pos_x,
+                    media_pos_y,
+                    media_speed,
+                    media_looping,
+                    media_preview: match &l.content {
+                        LayerContent::Media(m) => m.preview_jpeg.clone(),
+                        _ => None,
+                    },
                     chain: l.chain.as_deref().and_then(|c| ChainBadge::of(&c.graph)),
                     // Later in the list = beneath (the list's top renders on top).
                     needs_layer_below: l.enabled
@@ -685,6 +743,24 @@ pub(crate) fn adjusted_active_after_remove(
     } else {
         active
     }
+}
+
+/// Which layers the compositor should draw.
+///
+/// `solo` isolates one index without consulting `enabled`. That is how Solo
+/// can show a layer whose authored checkbox is off, and how exiting Solo
+/// returns the exact authored mask.
+pub fn visible_layer_indices(
+    len: usize,
+    enabled: impl Fn(usize) -> bool,
+    solo: Option<usize>,
+) -> Vec<usize> {
+    if let Some(solo) = solo {
+        if solo < len {
+            return vec![solo];
+        }
+    }
+    (0..len).filter(|&i| enabled(i)).collect()
 }
 
 /// Compute adjusted active layer index after moving a layer from `from` to `to`.
@@ -953,6 +1029,27 @@ mod tests {
     fn adjusted_active_after_move_boundary_to_zero() {
         // active=0, move from=2 to=0 -> active in [to..from) = [0..2) -> 0+1=1
         assert_eq!(adjusted_active_after_move(0, 2, 0), 1);
+    }
+
+    #[test]
+    fn solo_shows_one_layer_without_changing_the_authored_mask() {
+        let enabled = [true, false, true, true];
+        let authored = visible_layer_indices(enabled.len(), |i| enabled[i], None);
+        assert_eq!(authored, vec![0, 2, 3]);
+        // A disabled layer can be soloed. The mask above is unchanged.
+        assert_eq!(
+            visible_layer_indices(enabled.len(), |i| enabled[i], Some(1)),
+            vec![1]
+        );
+        assert_eq!(
+            visible_layer_indices(enabled.len(), |i| enabled[i], None),
+            vec![0, 2, 3]
+        );
+        // A stale solo index does not hide the scene.
+        assert_eq!(
+            visible_layer_indices(enabled.len(), |i| enabled[i], Some(9)),
+            vec![0, 2, 3]
+        );
     }
 
     // --- BlendMode::from_normalized (#1792) ---

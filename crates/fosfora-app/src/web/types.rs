@@ -17,8 +17,62 @@ pub enum WsInMessage {
     },
     /// Load an effect by index on the active layer.
     LoadEffect { index: usize },
-    /// Select the active layer.
+    /// Select the active layer. Does not change visibility.
     SelectLayer { index: usize },
+    /// Show only this layer until Solo is cleared. Authored `enabled` flags stay.
+    SetSolo { index: usize },
+    /// Restore authored visibility.
+    ClearSolo,
+    /// Older clients sent this for "show all". It only clears Solo.
+    ShowAllLayers,
+    /// Move a layer. Index 0 is the front of the picture.
+    MoveLayer { from: usize, to: usize },
+    /// Remove one layer. The last remaining layer is kept.
+    RemoveLayer { index: usize },
+    /// Save, discard, or cancel a Perform scene change that is waiting.
+    ResolvePending { action: String },
+    /// Add a media layer from a file already written to disk.
+    AddMedia { path: PathBuf },
+    /// Files landed in the show library. Rescan; do not create layers.
+    RescanLibrary,
+    /// Copy Application Support uploads into the show library. Originals stay.
+    ImportPreviousUploads,
+    /// Open the pack media folder in Finder.
+    RevealMediaFolder,
+    /// Ask for a native folder dialog and remember that folder as a linked source.
+    LinkMediaFolder,
+    /// Register Finder paths in place. The files are not copied.
+    LinkLibraryFiles { paths: Vec<String> },
+    /// Remove one library entry. A linked original stays on disk.
+    RemoveLibraryItem { id: String },
+    /// Add library items as new layers, in this order. Nothing is added if the
+    /// batch does not fit.
+    AddLibraryMedia { ids: Vec<String> },
+    /// Replace one layer's media. The rest of the stack stays.
+    ReplaceLibraryMedia { layer: usize, id: String },
+    /// Loop and speed for a media layer.
+    SetMediaTransport {
+        layer: usize,
+        speed: Option<f32>,
+        looping: Option<bool>,
+    },
+    /// Write the current layer stack into the open show pack.
+    SaveScene,
+    /// `prepare` autosaves. `perform` waits for an explicit save.
+    SetWorkspaceMode { mode: String },
+    /// Placement of a video or still. Width is a fraction of the canvas.
+    SetMediaPlace {
+        layer: usize,
+        fit: String,
+        width: f32,
+        x: f32,
+        y: f32,
+    },
+    /// Palette grade strength (0–1) and on/off. Either field may be omitted.
+    SetGrade {
+        strength: Option<f32>,
+        enabled: Option<bool>,
+    },
     /// Set layer opacity.
     SetLayerOpacity { layer: usize, value: f32 },
     /// Set layer blend mode (0-6).
@@ -44,6 +98,8 @@ pub enum WsInMessage {
     },
     /// Preview thumbnail image (JPEG) from a bridge source.
     BindPreview { source: String, jpeg_data: Vec<u8> },
+    /// Show orchestration command.
+    ShowCommand(crate::show::controller::ShowCommand),
 }
 
 /// Metadata for a WebSocket source field.
@@ -61,6 +117,13 @@ fn default_one() -> f32 {
     1.0
 }
 
+/// A Solo button press. `Clear` restores the authored visibility mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoloRequest {
+    Set(usize),
+    Clear,
+}
+
 /// Result of WebSystem::update() — mirrors OscFrameResult with extras.
 pub struct WebFrameResult {
     pub triggers: Vec<TriggerAction>,
@@ -71,7 +134,28 @@ pub struct WebFrameResult {
     pub postprocess_enabled: Option<bool>,
     pub effect_loads: Vec<usize>,
     pub select_layer: Option<usize>,
+    pub solo: Option<SoloRequest>,
+    pub layer_moves: Vec<(usize, usize)>,
+    pub layer_removes: Vec<usize>,
+    pub resolve_pending: Option<String>,
+    pub add_media: Vec<PathBuf>,
+    pub rescan_library: bool,
+    pub import_uploads: bool,
+    pub reveal_media: bool,
+    pub link_folder: bool,
+    pub link_library_files: Vec<Vec<String>>,
+    pub remove_library: Vec<String>,
+    pub add_library: Vec<Vec<String>>,
+    pub replace_library: Vec<(usize, String)>,
+    pub media_transport: Vec<(usize, Option<f32>, Option<bool>)>,
+    pub save_scene: bool,
+    pub workspace_mode: Option<String>,
+    pub touched_params: bool,
+    pub media_place: Vec<(usize, String, f32, f32, f32)>,
+    pub grade_strength: Option<f32>,
+    pub grade_enabled: Option<bool>,
     pub preset_loads: Vec<usize>,
+    pub show_commands: Vec<crate::show::controller::ShowCommand>,
 }
 
 impl WebFrameResult {
@@ -85,7 +169,28 @@ impl WebFrameResult {
             postprocess_enabled: None,
             effect_loads: Vec::new(),
             select_layer: None,
+            solo: None,
+            layer_moves: Vec::new(),
+            layer_removes: Vec::new(),
+            resolve_pending: None,
+            add_media: Vec::new(),
+            rescan_library: false,
+            import_uploads: false,
+            reveal_media: false,
+            link_folder: false,
+            link_library_files: Vec::new(),
+            remove_library: Vec::new(),
+            add_library: Vec::new(),
+            replace_library: Vec::new(),
+            media_transport: Vec::new(),
+            save_scene: false,
+            workspace_mode: None,
+            touched_params: false,
+            media_place: Vec::new(),
+            grade_strength: None,
+            grade_enabled: None,
             preset_loads: Vec::new(),
+            show_commands: Vec::new(),
         }
     }
 }

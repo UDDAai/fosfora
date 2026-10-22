@@ -20,6 +20,10 @@ Thumbs.db
 /catalog/capabilities.json
 __pycache__/
 
+# Controller UI toolchain. The page Fosfora serves is the built control.html.
+assets/web/ui/node_modules/
+assets/web/ui/dist/
+
 # Session-planning working files — local only, never in the repo
 /TASKS.md
 /2026-08-06_SESSION_STARTER.md

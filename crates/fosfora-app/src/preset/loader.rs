@@ -4,7 +4,10 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 
+use std::sync::Arc;
+
 use crate::media::decoder::MediaSource;
+use crate::media::jobs::MediaBudget;
 use crate::preset::Preset;
 
 /// Request sent to the background decode thread.
@@ -30,6 +33,11 @@ pub struct PresetDecodeResult {
     /// layer_index → decoded media (or error).
     pub decoded_media: HashMap<usize, MediaDecodeResult>,
     pub generation: u64,
+    /// Budget held for this scene's decoded frames. Release after applying.
+    pub reserved: u64,
+    /// Set when the scene could not fit beside the one on screen. Nothing
+    /// was decoded and the current scene must stay.
+    pub refused: Option<String>,
 }
 
 /// Loading state visible to UI.
@@ -47,19 +55,33 @@ pub struct PresetLoader {
     request_tx: Option<Sender<PresetDecodeRequest>>,
     result_rx: Receiver<PresetDecodeResult>,
     generation: u64,
+    /// The newest request that has not yet entered the decode queue.
+    pending: Option<PresetDecodeRequest>,
     pub state: PresetLoadingState,
+    budget: Arc<MediaBudget>,
     _thread: Option<JoinHandle<()>>,
 }
 
+/// Test-only pause inside a decode job so a newer request can arrive mid-flight.
+#[cfg(test)]
+static TEST_DECODE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl PresetLoader {
+    /// A loader with no memory limit. Tests only use this.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_budget(Arc::new(MediaBudget::new(u64::MAX)))
+    }
+
+    pub fn with_budget(budget: Arc<MediaBudget>) -> Self {
         let (request_tx, request_rx) = bounded::<PresetDecodeRequest>(1);
         let (result_tx, result_rx) = bounded::<PresetDecodeResult>(1);
 
+        let thread_budget = budget.clone();
         let handle = thread::Builder::new()
             .name("fosfora-preset-loader".into())
             .spawn(move || {
-                Self::decode_thread(request_rx, result_tx);
+                Self::decode_thread(request_rx, result_tx, thread_budget);
             })
             .expect("failed to spawn preset loader thread");
 
@@ -67,9 +89,16 @@ impl PresetLoader {
             request_tx: Some(request_tx),
             result_rx,
             generation: 0,
+            pending: None,
             state: PresetLoadingState::Idle,
+            budget,
             _thread: Some(handle),
         }
+    }
+
+    /// Give back the budget a result held once it is applied or dropped.
+    pub fn release(&self, reserved: u64) {
+        self.budget.release(reserved);
     }
 
     /// Submit a new decode request. Bumps generation to cancel any in-flight work.
@@ -88,24 +117,43 @@ impl PresetLoader {
             preset_index,
         };
 
-        let request = PresetDecodeRequest {
+        self.pending = Some(PresetDecodeRequest {
             preset_index,
             preset,
             media_jobs,
             generation: current_gen,
-        };
+        });
+        self.flush_pending();
+    }
 
-        if let Some(ref tx) = self.request_tx {
-            match tx.try_send(request) {
-                Ok(()) => {}
-                Err(err) => {
-                    // Channel full — drain stale result and yield to let decode thread proceed
-                    let _ = self.result_rx.try_recv();
-                    thread::yield_now();
-                    // Retry with the recovered request; if still full, generation counter
-                    // ensures the stale request will be discarded by the decode thread.
-                    let _ = tx.try_send(err.into_inner());
-                }
+    /// Drop every request that is not already decoding. The in-flight decode
+    /// keeps its old generation and is discarded when it returns.
+    pub fn supersede(&mut self) {
+        self.generation += 1;
+        self.pending = None;
+        self.state = PresetLoadingState::Idle;
+    }
+
+    /// Push the newest pending request onto the decode queue. If the queue is
+    /// full the request stays pending and is retried on the next poll.
+    fn flush_pending(&mut self) {
+        let Some(tx) = self.request_tx.as_ref() else {
+            return;
+        };
+        let Some(request) = self.pending.take() else {
+            return;
+        };
+        if request.generation != self.generation {
+            return;
+        }
+        match tx.try_send(request) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(request)) => {
+                self.pending = Some(request);
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                log::warn!("Preset loader queue is closed; the latest preset was not decoded");
+                self.state = PresetLoadingState::Idle;
             }
         }
     }
@@ -113,26 +161,28 @@ impl PresetLoader {
     /// Poll for a completed decode result. Returns Some if a result matching
     /// the current generation is available.
     pub fn try_recv(&mut self) -> Option<PresetDecodeResult> {
-        match self.result_rx.try_recv() {
-            Ok(result) => {
-                if result.generation == self.generation {
+        self.flush_pending();
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) if result.generation == self.generation => {
                     self.state = PresetLoadingState::Idle;
-                    Some(result)
-                } else {
-                    // Stale result from cancelled request — discard
+                    self.pending = None;
+                    return Some(result);
+                }
+                Ok(result) => {
+                    self.budget.release(result.reserved);
                     log::debug!(
                         "Discarded stale preset decode result (gen {} vs current {})",
                         result.generation,
                         self.generation
                     );
-                    None
                 }
-            }
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                log::warn!("Preset loader thread disconnected");
-                self.state = PresetLoadingState::Idle;
-                None
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    log::warn!("Preset loader thread disconnected");
+                    self.state = PresetLoadingState::Idle;
+                    return None;
+                }
             }
         }
     }
@@ -141,6 +191,7 @@ impl PresetLoader {
     fn decode_thread(
         request_rx: Receiver<PresetDecodeRequest>,
         result_tx: Sender<PresetDecodeResult>,
+        budget: Arc<MediaBudget>,
     ) {
         loop {
             // Block waiting for next request
@@ -167,8 +218,46 @@ impl PresetLoader {
                 let mut decoded_media = HashMap::new();
                 let mut cancelled = false;
 
+                // Probe before decoding. The scene on screen stays resident
+                // until this one is applied, so both count toward the budget.
+                let mut reserved = 0u64;
+                for (layer_idx, path) in &request.media_jobs {
+                    let plan = crate::media::library::plan_clip(path);
+                    match plan.problem {
+                        Some(problem) => {
+                            decoded_media.insert(
+                                *layer_idx,
+                                MediaDecodeResult::Err(format!("{}: {problem}", plan.name)),
+                            );
+                        }
+                        None => reserved += plan.ram_bytes,
+                    }
+                }
+                if let Err(message) = budget.reserve(reserved) {
+                    log::warn!("Preset '{}' refused before decode: {message}", request.preset_index);
+                    let result = PresetDecodeResult {
+                        preset_index: request.preset_index,
+                        preset: request.preset,
+                        decoded_media: HashMap::new(),
+                        generation: request.generation,
+                        reserved: 0,
+                        refused: Some(format!("Scene not loaded. {message}")),
+                    };
+                    if result_tx.send(result).is_err() {
+                        return;
+                    }
+                    break;
+                }
+
                 let num_jobs = request.media_jobs.len();
                 for job_idx in 0..num_jobs {
+                    #[cfg(test)]
+                    {
+                        let delay = TEST_DECODE_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
+                        if delay > 0 {
+                            thread::sleep(std::time::Duration::from_millis(delay));
+                        }
+                    }
                     // Check for cancellation between jobs
                     if let Ok(newer) = request_rx.try_recv() {
                         log::debug!(
@@ -182,6 +271,9 @@ impl PresetLoader {
                     }
 
                     let (layer_idx, ref path) = request.media_jobs[job_idx];
+                    if decoded_media.contains_key(&layer_idx) {
+                        continue;
+                    }
                     log::info!("Decoding media for layer {}: {}", layer_idx, path.display());
                     let result = match crate::media::decoder::load_media(path) {
                         Ok(source) => MediaDecodeResult::Ok(source),
@@ -198,6 +290,14 @@ impl PresetLoader {
                 }
 
                 if cancelled {
+                    budget.release(reserved);
+                    continue 'decode;
+                }
+                // A newer request can arrive during the last job. It must win
+                // before this result is published.
+                if let Ok(newer) = request_rx.try_recv() {
+                    budget.release(reserved);
+                    request = newer;
                     continue 'decode;
                 }
 
@@ -206,13 +306,15 @@ impl PresetLoader {
                     preset: request.preset,
                     decoded_media,
                     generation: request.generation,
+                    reserved,
+                    refused: None,
                 };
 
-                // Send result (if channel full, old result is stale — try to drain it)
-                if result_tx.try_send(result).is_err() {
-                    // Result channel full — this shouldn't happen often since main thread
-                    // drains each frame, but handle it gracefully
-                    log::debug!("Preset loader: result channel full, dropping result");
+                // Block until the frame loop takes the result. Dropping it
+                // leaves the loader stuck on Loading for that generation.
+                if result_tx.send(result).is_err() {
+                    log::debug!("Preset loader thread exiting (result channel closed)");
+                    return;
                 }
                 break;
             }
@@ -357,5 +459,91 @@ mod tests {
         // The result from gen 1 should be discarded
         let result = loader.try_recv();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn rapid_requests_apply_the_latest_preset() {
+        let _guard = DelayGuard;
+        TEST_DECODE_DELAY_MS.store(80, std::sync::atomic::Ordering::Relaxed);
+        let mut loader = PresetLoader::new();
+        let preset = empty_preset();
+        let job = vec![(0, PathBuf::from("/nonexistent/a.png"))];
+        loader.request_load(0, preset.clone(), job.clone(), "A".into());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        loader.request_load(1, preset.clone(), job.clone(), "B".into());
+        loader.request_load(2, preset, job, "C".into());
+
+        let mut applied = None;
+        for _ in 0..50 {
+            if let Some(result) = loader.try_recv() {
+                applied = Some(result.preset_index);
+            }
+            if applied == Some(2) && matches!(loader.state, PresetLoadingState::Idle) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        assert_eq!(applied, Some(2), "the last requested preset must be the one applied");
+        assert!(matches!(loader.state, PresetLoadingState::Idle));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(loader.try_recv().is_none(), "a later decode must not overwrite C");
+        assert!(matches!(loader.state, PresetLoadingState::Idle));
+    }
+
+    struct DelayGuard;
+    impl Drop for DelayGuard {
+        fn drop(&mut self) {
+            TEST_DECODE_DELAY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_scene_that_cannot_fit_beside_the_current_one_is_refused_before_decode() {
+        let dir = std::env::temp_dir().join(format!("fosfora-loader-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let still = dir.join("plate.png");
+        image::RgbaImage::new(32, 32).save(&still).unwrap();
+        let need = 32 * 32 * 4;
+
+        // The scene on screen holds most of the budget.
+        let budget = Arc::new(MediaBudget::new(need + 100));
+        budget.set_resident(200);
+        let mut loader = PresetLoader::with_budget(budget.clone());
+        loader.request_load(0, empty_preset(), vec![(0, still.clone())], "Big".into());
+        let result = wait_for(&mut loader);
+        assert!(result.refused.as_deref().is_some_and(|m| m.contains("Scene not loaded")));
+        assert!(result.decoded_media.is_empty(), "nothing may be decoded");
+        assert_eq!(budget.in_flight(), 0);
+
+        // With room, the same scene decodes and holds its bytes until released.
+        budget.set_resident(0);
+        loader.request_load(0, empty_preset(), vec![(0, still)], "Big".into());
+        let result = wait_for(&mut loader);
+        assert!(result.refused.is_none());
+        assert_eq!(result.reserved, need);
+        assert_eq!(budget.in_flight(), need);
+        loader.release(result.reserved);
+        assert_eq!(budget.in_flight(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn wait_for(loader: &mut PresetLoader) -> PresetDecodeResult {
+        for _ in 0..400 {
+            if let Some(result) = loader.try_recv() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("loader did not answer");
+    }
+
+    fn empty_preset() -> Preset {
+        Preset {
+            layers: vec![],
+            active_layer: 0,
+            postprocess: Default::default(),
+            volumetric: None,
+            master_chain: None,
+        }
     }
 }
