@@ -1650,7 +1650,17 @@ fn removable_pack_file(pack_root: &Path, item: &LibraryItem) -> Option<PathBuf> 
     }
     let path = fs::canonicalize(pack_root.join(&item.path)).ok()?;
     for dir in ["assets/video", "assets/images"] {
-        let Ok(root) = fs::canonicalize(pack_root.join(dir)) else {
+        let media_dir = pack_root.join(dir);
+        // A show pack can symlink these directories into an iCloud library.
+        // Never move a target out of a linked directory into pack recovery:
+        // that would silently remove the original from all synced devices.
+        if fs::symlink_metadata(&media_dir)
+            .ok()
+            .is_some_and(|meta| meta.file_type().is_symlink())
+        {
+            continue;
+        }
+        let Ok(root) = fs::canonicalize(media_dir) else {
             continue;
         };
         if path.starts_with(&root) && path.is_file() {
@@ -1851,6 +1861,30 @@ mod tests {
         fs::create_dir_all(root.join("assets/video")).unwrap();
         fs::create_dir_all(root.join("presets")).unwrap();
         root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trash_refuses_pack_media_directories_symlinked_into_external_library() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_pack("linked_pack_media");
+        let external = root.join("iCloud-originals");
+        fs::create_dir_all(&external).unwrap();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+            .save(external.join("keep.png"))
+            .unwrap();
+
+        // Mirror the existing Mac pack: assets/images is a symlink to
+        // iCloud, and no primary_media_root setting is required for exposure.
+        fs::remove_dir(root.join("assets/images")).unwrap();
+        symlink(&external, root.join("assets/images")).unwrap();
+        let mut lib = MediaLibrary::open(root.clone());
+        assert!(lib.items.iter().any(|item| item.id == "assets/images/keep.png"));
+        assert!(lib.remove_item("assets/images/keep.png").is_err());
+        assert!(external.join("keep.png").exists());
+        assert!(!root.join("recovery/history/removed-media/keep.png").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
