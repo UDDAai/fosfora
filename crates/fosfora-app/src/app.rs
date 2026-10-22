@@ -2412,9 +2412,14 @@ impl App {
         }
         if changed {
             // Queuing a file does not edit the scene; installing it does.
+            // Show-pack scenes use their own save state; vanilla Fosfora
+            // uses the preset-store dirty indicator.
+            if self.show.is_some() {
+                self.note_scene_edit(now);
+            } else {
+                self.preset_store.mark_dirty();
+            }
             // Clear a stale "Loading" notice only after something arrived.
-            self.preset_store.mark_dirty();
-            self.note_scene_edit(now);
             if self.status_error.as_ref().is_some_and(|(msg, _)| msg.starts_with("Loading ")) {
                 self.status_error = None;
             }
