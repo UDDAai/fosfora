@@ -810,7 +810,7 @@ export function LibraryPanel() {
                 className="hidden"
                 type="file"
                 multiple
-                accept="video/mp4,video/quicktime,video/webm,image/png,image/jpeg,image/webp"
+                accept=".mp4,.mov,.avi,.mkv,.webm,.m4v,.flv,.png,.jpg,.jpeg,.gif,.webp"
                 onChange={(event) => {
                   void upload(event.target.files)
                   event.target.value = ''
