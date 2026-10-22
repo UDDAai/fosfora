@@ -76,8 +76,13 @@ pub fn draw_show_panel(ui: &mut Ui, show: &ShowController, blackout: bool) -> Sh
     ui.horizontal(|ui| {
         ui.label("SEEK s");
         let mut secs = (snap.elapsed_ms / 1000) as u32;
+        // The clock keeps running past the end of the show. A range that
+        // stops at `duration_secs` makes egui clamp the value and report a
+        // change every second, which seeked the show back to its end and
+        // reloaded the scene once a second.
+        let max = show.definition.duration_secs.max(secs);
         if ui
-            .add(egui::DragValue::new(&mut secs).range(0..=show.definition.duration_secs))
+            .add(egui::DragValue::new(&mut secs).range(0..=max))
             .changed()
         {
             action = ShowPanelAction::Seek(secs);
