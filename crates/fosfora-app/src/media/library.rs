@@ -378,12 +378,19 @@ impl MediaLibrary {
                 "That file is outside the show media folders and was not removed".into(),
             );
         };
-        fs::remove_file(&path).map_err(|err| err.to_string())?;
+        // Preserve imported footage even if an unsaved scene still refers to it.
+        // A hidden recovery directory inside the pack keeps the move on the same
+        // volume and allows the operator to restore the original file later.
+        let recovery = self.pack_root.join("recovery").join("history").join("removed-media");
+        fs::create_dir_all(&recovery).map_err(|err| err.to_string())?;
+        let dest = unique_dest(&recovery, &item.name);
+        fs::rename(&path, &dest).map_err(|err| err.to_string())?;
         self.items.retain(|have| have.id != item.id);
         self.request_rescan();
         Ok(format!(
-            "Removed {} from the show media folder.",
-            item.name
+            "Removed {} from the library; recover it at {}.",
+            item.name,
+            dest.display()
         ))
     }
 
@@ -1727,7 +1734,7 @@ mod tests {
     }
 
     #[test]
-    fn trash_deletes_an_unused_pack_file_and_refuses_one_a_scene_names() {
+    fn trash_recovers_an_unused_pack_file_and_refuses_one_a_scene_names() {
         let root = temp_pack("trash");
         image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 1, 1, 255]))
             .save(root.join("assets/images/spare.png"))
@@ -1757,8 +1764,10 @@ mod tests {
             .clone();
         assert!(lib.remove_item(&plate).unwrap_err().contains("under-ice"));
         assert!(root.join("assets/images/plate.png").is_file());
-        lib.remove_item(&spare).unwrap();
+        let notice = lib.remove_item(&spare).unwrap();
+        assert!(notice.contains("recover it at"));
         assert!(!root.join("assets/images/spare.png").exists());
+        assert!(root.join("recovery/history/removed-media/spare.png").exists());
         assert!(lib.items.iter().all(|item| item.name != "spare.png"));
         let _ = fs::remove_dir_all(&root);
     }

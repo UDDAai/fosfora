@@ -35,12 +35,12 @@ pub fn spawn_accept_loop(
     shutdown: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
 ) -> anyhow::Result<JoinHandle<()>> {
-    let addr = format!("0.0.0.0:{port}");
+    let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)?;
     listener.set_nonblocking(false)?;
     // Short accept timeout so we can check shutdown flag
     let _ = listener.set_nonblocking(false);
-    log::info!("Web control server listening on http://0.0.0.0:{port}");
+    log::info!("Web control server listening on http://127.0.0.1:{port}");
 
     let client_counter = Arc::new(AtomicUsize::new(0));
     let uploads = Arc::new(AtomicUsize::new(0));
