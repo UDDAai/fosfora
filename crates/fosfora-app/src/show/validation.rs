@@ -161,6 +161,48 @@ pub fn validate_show(
     ValidationReport { issues }
 }
 
+/// Check the indexed, effect-qualified audio targets against the authored
+/// show-pack layer order. A scene edit can move an effect without moving its
+/// bindings, leaving audio controls apparently connected but inert.
+pub fn validate_audio_binding_targets(
+    presets: &HashMap<String, crate::preset::Preset>,
+    audio_bindings: &HashMap<String, Vec<crate::bindings::types::Binding>>,
+) -> Vec<ValidationIssue> {
+    use crate::bindings::types::BindingTarget;
+
+    let mut issues = Vec::new();
+    for (preset_id, bindings) in audio_bindings {
+        let Some(preset) = presets.get(preset_id) else {
+            issues.push(issue(format!(
+                "Audio bindings refer to unknown preset '{preset_id}'"
+            )));
+            continue;
+        };
+        for binding in bindings.iter().filter(|binding| binding.enabled) {
+            if let BindingTarget::Param {
+                layer,
+                effect,
+                param,
+            } = &binding.target
+            {
+                match preset.layers.get(*layer) {
+                    None => issues.push(issue(format!(
+                        "Audio binding '{}' in '{preset_id}' targets missing layer {layer} ({effect}.{param})",
+                        binding.name
+                    ))),
+                    Some(actual) if actual.effect_name != *effect => issues.push(issue(format!(
+                        "Audio binding '{}' in '{preset_id}' targets layer {layer} as {effect}.{param}, but that layer is '{}'",
+                        binding.name,
+                        actual.effect_name
+                    ))),
+                    _ => {}
+                }
+            }
+        }
+    }
+    issues
+}
+
 pub fn hibernation_acceptance(def: &ShowDefinition) -> Vec<ValidationIssue> {
     if def.id == "hibernation" && def.duration_secs != 10800 {
         vec![issue(format!(
@@ -242,6 +284,37 @@ mod tests {
                 transition_ms: 0,
             }],
         }
+    }
+
+    #[test]
+    fn stale_audio_binding_layer_is_reported() {
+        use crate::bindings::types::{Binding, BindingScope, BindingTarget};
+
+        let preset: crate::preset::Preset = serde_json::from_str(
+            r#"{"layers":[{"effect_name":"Tide"},{"effect_name":"Tessera"}]}"#,
+        ).unwrap();
+        let mut presets = HashMap::new();
+        presets.insert("thaw".to_string(), preset);
+
+        let binding = Binding {
+            id: "b_001".to_string(),
+            name: "Bass to Tide".to_string(),
+            enabled: true,
+            scope: BindingScope::Preset,
+            source: "audio.band.1".to_string(),
+            target: BindingTarget::from("param.1.Tide.eddy_strength"),
+            transforms: vec![],
+        };
+        let mut maps = HashMap::new();
+        maps.insert("thaw".to_string(), vec![binding.clone()]);
+        assert!(validate_audio_binding_targets(&presets, &maps).is_empty());
+
+        maps.get_mut("thaw").unwrap()[0].target =
+            BindingTarget::from("param.0.Tide.eddy_strength");
+        let issues = validate_audio_binding_targets(&presets, &maps);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].message.contains("layer 0"));
+        assert!(issues[0].message.contains("Tide.eddy_strength"));
     }
 
     #[test]
