@@ -161,6 +161,22 @@ pub fn validate_show(
     ValidationReport { issues }
 }
 
+/// Conservative decoded-frame peak when transitioning between any two
+/// different presets, including manual choices outside the scheduled track.
+pub fn max_concurrent_preset_bytes(presets: &[u64]) -> u64 {
+    let mut largest = 0u64;
+    let mut second = 0u64;
+    for &bytes in presets {
+        if bytes >= largest {
+            second = largest;
+            largest = bytes;
+        } else if bytes > second {
+            second = bytes;
+        }
+    }
+    largest.saturating_add(second)
+}
+
 pub fn hibernation_acceptance(def: &ShowDefinition) -> Vec<ValidationIssue> {
     if def.id == "hibernation" && def.duration_secs != 10800 {
         vec![issue(format!(
@@ -242,6 +258,14 @@ mod tests {
                 transition_ms: 0,
             }],
         }
+    }
+
+    #[test]
+    fn concurrent_decode_peak_uses_largest_two_not_whole_show() {
+        assert_eq!(max_concurrent_preset_bytes(&[]), 0);
+        assert_eq!(max_concurrent_preset_bytes(&[1_000]), 1_000);
+        assert_eq!(max_concurrent_preset_bytes(&[1_000, 4_000, 2_000, 3_000]), 7_000);
+        assert_eq!(max_concurrent_preset_bytes(&[u64::MAX, 1]), u64::MAX);
     }
 
     #[test]
