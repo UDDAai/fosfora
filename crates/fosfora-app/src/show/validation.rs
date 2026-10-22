@@ -183,12 +183,7 @@ pub fn estimate_rgba_ram(width: u32, height: u32, fps: f64, duration_secs: f64) 
 /// Pack-root-relative existence check for one preset `media_path` value
 /// (plan p1-paths / p1-validator). Mirrors `ShowController::resolve_path`.
 pub fn media_exists(root: &Path, stored: &str) -> bool {
-    let p = Path::new(stored);
-    if p.is_absolute() {
-        p.exists()
-    } else {
-        root.join(p).exists()
-    }
+    crate::media::library::resolve_pack_media_path(root, stored).is_file()
 }
 
 fn validate_track_sorted(
