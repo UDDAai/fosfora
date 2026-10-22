@@ -137,6 +137,9 @@ pub fn portable_media_path(pack_root: &Path, stored: &str) -> String {
     if let Ok(rel) = absolute.strip_prefix(pack_root) {
         return rel.to_string_lossy().replace('\\', "/");
     }
+    if let Some(alias) = crate::media::library::virtual_media_path(pack_root, &absolute) {
+        return alias;
+    }
     stored.replace('\\', "/")
 }
 
