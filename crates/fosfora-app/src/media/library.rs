@@ -524,6 +524,29 @@ fn scan_library(request: &ScanRequest) -> (Vec<LibraryItem>, Vec<String>) {
     let mut items = Vec::new();
     let mut next_cache = ProbeCache { entries: Vec::new() };
 
+    // The configured primary library takes precedence over legacy pack
+    // assets with the same virtual path, without deleting either source.
+    if let Some(primary) = primary_media_root(pack_root) {
+        if !primary.is_dir() {
+            warnings.push(format!(
+                "Primary media folder is unavailable (check iCloud download/offline status): {}",
+                primary.display()
+            ));
+            for old in previous.iter().filter(|item| item.location == "external") {
+                let mut kept = old.clone();
+                kept.status = "missing".into();
+                kept.detail = "Primary media folder is unavailable".into();
+                items.push(kept);
+            }
+        } else {
+            for seen in primary_files(&primary) {
+                if let Some(item) = describe_file(&seen, &cache, &mut next_cache, pack_root) {
+                    items.push(item);
+                }
+            }
+        }
+    }
+
     for seen in pack_files(pack_root) {
         if let Some(item) = describe_file(&seen, &cache, &mut next_cache, pack_root) {
             items.push(item);
@@ -1166,6 +1189,35 @@ fn pack_files(pack_root: &Path) -> Vec<SeenFile> {
     out
 }
 
+fn primary_files(primary: &Path) -> Vec<SeenFile> {
+    let mut files = Vec::new();
+    for (folder, alias) in [("video", "video"), ("images", "images")] {
+        let dir = primary.join(folder);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if media_kind(name).is_none() {
+                continue;
+            }
+            files.push(SeenFile {
+                path,
+                id: format!("assets/{alias}/{name}"),
+                location: "external".into(),
+                source: primary.to_string_lossy().to_string(),
+            });
+        }
+    }
+    files
+}
+
 fn folder_files(folder: &Path) -> Vec<SeenFile> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(folder) else {
@@ -1249,6 +1301,18 @@ fn item_file(pack_root: &Path, item: &LibraryItem) -> Option<PathBuf> {
 }
 
 fn find_fingerprint(pack_root: &Path, fingerprint: &str) -> Option<(String, String)> {
+    // Reuse the background scanner's fingerprints for iCloud assets: reading
+    // every clip again could trigger downloads just to check a new upload.
+    for cached in load_cache(pack_root).entries {
+        if cached.fingerprint == fingerprint
+            && !cached.fingerprint.is_empty()
+            && resolve_pack_media_path(pack_root, &cached.path).is_file()
+        {
+            let name = Path::new(&cached.path).file_name()?.to_string_lossy().to_string();
+            return Some((cached.path, name));
+        }
+    }
+    // Retain the old uncached fallback for small, local show-pack imports.
     for seen in pack_files(pack_root) {
         if file_fingerprint(&seen.path).ok().as_deref() == Some(fingerprint) {
             let name = seen
