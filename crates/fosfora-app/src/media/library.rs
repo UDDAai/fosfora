@@ -1880,10 +1880,18 @@ mod tests {
         fs::remove_dir(root.join("assets/images")).unwrap();
         symlink(&external, root.join("assets/images")).unwrap();
         let mut lib = MediaLibrary::open(root.clone());
-        assert!(lib.items.iter().any(|item| item.id == "assets/images/keep.png"));
+        assert!(
+            lib.items
+                .iter()
+                .any(|item| item.id == "assets/images/keep.png")
+        );
         assert!(lib.remove_item("assets/images/keep.png").is_err());
         assert!(external.join("keep.png").exists());
-        assert!(!root.join("recovery/history/removed-media/keep.png").exists());
+        assert!(
+            !root
+                .join("recovery/history/removed-media/keep.png")
+                .exists()
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
