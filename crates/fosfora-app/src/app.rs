@@ -1230,8 +1230,6 @@ impl App {
             let edited = web_stack_changed
                 || had_layer_edits
                 || web_result.touched_params
-                || web_result.grade_strength.is_some()
-                || web_result.grade_enabled.is_some()
                 || web_result.postprocess_enabled.is_some();
             if edited && !web_result.save_scene {
                 self.note_scene_edit(now);
@@ -1257,6 +1255,11 @@ impl App {
             }
             if let Some(enabled) = web_result.grade_enabled {
                 self.post_process.grade.enabled = enabled;
+            }
+            // Grade is a workspace setting, not part of any scene. Store it now
+            // so a restart in Perform keeps it without a scene save.
+            if web_result.grade_strength.is_some() || web_result.grade_enabled.is_some() {
+                self.remember_workspace();
             }
 
             // A pack preset is a scene. Save still targets the scene that is
@@ -3027,6 +3030,7 @@ impl App {
         }
         self.scene_dirty = false;
         self.scene_dirty_at = None;
+        self.save_state = crate::show::scene_file::SaveState::Saved;
     }
 
     /// Write the live stack into the show pack under the applied scene id.
@@ -3329,6 +3333,10 @@ impl App {
         preset: &crate::preset::Preset,
         mut decoded_media: std::collections::HashMap<usize, MediaDecodeResult>,
     ) {
+        // Edits made while this scene was decoding are about to be replaced.
+        // Keep them as a draft; the incoming scene starts clean.
+        self.stash_unsaved_scene_draft();
+        self.save_state = crate::show::scene_file::SaveState::Saved;
         // Remove extra layers or add missing ones to match preset
         while self.layer_stack.layers.len() > preset.layers.len()
             && self.layer_stack.layers.len() > 1
@@ -4359,6 +4367,11 @@ impl App {
         use crate::show::controller::ShowVisualEvent;
         match event {
             ShowVisualEvent::Scene(action) => {
+                // The cue owns the next scene. A manual switch held for Save /
+                // Discard / Cancel no longer applies; its edits become a draft.
+                if self.pending_scene_change.take().is_some() {
+                    log::info!("A scheduled cue replaced the scene change that was waiting");
+                }
                 self.stash_unsaved_scene_draft();
                 let cue_index = self
                     .timeline
