@@ -168,6 +168,11 @@ pub struct App {
     load_error: Option<String>,
     reported_command_drops: u64,
     pending_scene_change: Option<PendingSceneChange>,
+    /// Probe, budget check and decode for media add / replace, off the render thread.
+    media_jobs: crate::media::jobs::MediaJobs,
+    /// Bumped whenever a scene replaces the layer stack. A clip that finishes
+    /// decoding for an older stack is dropped, not added to the new scene.
+    scene_generation: u64,
     // Webcam capture (feature-gated)
     #[cfg(feature = "webcam")]
     pub webcam_capture: Option<WebcamBackend>,
@@ -582,6 +587,11 @@ impl App {
         let gpu_profiler = crate::gpu::profiler::Profiler::new(&gpu.device);
 
         let now = Instant::now();
+        let media_budget = std::sync::Arc::new(crate::media::jobs::MediaBudget::for_this_machine());
+        log::info!(
+            "Decoded media budget: {}",
+            crate::media::library::format_bytes(media_budget.limit())
+        );
         let mut app = Self {
             gpu,
             mel_last_commit: None,
@@ -603,7 +613,7 @@ impl App {
             pending_web_triggers: Vec::new(),
             binding_bus,
             preset_store,
-            preset_loader: PresetLoader::new(),
+            preset_loader: PresetLoader::with_budget(media_budget.clone()),
             scene_store,
             timeline: Timeline::new(Vec::new(), false, AdvanceMode::Manual),
             transition_renderer: None,
@@ -652,6 +662,8 @@ impl App {
             load_error: None,
             reported_command_drops: 0,
             pending_scene_change: None,
+            media_jobs: crate::media::jobs::MediaJobs::new(media_budget),
+            scene_generation: 0,
             #[cfg(feature = "webcam")]
             webcam_capture: None,
             #[cfg(feature = "webcam")]
@@ -1141,19 +1153,18 @@ impl App {
                     view_changed = true;
                 }
             }
+            // Decoded on the media worker; the stack changes when a job lands.
             for path in web_result.add_media {
                 self.add_media_layer(path);
-                web_stack_changed = true;
+                view_changed = true;
             }
             for ids in &web_result.add_library {
-                if self.add_library_media(ids) {
-                    web_stack_changed = true;
-                }
+                self.add_library_media(ids);
+                view_changed = true;
             }
             for (index, id) in &web_result.replace_library {
-                if self.replace_library_media(*index, id) {
-                    web_stack_changed = true;
-                }
+                self.replace_library_media(*index, id);
+                view_changed = true;
             }
             for (layer_idx, speed, looping) in &web_result.media_transport {
                 if let Some(layer) = self.layer_stack.layers.get_mut(*layer_idx) {
@@ -1167,18 +1178,15 @@ impl App {
                     }
                 }
             }
-            if web_result.rescan_library || self.media_library.as_mut().is_some_and(|lib| lib.poll_watch()) {
+            if web_result.rescan_library {
                 if let Some(library) = &mut self.media_library {
-                    library.rescan();
+                    library.request_rescan();
                 }
             }
             if web_result.import_uploads {
                 let uploads = crate::paths::config_root().join("uploads");
                 if let Some(library) = &mut self.media_library {
-                    match library.import_uploads(&uploads) {
-                        Ok(count) => log::info!("Imported {count} files from previous uploads"),
-                        Err(err) => self.status_error = Some((err, Instant::now())),
-                    }
+                    library.import_uploads(&uploads);
                 }
             }
             if web_result.reveal_media {
@@ -1332,14 +1340,29 @@ impl App {
         }
 
         // Drain async preset decode results
+        self.refresh_media_budget();
         if let Some(result) = self.preset_loader.try_recv() {
-            log::info!(
-                "Async preset decode complete, applying preset index {}",
-                result.preset_index
-            );
-            let index = result.preset_index;
-            let preset = result.preset;
-            self.apply_preset_immediately(index, &preset, result.decoded_media);
+            let crate::preset::loader::PresetDecodeResult {
+                preset_index: index,
+                preset,
+                decoded_media,
+                reserved,
+                refused,
+                ..
+            } = result;
+            if let Some(message) = refused {
+                // Nothing was decoded. The scene on screen stays.
+                log::warn!("{message}");
+                self.note_load_error(message.clone());
+                self.status_error = Some((message, now));
+                self.requested_preset = self.applied_scene_id.clone();
+            } else {
+                log::info!("Async preset decode complete, applying preset index {index}");
+                self.apply_preset_immediately(index, &preset, decoded_media);
+                // The new frames are resident now; stop counting them as loading.
+                self.refresh_media_budget();
+            }
+            self.preset_loader.release(reserved);
 
             // Broadcast full state to web clients after async preset load
             if self.web.client_count > 0 {
@@ -1477,7 +1500,7 @@ impl App {
             self.web.broadcast_audio(&features);
         }
 
-        self.poll_media_library();
+        self.poll_media_library(now);
         self.autosave_if_due(now);
 
         // Web: update latest state for new client initial sync
@@ -2193,157 +2216,230 @@ impl App {
         }
     }
 
-    /// Add a new media layer from a file path.
+    /// Add a new media layer from a file path. The clip is probed, checked
+    /// against the memory budget and decoded on the media worker. The layer
+    /// appears when [`App::poll_media_jobs`] takes the result.
     pub fn add_media_layer(&mut self, path: std::path::PathBuf) {
-        let num = self.layer_stack.layers.len();
-        if num >= crate::bindings::catalog::MAX_LAYERS {
-            log::warn!(
-                "Maximum {} layers reached",
-                crate::bindings::catalog::MAX_LAYERS
-            );
-            return;
-        }
-
-        match crate::media::decoder::load_media(&path) {
-            Ok(source) => {
-                let hdr_format = GpuContext::hdr_format();
-                let media_layer = MediaLayer::new(
-                    &self.gpu.device,
-                    &self.gpu.queue,
-                    hdr_format,
-                    self.gpu.surface_config.width,
-                    self.gpu.surface_config.height,
-                    source,
-                    path.clone(),
-                );
-                let file_name = media_layer.file_name.clone();
-                let mut layer = Layer::new_media(file_name.clone(), media_layer);
-                layer.custom_name = Some(file_name.clone());
-                if self.show.is_some() {
-                    if let Some(media) = layer.as_media_mut() {
-                        media.fit = crate::media::MediaFit::Fill;
-                    }
-                }
-                self.layer_stack.layers.push(layer);
-                self.layer_stack.active_layer = self.layer_stack.layers.len() - 1;
-                self.sync_active_layer();
-                log::info!("Added media layer: {}", file_name);
-            }
-            Err(e) => {
-                log::error!("Failed to load media '{}': {e}", path.display());
-                self.status_error = Some((e, Instant::now()));
-            }
-        }
+        self.submit_media(crate::media::jobs::MediaTarget::Add, vec![path]);
     }
 
     /// Add library clips in order. If any clip cannot fit, none are decoded.
-    pub fn add_library_media(&mut self, ids: &[String]) -> bool {
-        if self.library_paths(ids).is_err() {
-            if let Some(library) = &mut self.media_library {
-                library.rescan();
-            }
-        }
-        let paths = match self.library_paths(ids) {
-            Ok(paths) => paths,
+    pub fn add_library_media(&mut self, ids: &[String]) {
+        match self.library_paths(ids) {
+            Ok(paths) => self.submit_media(crate::media::jobs::MediaTarget::Add, paths),
             Err(message) => {
+                if let Some(library) = &mut self.media_library {
+                    library.request_rescan();
+                }
                 self.status_error = Some((message, Instant::now()));
-                return false;
             }
-        };
-        let plans: Vec<_> = paths.iter().map(|path| crate::media::library::plan_clip(path)).collect();
-        let existing = self.decoded_media_bytes();
-        if let Some(message) = crate::media::library::admission_error(
-            self.layer_stack.layers.len(),
-            existing,
-            crate::bindings::catalog::MAX_LAYERS,
-            &plans,
-        ) {
-            self.status_error = Some((message, Instant::now()));
-            return false;
         }
-        for path in paths {
-            self.add_media_layer(path);
-        }
-        true
     }
 
-    pub fn replace_library_media(&mut self, index: usize, id: &str) -> bool {
-        let paths = match self.library_paths(&[id.to_string()]) {
-            Ok(paths) => paths,
+    /// Replace one layer's media. The old clip keeps playing until the new one
+    /// has decoded, and stays if the new one fails.
+    pub fn replace_library_media(&mut self, index: usize, id: &str) {
+        let path = match self.library_paths(&[id.to_string()]) {
+            Ok(paths) => paths.into_iter().next(),
             Err(message) => {
                 self.status_error = Some((message, Instant::now()));
-                return false;
+                return;
             }
         };
-        let Some(path) = paths.into_iter().next() else {
-            return false;
+        let Some(path) = path else {
+            return;
         };
-        if index >= self.layer_stack.layers.len() {
+        let Some(layer) = self.layer_stack.layers.get(index) else {
             self.status_error = Some(("That layer is not in this scene".into(), Instant::now()));
-            return false;
+            return;
+        };
+        let previous = layer.as_media().map(|media| media.file_path.clone());
+        self.submit_media(
+            crate::media::jobs::MediaTarget::Replace { layer: index, previous },
+            vec![path],
+        );
+    }
+
+    fn submit_media(&mut self, target: crate::media::jobs::MediaTarget, paths: Vec<std::path::PathBuf>) {
+        let max = crate::bindings::catalog::MAX_LAYERS;
+        let free_slots = match target {
+            crate::media::jobs::MediaTarget::Add => max.saturating_sub(self.layer_stack.layers.len()),
+            crate::media::jobs::MediaTarget::Replace { .. } => paths.len(),
+        };
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect();
+        match self
+            .media_jobs
+            .submit(self.scene_generation, target, paths, free_slots)
+        {
+            Ok(_) => {
+                log::info!("Queued media job: {}", names.join(", "));
+                self.status_error = Some((format!("Loading {}", names.join(", ")), Instant::now()));
+            }
+            Err(message) => self.status_error = Some((message, Instant::now())),
         }
-        let replaced_ram = self
+    }
+
+    /// Take finished media jobs and make their GPU layers. Returns true when
+    /// the layer stack changed.
+    fn poll_media_jobs(&mut self, now: Instant) -> bool {
+        use crate::media::jobs::{MediaJobOutcome, MediaTarget};
+        let mut changed = false;
+        while let Some(result) = self.media_jobs.try_recv() {
+            match result.outcome {
+                MediaJobOutcome::Refused(message) => {
+                    log::warn!("Media job refused: {message}");
+                    self.status_error = Some((message, now));
+                }
+                MediaJobOutcome::Ready(_) if result.scene_generation != self.scene_generation => {
+                    self.status_error = Some((
+                        "The scene changed while the clip loaded, so it was not added.".into(),
+                        now,
+                    ));
+                }
+                MediaJobOutcome::Ready(sources) => match result.target {
+                    MediaTarget::Add => {
+                        for (path, source) in sources {
+                            if self.layer_stack.layers.len() >= crate::bindings::catalog::MAX_LAYERS {
+                                self.status_error = Some(("No free layer slot is left".into(), now));
+                                break;
+                            }
+                            self.install_media_layer(path, source);
+                            changed = true;
+                        }
+                    }
+                    MediaTarget::Replace { layer, previous } => {
+                        let current = self
+                            .layer_stack
+                            .layers
+                            .get(layer)
+                            .map(|l| l.as_media().map(|media| media.file_path.clone()));
+                        match (current, sources.into_iter().next()) {
+                            (Some(current), Some((path, source))) if current == previous => {
+                                self.swap_media_layer(layer, path, source);
+                                changed = true;
+                            }
+                            _ => {
+                                self.status_error = Some((
+                                    "That layer changed while the clip loaded, so it was not replaced.".into(),
+                                    now,
+                                ));
+                            }
+                        }
+                    }
+                },
+            }
+            // Count the new frames as resident before letting go of the reservation.
+            self.refresh_media_budget();
+            self.media_jobs.budget().release(result.reserved);
+        }
+        if changed {
+            self.note_scene_edit(now);
+        }
+        changed
+    }
+
+    /// Decoded frames plus an estimate of GPU targets: one surface-sized
+    /// RGBA16F target per layer and a few fixed ones (compositor, post,
+    /// transition snapshot), plus each media layer's frame texture.
+    fn refresh_media_budget(&self) {
+        const FIXED_TARGETS: u64 = 6;
+        let surface = u64::from(self.gpu.surface_config.width)
+            * u64::from(self.gpu.surface_config.height)
+            * 8;
+        let frame_textures: u64 = self
             .layer_stack
             .layers
-            .get(index)
-            .and_then(|layer| layer.as_media())
-            .map(decoded_media_layer_bytes)
-            .unwrap_or(0);
-        let existing = self.decoded_media_bytes().saturating_sub(replaced_ram);
-        let plan = crate::media::library::plan_clip(&path);
-        if let Some(message) = crate::media::library::admission_error(0, existing, crate::bindings::catalog::MAX_LAYERS, &[plan]) {
-            self.status_error = Some((message, Instant::now()));
-            return false;
-        }
-        match crate::media::decoder::load_media(&path) {
-            Ok(source) => {
-                let hdr_format = GpuContext::hdr_format();
-                let media_layer = MediaLayer::new(
-                    &self.gpu.device,
-                    &self.gpu.queue,
-                    hdr_format,
-                    self.gpu.surface_config.width,
-                    self.gpu.surface_config.height,
-                    source,
-                    path,
-                );
-                let file_name = media_layer.file_name.clone();
-                let previous = &self.layer_stack.layers[index];
-                let opacity = previous.opacity;
-                let blend_mode = previous.blend_mode;
-                let enabled = previous.enabled;
-                let placement = previous.as_media().map(|media| {
-                    (media.fit, media.width_scale, media.pos_x, media.pos_y, media.transport.speed, media.transport.looping)
-                });
-                let mut layer = Layer::new_media(file_name.clone(), media_layer);
-                layer.custom_name = Some(file_name);
-                layer.opacity = opacity;
-                layer.blend_mode = blend_mode;
-                layer.enabled = enabled;
-                if let Some((fit, width, x, y, speed, looping)) = placement {
-                    if let Some(media) = layer.as_media_mut() {
-                        media.fit = fit;
-                        media.width_scale = width;
-                        media.pos_x = x;
-                        media.pos_y = y;
-                        media.transport.speed = speed;
-                        media.transport.looping = looping;
-                    }
-                } else if self.show.is_some() {
-                    if let Some(media) = layer.as_media_mut() {
-                        media.fit = crate::media::MediaFit::Fill;
-                    }
-                }
-                self.layer_stack.layers[index] = layer;
-                self.layer_stack.active_layer = index;
-                self.sync_active_layer();
-                true
-            }
-            Err(err) => {
-                self.status_error = Some((err, Instant::now()));
-                false
+            .iter()
+            .filter_map(|layer| layer.as_media())
+            .map(|media| {
+                let (w, h) = media.source.dimensions();
+                u64::from(w) * u64::from(h) * 4
+            })
+            .sum();
+        let gpu = surface * (self.layer_stack.layers.len() as u64 + FIXED_TARGETS) + frame_textures;
+        self.media_jobs
+            .budget()
+            .set_resident(self.decoded_media_bytes().saturating_add(gpu));
+    }
+
+    /// GPU half of adding a clip: runs on the render thread with frames
+    /// that are already decoded.
+    fn install_media_layer(&mut self, path: std::path::PathBuf, source: crate::media::decoder::MediaSource) {
+        let hdr_format = GpuContext::hdr_format();
+        let media_layer = MediaLayer::new(
+            &self.gpu.device,
+            &self.gpu.queue,
+            hdr_format,
+            self.gpu.surface_config.width,
+            self.gpu.surface_config.height,
+            source,
+            path,
+        );
+        let file_name = media_layer.file_name.clone();
+        let mut layer = Layer::new_media(file_name.clone(), media_layer);
+        layer.custom_name = Some(file_name.clone());
+        if self.show.is_some() {
+            if let Some(media) = layer.as_media_mut() {
+                media.fit = crate::media::MediaFit::Fill;
             }
         }
+        self.layer_stack.layers.push(layer);
+        self.layer_stack.active_layer = self.layer_stack.layers.len() - 1;
+        self.sync_active_layer();
+        log::info!("Added media layer: {}", file_name);
+    }
+
+    /// GPU half of replacing a clip. Opacity, blend, visibility, placement
+    /// and transport carry over from the layer it replaces.
+    fn swap_media_layer(
+        &mut self,
+        index: usize,
+        path: std::path::PathBuf,
+        source: crate::media::decoder::MediaSource,
+    ) {
+        let hdr_format = GpuContext::hdr_format();
+        let media_layer = MediaLayer::new(
+            &self.gpu.device,
+            &self.gpu.queue,
+            hdr_format,
+            self.gpu.surface_config.width,
+            self.gpu.surface_config.height,
+            source,
+            path,
+        );
+        let file_name = media_layer.file_name.clone();
+        let previous = &self.layer_stack.layers[index];
+        let opacity = previous.opacity;
+        let blend_mode = previous.blend_mode;
+        let enabled = previous.enabled;
+        let placement = previous.as_media().map(|media| {
+            (media.fit, media.width_scale, media.pos_x, media.pos_y, media.transport.speed, media.transport.looping)
+        });
+        let mut layer = Layer::new_media(file_name.clone(), media_layer);
+        layer.custom_name = Some(file_name);
+        layer.opacity = opacity;
+        layer.blend_mode = blend_mode;
+        layer.enabled = enabled;
+        if let Some((fit, width, x, y, speed, looping)) = placement {
+            if let Some(media) = layer.as_media_mut() {
+                media.fit = fit;
+                media.width_scale = width;
+                media.pos_x = x;
+                media.pos_y = y;
+                media.transport.speed = speed;
+                media.transport.looping = looping;
+            }
+        } else if self.show.is_some() {
+            if let Some(media) = layer.as_media_mut() {
+                media.fit = crate::media::MediaFit::Fill;
+            }
+        }
+        self.layer_stack.layers[index] = layer;
+        self.layer_stack.active_layer = index;
+        self.sync_active_layer();
     }
 
     fn library_paths(&self, ids: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
@@ -3088,7 +3184,7 @@ impl App {
         self.save_state = crate::show::scene_file::SaveState::Saved;
         self.remember_workspace();
         if let Some(library) = &mut self.media_library {
-            library.rescan();
+            library.request_rescan();
         }
         log::info!("Saved scene '{id}' into {}", pack_root.display());
         Ok(())
@@ -3146,15 +3242,21 @@ impl App {
         self.save_state = crate::show::scene_file::SaveState::Saved;
     }
 
-    fn poll_media_library(&mut self) {
-        let dirty = self
-            .media_library
-            .as_mut()
-            .is_some_and(|library| library.poll_watch());
-        if dirty {
-            if let Some(library) = &mut self.media_library {
-                library.rescan();
+    /// Apply a finished background library scan and finished media jobs.
+    /// Neither probes nor decodes here.
+    fn poll_media_library(&mut self, now: Instant) {
+        let mut changed = false;
+        if let Some(library) = &mut self.media_library {
+            let was_scanning = library.scanning();
+            if let Some(message) = library.poll() {
+                self.status_error = Some((message, now));
             }
+            changed |= was_scanning && !library.scanning();
+        }
+        self.refresh_media_budget();
+        changed |= self.poll_media_jobs(now);
+        if changed {
+            self.broadcast_web_state(now);
         }
     }
 
@@ -3336,6 +3438,7 @@ impl App {
         // Edits made while this scene was decoding are about to be replaced.
         // Keep them as a draft; the incoming scene starts clean.
         self.stash_unsaved_scene_draft();
+        self.scene_generation += 1;
         self.save_state = crate::show::scene_file::SaveState::Saved;
         // Remove extra layers or add missing ones to match preset
         while self.layer_stack.layers.len() > preset.layers.len()

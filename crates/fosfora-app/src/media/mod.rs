@@ -1,4 +1,5 @@
 pub mod decoder;
+pub mod jobs;
 pub mod library;
 pub mod toolchain;
 pub mod types;

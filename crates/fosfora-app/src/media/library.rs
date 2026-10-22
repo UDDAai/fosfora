@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::show::validation::estimate_rgba_ram;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"];
 
@@ -111,6 +110,58 @@ pub struct MediaLibrary {
     linked_files: Vec<PathBuf>,
     hidden: Vec<String>,
     watch: Option<LibraryWatch>,
+    /// ffprobe, fingerprints, thumbnails and copies run here, never on the
+    /// render thread. `None` in tests, where a rescan runs inline.
+    scanner: Option<Scanner>,
+    /// A rescan was asked for while the scanner was busy.
+    scan_wanted: bool,
+    /// Folder of earlier uploads to copy in on the next scan.
+    import_wanted: Option<PathBuf>,
+}
+
+/// What one background scan needs. A snapshot, so the render thread keeps
+/// the library while the scan runs.
+struct ScanRequest {
+    pack_root: PathBuf,
+    linked_folders: Vec<PathBuf>,
+    linked_files: Vec<PathBuf>,
+    hidden: Vec<String>,
+    import_from: Option<PathBuf>,
+}
+
+struct ScanResult {
+    items: Vec<LibraryItem>,
+    warnings: Vec<String>,
+    imported: Option<usize>,
+}
+
+struct Scanner {
+    tx: crossbeam_channel::Sender<ScanRequest>,
+    rx: crossbeam_channel::Receiver<ScanResult>,
+    busy: bool,
+}
+
+impl Scanner {
+    fn spawn() -> Option<Self> {
+        let (tx, request_rx) = crossbeam_channel::bounded::<ScanRequest>(1);
+        let (result_tx, rx) = crossbeam_channel::bounded::<ScanResult>(1);
+        std::thread::Builder::new()
+            .name("fosfora-media-scan".into())
+            .spawn(move || {
+                while let Ok(request) = request_rx.recv() {
+                    let imported = request
+                        .import_from
+                        .as_deref()
+                        .map(|from| import_folder(&request.pack_root, from));
+                    let (items, warnings) = scan_library(&request);
+                    if result_tx.send(ScanResult { items, warnings, imported }).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { tx, rx, busy: false })
+    }
 }
 
 struct LibraryWatch {
@@ -129,19 +180,91 @@ impl MediaLibrary {
             &pack_root,
             &watch_dirs(&sources.linked_folders, &sources.linked_files),
         );
+        // The last scan's list shows at once; a fresh scan replaces it.
+        let cached = fs::read_to_string(library_json_path(&pack_root))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Vec<LibraryItem>>(&text).ok())
+            .unwrap_or_default();
         let mut lib = Self {
             pack_root,
-            items: Vec::new(),
+            items: cached,
             warnings: Vec::new(),
             linked_folders: sources.linked_folders,
             linked_files: sources.linked_files,
             hidden: sources.hidden,
             watch,
+            scanner: if cfg!(test) { None } else { Scanner::spawn() },
+            scan_wanted: false,
+            import_wanted: None,
         };
         lib.prune_hidden();
         lib.write_sources();
-        lib.rescan();
+        lib.request_rescan();
         lib
+    }
+
+    /// Ask for a rescan. With a scanner it runs in the background and lands
+    /// through [`MediaLibrary::poll`]; without one it runs now.
+    pub fn request_rescan(&mut self) {
+        if self.scanner.is_none() {
+            if let Some(from) = self.import_wanted.take() {
+                import_folder(&self.pack_root, &from);
+            }
+            self.rescan();
+            return;
+        }
+        self.scan_wanted = true;
+        self.dispatch_scan();
+    }
+
+    /// True while a scan is running or waiting.
+    pub fn scanning(&self) -> bool {
+        self.scan_wanted || self.scanner.as_ref().is_some_and(|scanner| scanner.busy)
+    }
+
+    /// Call once per frame. Applies a finished scan and starts a waiting one.
+    /// Returns a message when an import of earlier uploads finished.
+    pub fn poll(&mut self) -> Option<String> {
+        if self.poll_watch() {
+            self.scan_wanted = true;
+        }
+        let mut message = None;
+        if let Some(scanner) = &mut self.scanner {
+            if let Ok(result) = scanner.rx.try_recv() {
+                scanner.busy = false;
+                self.items = result.items;
+                self.warnings = result.warnings;
+                if let Some(count) = result.imported {
+                    message = Some(format!("Imported {count} files from previous uploads"));
+                }
+            }
+        }
+        self.dispatch_scan();
+        message
+    }
+
+    fn dispatch_scan(&mut self) {
+        if !self.scan_wanted {
+            return;
+        }
+        let request = ScanRequest {
+            pack_root: self.pack_root.clone(),
+            linked_folders: self.linked_folders.clone(),
+            linked_files: self.linked_files.clone(),
+            hidden: self.hidden.clone(),
+            import_from: self.import_wanted.clone(),
+        };
+        let Some(scanner) = &mut self.scanner else {
+            return;
+        };
+        if scanner.busy {
+            return;
+        }
+        if scanner.tx.try_send(request).is_ok() {
+            scanner.busy = true;
+            self.scan_wanted = false;
+            self.import_wanted = None;
+        }
     }
 
     pub fn poll_watch(&mut self) -> bool {
@@ -155,86 +278,16 @@ impl MediaLibrary {
         dirty
     }
 
+    /// Scan now, on this thread. Startup fallback and tests only.
     pub fn rescan(&mut self) {
-        let previous = fs::read_to_string(library_json_path(&self.pack_root))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Vec<LibraryItem>>(&text).ok())
-            .unwrap_or_default();
-        let cache = load_cache(&self.pack_root);
-        let scenes = scenes_using_media(&self.pack_root);
-        let mut warnings = Vec::new();
-        let mut items = Vec::new();
-        let mut next_cache = ProbeCache { entries: Vec::new() };
-
-        for seen in pack_files(&self.pack_root) {
-            if let Some(item) = describe_file(&seen, &cache, &mut next_cache, &self.pack_root) {
-                items.push(item);
-            }
-        }
-
-        for folder in &self.linked_folders {
-            if !folder.is_dir() {
-                warnings.push(format!(
-                    "Linked media folder is missing: {}",
-                    folder.display()
-                ));
-                let source = folder.to_string_lossy().to_string();
-                for old in previous.iter().filter(|item| item.source == source) {
-                    let mut kept = old.clone();
-                    kept.status = "missing".into();
-                    kept.detail = "Linked folder is not available".into();
-                    if !items.iter().any(|item| item.id == kept.id) {
-                        items.push(kept);
-                    }
-                }
-                continue;
-            }
-            for seen in folder_files(folder) {
-                if let Some(item) = describe_file(&seen, &cache, &mut next_cache, &self.pack_root)
-                {
-                    items.push(item);
-                }
-            }
-        }
-
-        for path in &self.linked_files {
-            if !path.is_file() {
-                warnings.push(format!(
-                    "Linked media file is missing: {}",
-                    path.display()
-                ));
-                let id = linked_file_id(path);
-                for old in previous.iter().filter(|item| item.id == id) {
-                    let mut kept = old.clone();
-                    kept.status = "missing".into();
-                    kept.detail = "Linked file is not available".into();
-                    if !items.iter().any(|item| item.id == kept.id) {
-                        items.push(kept);
-                    }
-                }
-                continue;
-            }
-            if let Some(seen) = linked_file_seen(path) {
-                if let Some(item) = describe_file(&seen, &cache, &mut next_cache, &self.pack_root)
-                {
-                    items.push(item);
-                }
-            }
-        }
-
-        for item in &mut items {
-            item.scenes = scenes_for(item, &scenes);
-        }
-        items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        let hidden = self.hidden.clone();
-        items.retain(|item| !hidden.iter().any(|id| id == &item.id));
-        let mut seen_ids = std::collections::HashSet::new();
-        items.retain(|item| seen_ids.insert(item.id.clone()));
-        let mut seen_paths = std::collections::HashSet::new();
-        items.retain(|item| seen_paths.insert(item.path.clone()));
-
-        let _ = write_json(&cache_path(&self.pack_root), &next_cache);
-        let _ = write_json(&library_json_path(&self.pack_root), &items);
+        let request = ScanRequest {
+            pack_root: self.pack_root.clone(),
+            linked_folders: self.linked_folders.clone(),
+            linked_files: self.linked_files.clone(),
+            hidden: self.hidden.clone(),
+            import_from: None,
+        };
+        let (items, warnings) = scan_library(&request);
         self.items = items;
         self.warnings = warnings;
     }
@@ -326,7 +379,8 @@ impl MediaLibrary {
             );
         };
         fs::remove_file(&path).map_err(|err| err.to_string())?;
-        self.rescan();
+        self.items.retain(|have| have.id != item.id);
+        self.request_rescan();
         Ok(format!(
             "Removed {} from the show media folder.",
             item.name
@@ -369,7 +423,7 @@ impl MediaLibrary {
         ) {
             self.watch = Some(watch);
         }
-        self.rescan();
+        self.request_rescan();
     }
 
     fn prune_hidden(&mut self) {
@@ -403,30 +457,12 @@ impl MediaLibrary {
         open_folder(&dir)
     }
 
-    pub fn import_uploads(&mut self, uploads: &Path) -> Result<usize, String> {
-        if !uploads.is_dir() {
-            return Ok(0);
-        }
-        let mut copied = 0;
-        for entry in fs::read_dir(uploads).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if media_kind(name).is_none() {
-                continue;
-            }
-            match copy_into_library(&self.pack_root, &path, name) {
-                Ok(_) => copied += 1,
-                Err(err) => log::warn!("import {}: {err}", path.display()),
-            }
-        }
-        self.rescan();
-        Ok(copied)
+    /// Copy earlier Application Support uploads into the show library on the
+    /// scanner thread. The originals stay. [`MediaLibrary::poll`] reports the
+    /// count when it is done.
+    pub fn import_uploads(&mut self, uploads: &Path) {
+        self.import_wanted = Some(uploads.to_path_buf());
+        self.request_rescan();
     }
 
     pub fn resolve(&self, id: &str) -> Option<PathBuf> {
@@ -436,6 +472,118 @@ impl MediaLibrary {
         let direct = self.pack_root.join(id);
         direct.is_file().then_some(direct)
     }
+}
+
+/// Probe, fingerprint and thumbnail every library file. Cached entries are
+/// reused, so a folder of clips is browsable without decoding any of them.
+fn scan_library(request: &ScanRequest) -> (Vec<LibraryItem>, Vec<String>) {
+    let pack_root = &request.pack_root;
+    let previous = fs::read_to_string(library_json_path(pack_root))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<LibraryItem>>(&text).ok())
+        .unwrap_or_default();
+    let cache = load_cache(pack_root);
+    let scenes = scenes_using_media(pack_root);
+    let mut warnings = Vec::new();
+    let mut items = Vec::new();
+    let mut next_cache = ProbeCache { entries: Vec::new() };
+
+    for seen in pack_files(pack_root) {
+        if let Some(item) = describe_file(&seen, &cache, &mut next_cache, pack_root) {
+            items.push(item);
+        }
+    }
+
+    for folder in &request.linked_folders {
+        if !folder.is_dir() {
+            warnings.push(format!(
+                "Linked media folder is missing: {}",
+                folder.display()
+            ));
+            let source = folder.to_string_lossy().to_string();
+            for old in previous.iter().filter(|item| item.source == source) {
+                let mut kept = old.clone();
+                kept.status = "missing".into();
+                kept.detail = "Linked folder is not available".into();
+                if !items.iter().any(|item| item.id == kept.id) {
+                    items.push(kept);
+                }
+            }
+            continue;
+        }
+        for seen in folder_files(folder) {
+            if let Some(item) = describe_file(&seen, &cache, &mut next_cache, pack_root)
+            {
+                items.push(item);
+            }
+        }
+    }
+
+    for path in &request.linked_files {
+        if !path.is_file() {
+            warnings.push(format!(
+                "Linked media file is missing: {}",
+                path.display()
+            ));
+            let id = linked_file_id(path);
+            for old in previous.iter().filter(|item| item.id == id) {
+                let mut kept = old.clone();
+                kept.status = "missing".into();
+                kept.detail = "Linked file is not available".into();
+                if !items.iter().any(|item| item.id == kept.id) {
+                    items.push(kept);
+                }
+            }
+            continue;
+        }
+        if let Some(seen) = linked_file_seen(path) {
+            if let Some(item) = describe_file(&seen, &cache, &mut next_cache, pack_root)
+            {
+                items.push(item);
+            }
+        }
+    }
+
+    for item in &mut items {
+        item.scenes = scenes_for(item, &scenes);
+    }
+    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let hidden = &request.hidden;
+    items.retain(|item| !hidden.iter().any(|id| id == &item.id));
+    let mut seen_ids = std::collections::HashSet::new();
+    items.retain(|item| seen_ids.insert(item.id.clone()));
+    let mut seen_paths = std::collections::HashSet::new();
+    items.retain(|item| seen_paths.insert(item.path.clone()));
+
+    let _ = write_json(&cache_path(pack_root), &next_cache);
+    let _ = write_json(&library_json_path(pack_root), &items);
+    (items, warnings)
+}
+
+
+/// Copy every media file in `from` into the pack. Returns how many landed.
+fn import_folder(pack_root: &Path, from: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(from) else {
+        return 0;
+    };
+    let mut copied = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if media_kind(name).is_none() {
+            continue;
+        }
+        match copy_into_library(pack_root, &path, name) {
+            Ok(_) => copied += 1,
+            Err(err) => log::warn!("import {}: {err}", path.display()),
+        }
+    }
+    copied
 }
 
 pub fn library_json_path(pack_root: &Path) -> PathBuf {
@@ -565,7 +713,7 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
     if kind == "video" {
         match probe_video_meta(path) {
             Ok(meta) => {
-                let ram = estimate_rgba_ram(meta.width, meta.height, meta.fps, meta.duration_secs);
+                let ram = meta.decoded_bytes;
                 let mut problem = None;
                 if meta.duration_secs > max_predecode_secs() {
                     problem = Some(format!(
@@ -575,7 +723,11 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
                     ));
                 } else if ram > MAX_CLIP_RAM {
                     problem = Some(format!(
-                        "would decode to {}, over {} per clip",
+                        "{}x{} {} × {} frames would decode to {}, over {} per clip",
+                        meta.width,
+                        meta.height,
+                        meta.pix_fmt,
+                        meta.frames,
                         format_bytes(ram),
                         format_bytes(MAX_CLIP_RAM)
                     ));
@@ -618,10 +770,11 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
 }
 
 /// `None` when every clip can be decoded. Otherwise a message and nothing
-/// should be loaded.
+/// should be loaded. `available` is what the decoded-memory budget still
+/// allows right now (see `media::jobs::MediaBudget`).
 pub fn admission_error(
     existing_layers: usize,
-    existing_ram: u64,
+    available: u64,
     max_layers: usize,
     clips: &[ClipPlan],
 ) -> Option<String> {
@@ -639,12 +792,11 @@ pub fn admission_error(
         }
     }
     let added: u64 = clips.iter().map(|clip| clip.ram_bytes).sum();
-    let total = existing_ram.saturating_add(added);
-    if total > MAX_DECODED_RAM {
+    if added > available {
         problems.push(format!(
-            "Decoded media would be {}, over the {} limit.",
-            format_bytes(total),
-            format_bytes(MAX_DECODED_RAM)
+            "Decoding needs {}; the memory budget has {} left.",
+            format_bytes(added),
+            format_bytes(available)
         ));
     }
     if problems.is_empty() {
@@ -787,7 +939,7 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
     if kind == "video" {
         match probe_video_meta(path) {
             Ok(meta) => {
-                let ram = estimate_rgba_ram(meta.width, meta.height, meta.fps, meta.duration_secs);
+                let ram = meta.decoded_bytes;
                 let too_long = meta.duration_secs > max_predecode_secs();
                 let too_big = ram > MAX_CLIP_RAM;
                 let (status, detail) = if too_long {
@@ -866,6 +1018,9 @@ struct VideoProbe {
     height: u32,
     fps: f64,
     duration_secs: f64,
+    frames: u64,
+    pix_fmt: String,
+    decoded_bytes: u64,
 }
 
 fn max_predecode_secs() -> f64 {
@@ -888,6 +1043,9 @@ fn probe_video_meta(path: &Path) -> Result<VideoProbe, String> {
             height: meta.height,
             fps: meta.fps,
             duration_secs: meta.duration_secs,
+            frames: meta.frame_count(),
+            pix_fmt: meta.pix_fmt.clone(),
+            decoded_bytes: meta.decoded_bytes(),
         })
     }
     #[cfg(not(feature = "video"))]
@@ -1529,7 +1687,9 @@ mod tests {
         assert!(message.contains("a.mp4") == false || message.contains("free layer"));
         assert!(message.contains("b.mp4"));
         assert!(message.contains("free layer"));
-        assert!(admission_error(0, 0, 8, &clips[..1]).is_none());
+        assert!(admission_error(0, u64::MAX, 8, &clips[..1]).is_none());
+        let over = admission_error(0, 99, 8, &clips[..1]).unwrap();
+        assert!(over.contains("memory budget"));
     }
 
     #[test]

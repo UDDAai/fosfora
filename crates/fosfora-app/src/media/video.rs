@@ -24,6 +24,28 @@ pub struct VideoMeta {
     pub height: u32,
     pub fps: f64,
     pub duration_secs: f64,
+    /// Container frame count when ffprobe reports one.
+    pub frames: Option<u64>,
+    /// Source pixel format, e.g. `yuv420p10le`. Decode always yields RGBA8.
+    pub pix_fmt: String,
+}
+
+impl VideoMeta {
+    /// Frames the decoder will produce: the probed count, else duration × fps.
+    pub fn frame_count(&self) -> u64 {
+        self.frames
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| (self.duration_secs * self.fps).ceil().max(0.0) as u64)
+    }
+
+    /// RAM for the decoded clip. Every frame is held as RGBA8 (4 bytes/px),
+    /// whatever the source pixel format.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.frame_count()
+            .saturating_mul(u64::from(self.width))
+            .saturating_mul(u64::from(self.height))
+            .saturating_mul(4)
+    }
 }
 
 /// Probe video metadata using ffprobe.
@@ -82,11 +104,18 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
         })
         .unwrap_or(0.0);
 
+    let frames = video_stream["nb_frames"]
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok());
+    let pix_fmt = video_stream["pix_fmt"].as_str().unwrap_or("").to_string();
+
     Ok(VideoMeta {
         width,
         height,
         fps,
         duration_secs,
+        frames,
+        pix_fmt,
     })
 }
 
@@ -110,7 +139,10 @@ pub fn decode_all_frames(
     let delay_ms = (1000.0 / meta.fps).round() as u32;
 
     // Estimate RAM and warn
-    let est_frames = (meta.duration_secs * meta.fps).ceil() as usize;
+    let est_frames = meta.frame_count() as usize;
+    // The memory check was made against the probed count. A stream that
+    // decodes far past it is stopped rather than allowed to grow.
+    let frame_cap = est_frames + est_frames / 4 + 8;
     let est_ram_mb = (est_frames * frame_size) / (1024 * 1024);
     log::info!(
         "Pre-decoding video: ~{} frames, ~{}MB RAM",
@@ -153,6 +185,13 @@ pub fn decode_all_frames(
     let mut buf = vec![0u8; frame_size];
 
     while stdout.read_exact(&mut buf).is_ok() {
+        if frames.len() >= frame_cap {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "decoded more than {frame_cap} frames; the probe said {est_frames}"
+            ));
+        }
         frames.push(DecodedFrame {
             data: buf.clone(),
             width: meta.width,
