@@ -714,25 +714,45 @@ pub fn commit_upload(pack_root: &Path, partial: &Path, original_name: &str) -> R
             duplicate: true,
         });
     }
-    let used = directory_bytes(&pack_root.join("assets/video"))
-        + directory_bytes(&pack_root.join("assets/images"));
-    if used.saturating_add(meta.len()) > MAX_LIBRARY_BYTES {
-        let _ = fs::remove_file(partial);
-        return Err("the show media folder is over 20 GB".into());
+    let primary = primary_media_root(pack_root);
+    // Existing project-local library retains its 20 GB limit. A deliberate
+    // external iCloud/media-root configuration is managed by the user.
+    if primary.is_none() {
+        let used = directory_bytes(&pack_root.join("assets/video"))
+            + directory_bytes(&pack_root.join("assets/images"));
+        if used.saturating_add(meta.len()) > MAX_LIBRARY_BYTES {
+            let _ = fs::remove_file(partial);
+            return Err("the show media folder is over 20 GB".into());
+        }
     }
-    let dir = pack_root.join(if kind == "video" {
-        "assets/video"
-    } else {
-        "assets/images"
+    let subfolder = if kind == "video" { "video" } else { "images" };
+    let dir = primary.as_ref().map(|root| root.join(subfolder)).unwrap_or_else(|| {
+        pack_root.join("assets").join(subfolder)
     });
+    // Never create a replacement cloud folder elsewhere if iCloud has gone
+    // missing: the operator needs an actionable error, not split libraries.
+    if let Some(root) = primary.as_ref() {
+        if !root.is_dir() {
+            return Err(format!("Primary media folder is unavailable: {}", root.display()));
+        }
+    }
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dest = unique_dest(&dir, &name);
-    fs::rename(partial, &dest).map_err(|e| e.to_string())?;
-    let rel = dest
-        .strip_prefix(pack_root)
-        .unwrap_or(&dest)
-        .to_string_lossy()
-        .replace('\\', "/");
+    if primary.is_some() {
+        // The upload temp lives under the show pack, potentially on another
+        // filesystem. Copy to a hidden sibling first, then publish atomically.
+        let stage = dir.join(format!(".fosfora-incoming-{}", incoming_token()));
+        fs::copy(partial, &stage).map_err(|e| e.to_string())?;
+        if let Err(err) = fs::rename(&stage, &dest) {
+            let _ = fs::remove_file(&stage);
+            return Err(err.to_string());
+        }
+        let _ = fs::remove_file(partial);
+    } else {
+        fs::rename(partial, &dest).map_err(|e| e.to_string())?;
+    }
+    let rel = format!("assets/{subfolder}/{}", dest.file_name()
+        .and_then(|n| n.to_str()).unwrap_or(&name));
     Ok(UploadReport {
         id: rel,
         name: dest
