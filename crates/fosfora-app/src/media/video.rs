@@ -60,7 +60,7 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
     let output = cmd
         .args([
             "-v",
-            "quiet",
+            "error",
             "-print_format",
             "json",
             "-show_streams",
@@ -69,45 +69,63 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("ffprobe failed to execute: {e}"))?;
+        .map_err(|e| format!("Could not run ffprobe for {}: {e}", path.display()))?;
 
     if !output.status.success() {
-        return Err("ffprobe returned non-zero exit code".to_string());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        let detail = diagnostic.trim();
+        return Err(format!(
+            "ffprobe could not inspect {}: {}",
+            path.display(),
+            if detail.is_empty() { "file is unreadable or has an unsupported video container" } else { detail }
+        ));
     }
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Failed to parse ffprobe JSON: {e}"))?;
+        .map_err(|e| format!("Failed to parse ffprobe JSON for {}: {e}", path.display()))?;
+    parse_video_metadata(&json)
+}
 
+/// Validate the exact metadata that our all-frames-in-RAM decoder requires.
+/// Some MOV/variable-frame-rate files report "0/0" for one of the rates, or
+/// omit container duration. Treat those cases explicitly instead of
+/// silently estimating zero frames and rejecting them later.
+fn parse_video_metadata(json: &serde_json::Value) -> Result<VideoMeta, String> {
     let streams = json["streams"]
         .as_array()
-        .ok_or("No streams in ffprobe output")?;
-
+        .ok_or("ffprobe did not return any streams")?;
     let video_stream = streams
         .iter()
         .find(|s| s["codec_type"].as_str() == Some("video"))
-        .ok_or("No video stream found")?;
+        .ok_or("No video stream found in the file")?;
 
-    let width = video_stream["width"].as_u64().ok_or("Missing width")? as u32;
-    let height = video_stream["height"].as_u64().ok_or("Missing height")? as u32;
+    let width = video_stream["width"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+        .ok_or("Video has no valid width")?;
+    let height = video_stream["height"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+        .ok_or("Video has no valid height")?;
 
-    let fps = parse_frame_rate(video_stream["r_frame_rate"].as_str().unwrap_or("30/1"));
-
-    let duration_secs = json["format"]["duration"]
-        .as_str()
-        .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| {
-            video_stream["duration"]
-                .as_str()
-                .and_then(|s| s.parse::<f64>().ok())
-        })
-        .unwrap_or(0.0);
-
+    let fps = ["avg_frame_rate", "r_frame_rate"]
+        .iter()
+        .find_map(|key| video_stream[*key].as_str().and_then(parse_frame_rate))
+        .ok_or("Video has no valid frame rate (ffprobe reported 0/0 or missing FPS)")?;
     let frames = video_stream["nb_frames"]
         .as_str()
-        .and_then(|s| s.parse::<u64>().ok());
-    let pix_fmt = video_stream["pix_fmt"].as_str().unwrap_or("").to_string();
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0);
+    let duration_secs = [&json["format"]["duration"], &video_stream["duration"]]
+        .iter()
+        .filter_map(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+        .find(|d| d.is_finite() && *d > 0.0)
+        .or_else(|| frames.map(|n| n as f64 / fps))
+        .ok_or("Video has no usable duration or frame count for pre-decoding")?;
 
     Ok(VideoMeta {
         width,
@@ -115,18 +133,22 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
         fps,
         duration_secs,
         frames,
-        pix_fmt,
+        pix_fmt: video_stream["pix_fmt"].as_str().unwrap_or("").to_string(),
     })
 }
 
-fn parse_frame_rate(rate: &str) -> f64 {
-    if let Some((num, den)) = rate.split_once('/') {
-        let n: f64 = num.parse().unwrap_or(30.0);
-        let d: f64 = den.parse().unwrap_or(1.0);
-        if d > 0.0 { n / d } else { 30.0 }
+fn parse_frame_rate(rate: &str) -> Option<f64> {
+    let fps = if let Some((num, den)) = rate.split_once('/') {
+        let num = num.parse::<f64>().ok()?;
+        let den = den.parse::<f64>().ok()?;
+        if den == 0.0 {
+            return None;
+        }
+        num / den
     } else {
-        rate.parse().unwrap_or(30.0)
-    }
+        rate.parse::<f64>().ok()?
+    };
+    (fps.is_finite() && fps > 0.0).then_some(fps)
 }
 
 /// Pre-decode all video frames via a single ffmpeg run.
