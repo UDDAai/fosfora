@@ -1823,6 +1823,78 @@ mod tests {
     }
 
     #[test]
+    fn external_primary_library_uses_portable_ids_and_never_trashes_cloud_files() {
+        let root = temp_pack("primary");
+        let external = root.join("Cloud Movies");
+        fs::create_dir_all(external.join("video")).unwrap();
+        fs::create_dir_all(external.join("images")).unwrap();
+        let config = serde_json::json!({
+            "primary_media_root": external.to_string_lossy(),
+            "linked_folders": [],
+            "linked_files": [],
+            "hidden": []
+        });
+        fs::write(root.join("media-sources.json"), config.to_string()).unwrap();
+
+        // Support a flat user-managed folder without requiring a move.
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([5, 6, 7, 255]))
+            .save(external.join("plate.png")).unwrap();
+        fs::write(
+            root.join("presets/under-ice.json"),
+            r#"{"layers":[{"effect_name":"","media_path":"assets/images/plate.png"}]}"#,
+        ).unwrap();
+        let mut lib = MediaLibrary::open(root.clone());
+        let plate = lib.items.iter().find(|item| item.name == "plate.png").unwrap();
+        assert_eq!(plate.id, "assets/images/plate.png");
+        assert_eq!(plate.path, "assets/images/plate.png");
+        assert_eq!(plate.location, "external");
+        assert_eq!(plate.scenes, vec!["under-ice".to_string()]);
+        assert_eq!(lib.resolve(&plate.id).unwrap(), external.join("plate.png"));
+        assert_eq!(resolve_pack_media_path(&root, &plate.path), external.join("plate.png"));
+        assert_eq!(virtual_media_path(&root, &external.join("plate.png")).unwrap(),
+            "assets/images/plate.png");
+        assert!(lib.remove_item("assets/images/plate.png").is_err());
+        assert!(external.join("plate.png").exists());
+
+        // Uploads/imports go into the cloud location, but their IDs remain
+        // portable and the show pack keeps only metadata and thumbnails.
+        let src = root.join("upload.png");
+        image::RgbaImage::from_pixel(3, 3, image::Rgba([9, 10, 11, 255]))
+            .save(&src).unwrap();
+        let result = copy_into_library(&root, &src, "upload.png").unwrap();
+        assert_eq!(result.id, "assets/images/upload.png");
+        assert!(external.join("images/upload.png").is_file());
+        assert!(!root.join("assets/images/upload.png").exists());
+        assert_eq!(virtual_media_path(&root, &external.join("images/upload.png")).unwrap(),
+            result.id);
+        lib.rescan();
+        assert!(lib.items.iter().any(|item| item.id == result.id));
+        // Opening again must preserve the local config across write_sources().
+        let lib2 = MediaLibrary::open(root.clone());
+        assert_eq!(lib2.resolve(&result.id), Some(external.join("images/upload.png")));
+        let stored: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join("media-sources.json")).unwrap()
+        ).unwrap();
+        assert_eq!(stored["primary_media_root"], external.to_string_lossy().as_ref());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_primary_unavailable_is_reported_and_does_not_create_fake_files() {
+        let root = temp_pack("missing_primary");
+        let missing = root.join("missing-iCloud-folder");
+        fs::write(root.join("media-sources.json"),
+            serde_json::json!({"primary_media_root":missing.to_string_lossy()}).to_string()
+        ).unwrap();
+        let lib = MediaLibrary::open(root.clone());
+        assert!(lib.warnings.iter().any(|w| w.contains("unavailable")));
+        let path = resolve_pack_media_path(&root, "assets/video/clip.mp4");
+        assert_eq!(path, missing.join("video/clip.mp4"));
+        assert!(!missing.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_still_in_the_pack_shows_up_once_and_again() {
         let root = temp_pack("scan");
         let image = image::RgbaImage::from_pixel(8, 4, image::Rgba([10, 20, 30, 255]));
