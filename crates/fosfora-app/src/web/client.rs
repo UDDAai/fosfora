@@ -124,6 +124,28 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::LoadEffect { index })
         }
+        "clear_layer_effect" => {
+            let index = v.get("index")?.as_u64()? as usize;
+            Some(WsInMessage::ClearLayerEffect { index })
+        }
+        "save_preset" => {
+            let name = v.get("name")?.as_str()?.to_string();
+            Some(WsInMessage::SavePreset { name })
+        }
+        "rename_preset" => {
+            let from = v.get("from")?.as_str()?.to_string();
+            let to = v.get("to")?.as_str()?.to_string();
+            Some(WsInMessage::RenamePreset { from, to })
+        }
+        "delete_preset" => {
+            let name = v.get("name")?.as_str()?.to_string();
+            Some(WsInMessage::DeletePreset { name })
+        }
+        "rename_palette" => {
+            let from = v.get("from")?.as_str()?.to_string();
+            let to = v.get("to")?.as_str()?.to_string();
+            Some(WsInMessage::RenamePalette { from, to })
+        }
         "select_layer" => {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::SelectLayer { index })
@@ -581,7 +603,9 @@ mod tests {
 
         let json_bo = r#"{"type":"show","action":"toggle_blackout"}"#;
         match parse_client_message(json_bo) {
-            Some(WsInMessage::ShowCommand(crate::show::controller::ShowCommand::ToggleBlackout)) => {}
+            Some(WsInMessage::ShowCommand(
+                crate::show::controller::ShowCommand::ToggleBlackout,
+            )) => {}
             other => panic!("expected ShowCommand::ToggleBlackout, got {:?}", other),
         }
     }

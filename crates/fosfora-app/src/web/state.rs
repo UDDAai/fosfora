@@ -253,8 +253,14 @@ pub fn build_full_state(
                 locked: info.locked,
                 pinned: info.pinned,
                 media_name: info.media_file_name.clone(),
-                media_fit: info.media_file_name.as_ref().map(|_| info.media_fit.clone()),
-                media_width: info.media_file_name.as_ref().map(|_| info.media_width_scale),
+                media_fit: info
+                    .media_file_name
+                    .as_ref()
+                    .map(|_| info.media_fit.clone()),
+                media_width: info
+                    .media_file_name
+                    .as_ref()
+                    .map(|_| info.media_width_scale),
                 media_pos_x: info.media_file_name.as_ref().map(|_| info.media_pos_x),
                 media_pos_y: info.media_file_name.as_ref().map(|_| info.media_pos_y),
                 preview: info.media_preview.clone(),
@@ -665,6 +671,8 @@ mod tests {
             next_palette_secs: Some(3500),
             palette_manual: false,
             palettes: vec!["earth".into(), "deep-blue".into()],
+            palette_colors: Vec::new(),
+            transport: "running".into(),
             blackout: false,
             validation: "READY".into(),
             grade_enabled: true,
@@ -719,6 +727,8 @@ mod tests {
             next_palette_secs: Some(6900),
             palette_manual: false,
             palettes: vec!["deep-blue".into(), "earth".into(), "plum".into()],
+            palette_colors: Vec::new(),
+            transport: "running".into(),
             blackout: false,
             validation: "READY".into(),
             grade_enabled: true,

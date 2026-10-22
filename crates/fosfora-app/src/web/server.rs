@@ -217,9 +217,10 @@ fn handle_connection(
 }
 
 fn request_line_is_media_upload(request: &str) -> bool {
-    request.lines().next().is_some_and(|line| {
-        line.starts_with("POST /api/media") || line.starts_with("POST /media")
-    })
+    request
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("POST /api/media") || line.starts_with("POST /media"))
 }
 
 fn request_path(request: &str) -> Option<&str> {
@@ -270,7 +271,12 @@ fn handle_media_upload(stream: &mut TcpStream, first: &[u8], inbound_tx: &Sender
     let Some(content_length) =
         header_value(&headers, "content-length").and_then(|value| value.parse::<u64>().ok())
     else {
-        let _ = write_http(stream, "411 Length Required", "text/plain", "content-length required");
+        let _ = write_http(
+            stream,
+            "411 Length Required",
+            "text/plain",
+            "content-length required",
+        );
         return;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
@@ -344,22 +350,20 @@ fn serve_library_get(stream: &mut TcpStream, path: &str) {
     };
     if let Some(name) = path.strip_prefix("/api/media/thumb/") {
         match crate::media::library::thumb_path(&pack_root, name) {
-            Some(file) => {
-                match std::fs::read(file) {
-                    Ok(bytes) => {
-                        let header = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                            bytes.len()
-                        );
-                        let _ = stream.write_all(header.as_bytes());
-                        let _ = stream.write_all(&bytes);
-                        let _ = stream.flush();
-                    }
-                    Err(_) => {
-                        let _ = write_http(stream, "404 Not Found", "text/plain", "no thumbnail");
-                    }
+            Some(file) => match std::fs::read(file) {
+                Ok(bytes) => {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&bytes);
+                    let _ = stream.flush();
                 }
-            }
+                Err(_) => {
+                    let _ = write_http(stream, "404 Not Found", "text/plain", "no thumbnail");
+                }
+            },
             None => {
                 let _ = write_http(stream, "404 Not Found", "text/plain", "no thumbnail");
             }
@@ -405,7 +409,12 @@ fn urlencoding_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn write_http(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) -> std::io::Result<()> {
+fn write_http(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -431,13 +440,7 @@ fn is_control_document(path: &str) -> bool {
     };
     matches!(
         path,
-        "/" | "/index.html"
-            | "/control"
-            | "/layers"
-            | "/look"
-            | "/picture"
-            | "/library"
-            | "/show"
+        "/" | "/index.html" | "/control" | "/layers" | "/look" | "/picture" | "/library" | "/show"
     )
 }
 
@@ -557,7 +560,10 @@ mod tests {
             safe_upload_name("../../etc/passwd").as_deref(),
             Some("passwd")
         );
-        assert_eq!(safe_upload_name("ice loop.png").as_deref(), Some("ice_loop.png"));
+        assert_eq!(
+            safe_upload_name("ice loop.png").as_deref(),
+            Some("ice_loop.png")
+        );
         assert!(safe_upload_name("..").is_none());
         assert!(safe_upload_name(".hidden").is_none());
     }

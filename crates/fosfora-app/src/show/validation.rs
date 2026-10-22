@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::definition::ShowDefinition;
 use crate::palette::bindings::PaletteBindingSet;
-use crate::palette::types::{required_slot_ids, Palette};
+use crate::palette::types::{Palette, required_slot_ids};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationIssue {
@@ -117,9 +117,7 @@ pub fn validate_show(
             )));
         }
         for b in &set.bindings {
-            if !color_params.is_empty()
-                && !color_params.contains(&(b.layer, b.parameter.clone()))
-            {
+            if !color_params.is_empty() && !color_params.contains(&(b.layer, b.parameter.clone())) {
                 issues.push(issue(format!(
                     "Binding {preset_id} slot {} → layer {} / {} is not a Color param",
                     b.slot, b.layer, b.parameter
@@ -195,7 +193,9 @@ fn validate_track_sorted(
     let mut prev: Option<u32> = None;
     for at in times {
         if at > duration {
-            issues.push(issue(format!("{name} cue at {at}s exceeds duration {duration}s")));
+            issues.push(issue(format!(
+                "{name} cue at {at}s exceeds duration {duration}s"
+            )));
         }
         if let Some(p) = prev {
             if at < p {
@@ -242,7 +242,10 @@ mod tests {
     #[test]
     fn ready_when_clean() {
         let mut palettes = HashMap::new();
-        palettes.insert("earth".into(), crate::palette::types::Palette::solid_test("earth", "Earth"));
+        palettes.insert(
+            "earth".into(),
+            crate::palette::types::Palette::solid_test("earth", "Earth"),
+        );
         let mut presets = HashSet::new();
         presets.insert("deep-sleep".into());
         let report = validate_show(

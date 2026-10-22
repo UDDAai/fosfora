@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::paths::write_atomic;
 use crate::preset::Preset;
@@ -189,7 +189,8 @@ pub fn write_scene_preset(pack_root: &Path, id: &str, preset: &Preset) -> Result
     let path = dir.join(format!("{stem}.json"));
     let json = serde_json::to_string_pretty(preset)?;
     if path.is_file() {
-        let existing = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let existing =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         if existing == json {
             return Ok(path);
         }
@@ -242,10 +243,8 @@ mod tests {
     use super::*;
 
     fn temp_pack(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "fosfora_scene_{name}_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("fosfora_scene_{name}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("presets")).unwrap();
         fs::create_dir_all(root.join("assets/video")).unwrap();
@@ -272,12 +271,19 @@ mod tests {
         fs::write(
             root.join("media-sources.json"),
             serde_json::json!({"primary_media_root":cloud.to_string_lossy()}).to_string(),
-        ).unwrap();
+        )
+        .unwrap();
         let mut scene = preset(&clip.to_string_lossy(), 1.0);
         scene.layers[0].particle_image_path = Some(still.to_string_lossy().to_string());
         relativize_preset(&root, &mut scene);
-        assert_eq!(scene.layers[0].media_path.as_deref(), Some("assets/video/clip.mp4"));
-        assert_eq!(scene.layers[0].particle_image_path.as_deref(), Some("assets/images/plate.png"));
+        assert_eq!(
+            scene.layers[0].media_path.as_deref(),
+            Some("assets/video/clip.mp4")
+        );
+        assert_eq!(
+            scene.layers[0].particle_image_path.as_deref(),
+            Some("assets/images/plate.png")
+        );
         write_scene_preset(&root, "test-scene", &scene).unwrap();
         assert!(clip.exists());
         assert!(still.exists());
@@ -287,10 +293,8 @@ mod tests {
     #[test]
     fn external_primary_outside_the_pack_stays_portable() {
         let root = temp_pack("real_external");
-        let cloud = std::env::temp_dir().join(format!(
-            "fosfora_external_media_{}",
-            std::process::id()
-        ));
+        let cloud =
+            std::env::temp_dir().join(format!("fosfora_external_media_{}", std::process::id()));
         let _ = fs::remove_dir_all(&cloud);
         fs::create_dir_all(cloud.join("video")).unwrap();
         let clip = cloud.join("video/clip.mp4");
@@ -383,11 +387,7 @@ mod tests {
             ("deep-sleep".into(), preset("assets/video/a.mp4", 1.0)),
             ("under-ice".into(), preset("assets/video/b.mp4", 0.2)),
         ];
-        upsert_named(
-            &mut presets,
-            "under-ice",
-            preset("assets/video/c.mp4", 0.7),
-        );
+        upsert_named(&mut presets, "under-ice", preset("assets/video/c.mp4", 0.7));
         assert_eq!(presets.len(), 2);
         assert_eq!(presets[0].0, "deep-sleep");
         assert_eq!(

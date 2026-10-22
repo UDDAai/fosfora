@@ -1193,12 +1193,43 @@ impl App {
             let mut removes = web_result.layer_removes;
             removes.sort_unstable_by(|left, right| right.cmp(left));
             removes.dedup();
+            for index in web_result.clear_effects {
+                if self.clear_layer_effect(index) {
+                    web_stack_changed = true;
+                }
+            }
+            if let Some(name) = web_result.save_preset_name.clone() {
+                self.save_preset(&name);
+                view_changed = true;
+            }
+            if let Some((from, to)) = web_result.rename_preset.clone() {
+                if let Err(err) = self.rename_preset(&from, &to) {
+                    self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
+            if let Some(name) = web_result.delete_preset.clone() {
+                if let Err(err) = self.delete_preset(&name) {
+                    self.load_error = Some(err.clone());
+                    self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
+            if let Some((from, to)) = web_result.rename_palette.clone() {
+                if let Err(err) = self.rename_palette(&from, &to) {
+                    self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
             for index in removes {
-                if self.layer_stack.layers.get(index).is_some_and(|layer| layer.pinned) {
-                    self.status_error = Some((
-                        "That layer is pinned and was not removed".into(),
-                        now,
-                    ));
+                if self
+                    .layer_stack
+                    .layers
+                    .get(index)
+                    .is_some_and(|layer| layer.pinned)
+                {
+                    self.status_error =
+                        Some(("That layer is pinned and was not removed".into(), now));
                     view_changed = true;
                     continue;
                 }
@@ -1265,7 +1296,8 @@ impl App {
                 }
             }
             for paths in web_result.link_library_files.clone() {
-                let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+                let paths: Vec<std::path::PathBuf> =
+                    paths.into_iter().map(std::path::PathBuf::from).collect();
                 if let Some(library) = &mut self.media_library {
                     match library.link_paths(&paths) {
                         Ok(message) => self.status_error = Some((message, now)),
@@ -1345,8 +1377,7 @@ impl App {
                 if pack_scene && self.hold_or_save_before_manual_switch() {
                     self.pending_scene_change = Some(PendingSceneChange::Preset(preset_idx));
                     self.status_error = Some((
-                        "Unsaved changes. Save, discard, or cancel before switching scenes."
-                            .into(),
+                        "Unsaved changes. Save, discard, or cancel before switching scenes.".into(),
                         Instant::now(),
                     ));
                     view_changed = true;
@@ -2217,6 +2248,55 @@ impl App {
         let _ = is_media;
     }
 
+    /// Drop the effect on one layer. The layer stays, with its opacity, blend,
+    /// and place in the stack. Media layers have no effect to remove.
+    pub fn clear_layer_effect(&mut self, layer_idx: usize) -> bool {
+        let Some(layer) = self.layer_stack.layers.get(layer_idx) else {
+            return false;
+        };
+        if layer.locked || layer.effect_index().is_none() {
+            return false;
+        }
+        let fresh = {
+            let ctx = crate::gpu::layer_builder::LayerBuildCtx {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                pipeline_cache: self.gpu.pipeline_cache.as_ref(),
+                width: self.gpu.surface_config.width,
+                height: self.gpu.surface_config.height,
+                placeholder: &self.placeholder,
+                audio_textures: &self.audio_textures,
+                particle_quality: self.settings.particle_quality,
+                backdrop: Some((
+                    &self.compositor.backdrop.view,
+                    &self.compositor.backdrop.sampler,
+                )),
+            };
+            let Some(layer) = crate::gpu::layer_builder::new_default_layer(&ctx, String::new())
+            else {
+                return false;
+            };
+            layer
+        };
+        let mut old = std::mem::replace(&mut self.layer_stack.layers[layer_idx], fresh);
+        let slot = &mut self.layer_stack.layers[layer_idx];
+        slot.name = std::mem::take(&mut old.name);
+        slot.custom_name = old.custom_name.take();
+        slot.blend_mode = old.blend_mode;
+        slot.opacity = old.opacity;
+        slot.displace_amount = old.displace_amount;
+        slot.enabled = old.enabled;
+        slot.locked = old.locked;
+        slot.pinned = old.pinned;
+        slot.postprocess = old.postprocess.clone();
+        slot.chain = old.chain.take();
+        let _ = self.binding_bus.clear_preset_bindings_for_layer(layer_idx);
+        if layer_idx == self.layer_stack.active_layer {
+            self.effect_loader.current_effect = None;
+        }
+        true
+    }
+
     /// Add a new empty layer with the default shader.
     pub fn add_layer(&mut self) {
         let num = self.layer_stack.layers.len();
@@ -2313,20 +2393,33 @@ impl App {
         };
         let previous = layer.as_media().map(|media| media.file_path.clone());
         self.submit_media(
-            crate::media::jobs::MediaTarget::Replace { layer: index, previous },
+            crate::media::jobs::MediaTarget::Replace {
+                layer: index,
+                previous,
+            },
             vec![path],
         );
     }
 
-    fn submit_media(&mut self, target: crate::media::jobs::MediaTarget, paths: Vec<std::path::PathBuf>) {
+    fn submit_media(
+        &mut self,
+        target: crate::media::jobs::MediaTarget,
+        paths: Vec<std::path::PathBuf>,
+    ) {
         let max = crate::bindings::catalog::MAX_LAYERS;
         let free_slots = match target {
-            crate::media::jobs::MediaTarget::Add => max.saturating_sub(self.layer_stack.layers.len()),
+            crate::media::jobs::MediaTarget::Add => {
+                max.saturating_sub(self.layer_stack.layers.len())
+            }
             crate::media::jobs::MediaTarget::Replace { .. } => paths.len(),
         };
         let names: Vec<String> = paths
             .iter()
-            .filter_map(|path| path.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
             .collect();
         match self
             .media_jobs
@@ -2360,8 +2453,10 @@ impl App {
                 MediaJobOutcome::Ready(sources) => match result.target {
                     MediaTarget::Add => {
                         for (path, source) in sources {
-                            if self.layer_stack.layers.len() >= crate::bindings::catalog::MAX_LAYERS {
-                                self.status_error = Some(("No free layer slot is left".into(), now));
+                            if self.layer_stack.layers.len() >= crate::bindings::catalog::MAX_LAYERS
+                            {
+                                self.status_error =
+                                    Some(("No free layer slot is left".into(), now));
                                 break;
                             }
                             self.install_media_layer(path, source);
@@ -2425,7 +2520,11 @@ impl App {
 
     /// GPU half of adding a clip: runs on the render thread with frames
     /// that are already decoded.
-    fn install_media_layer(&mut self, path: std::path::PathBuf, source: crate::media::decoder::MediaSource) {
+    fn install_media_layer(
+        &mut self,
+        path: std::path::PathBuf,
+        source: crate::media::decoder::MediaSource,
+    ) {
         let hdr_format = GpuContext::hdr_format();
         let media_layer = MediaLayer::new(
             &self.gpu.device,
@@ -2474,7 +2573,14 @@ impl App {
         let blend_mode = previous.blend_mode;
         let enabled = previous.enabled;
         let placement = previous.as_media().map(|media| {
-            (media.fit, media.width_scale, media.pos_x, media.pos_y, media.transport.speed, media.transport.looping)
+            (
+                media.fit,
+                media.width_scale,
+                media.pos_x,
+                media.pos_y,
+                media.transport.speed,
+                media.transport.looping,
+            )
         });
         let mut layer = Layer::new_media(file_name.clone(), media_layer);
         layer.custom_name = Some(file_name);
@@ -2501,7 +2607,10 @@ impl App {
     }
 
     fn library_paths(&self, ids: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
-        let library = self.media_library.as_ref().ok_or_else(|| "No media library is open".to_string())?;
+        let library = self
+            .media_library
+            .as_ref()
+            .ok_or_else(|| "No media library is open".to_string())?;
         let mut paths = Vec::with_capacity(ids.len());
         let mut missing = Vec::new();
         for id in ids {
@@ -2702,7 +2811,10 @@ impl App {
             return false;
         }
         if self.layer_stack.layers[from].pinned {
-            self.status_error = Some(("That layer is pinned and was not moved".into(), Instant::now()));
+            self.status_error = Some((
+                "That layer is pinned and was not moved".into(),
+                Instant::now(),
+            ));
             return false;
         }
         self.layer_stack.move_layer(from, to);
@@ -3079,6 +3191,251 @@ impl App {
         }
     }
 
+    pub fn rename_preset(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let from = scene_name(from)?;
+        let to = scene_name(to)?;
+        if from == to {
+            return Ok(());
+        }
+        if self
+            .preset_store
+            .presets
+            .iter()
+            .take(self.preset_store.builtin_count)
+            .any(|(name, _)| name == &from)
+        {
+            return Err(format!("{from} is a built-in scene"));
+        }
+        if self
+            .preset_store
+            .presets
+            .iter()
+            .any(|(name, _)| name == &to)
+        {
+            return Err(format!("A scene named {to} already exists"));
+        }
+        let pack_root = self.show.as_ref().map(|show| show.pack_root.clone());
+        if let Some(root) = pack_root {
+            let preset_from = root.join("presets").join(format!("{from}.json"));
+            if preset_from.is_file() {
+                let preset_to = root.join("presets").join(format!("{to}.json"));
+                let bindings_from = root.join("palette-bindings").join(format!("{from}.json"));
+                let bindings_to = root.join("palette-bindings").join(format!("{to}.json"));
+                let audio_from = root
+                    .join("audio-bindings")
+                    .join(format!("{from}.bindings.json"));
+                let audio_to = root
+                    .join("audio-bindings")
+                    .join(format!("{to}.bindings.json"));
+                if preset_to.exists()
+                    || (bindings_from.is_file() && bindings_to.exists())
+                    || (audio_from.is_file() && audio_to.exists())
+                {
+                    return Err(format!("A scene named {to} already exists"));
+                }
+                std::fs::rename(&preset_from, &preset_to).map_err(|err| err.to_string())?;
+                rename_if_present(&bindings_from, &bindings_to)?;
+                if let Ok(text) = std::fs::read_to_string(&bindings_to) {
+                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        value["preset"] = serde_json::Value::String(to.clone());
+                        let _ = std::fs::write(
+                            &bindings_to,
+                            serde_json::to_string_pretty(&value).unwrap_or(text),
+                        );
+                    }
+                }
+                rename_if_present(&audio_from, &audio_to)?;
+                if let Some(show) = self.show.as_mut() {
+                    for cue in &mut show.definition.scene_track {
+                        if cue.preset_id == from {
+                            cue.preset_id = to.clone();
+                        }
+                    }
+                    if let Some(set) = show.bindings.remove(&from) {
+                        let mut set = set;
+                        set.preset = to.clone();
+                        show.bindings.insert(to.clone(), set);
+                    }
+                    if let Some(id) = show.preset_ids.iter_mut().find(|id| id.as_str() == from) {
+                        *id = to.clone();
+                    }
+                    if show.scene.active_preset_id.as_deref() == Some(from.as_str()) {
+                        show.scene.active_preset_id = Some(to.clone());
+                    }
+                    write_show_file(&root, &show.definition)?;
+                }
+                if self.applied_scene_id.as_deref() == Some(from.as_str()) {
+                    self.applied_scene_id = Some(to.clone());
+                }
+                if let Some(slot) = self
+                    .preset_store
+                    .presets
+                    .iter_mut()
+                    .find(|(name, _)| name == &from)
+                {
+                    slot.0 = to;
+                }
+                return Ok(());
+            }
+        }
+        let user_from =
+            crate::preset::store::PresetStore::presets_dir().join(format!("{from}.json"));
+        if user_from.is_file() {
+            let user_to =
+                crate::preset::store::PresetStore::presets_dir().join(format!("{to}.json"));
+            if user_to.exists() {
+                return Err(format!("A scene named {to} already exists"));
+            }
+            std::fs::rename(&user_from, &user_to).map_err(|err| err.to_string())?;
+            if let Some(slot) = self
+                .preset_store
+                .presets
+                .iter_mut()
+                .find(|(name, _)| name == &from)
+            {
+                slot.0 = to;
+            }
+            return Ok(());
+        }
+        Err(format!("{from} is not a scene file"))
+    }
+
+    pub fn delete_preset(&mut self, name: &str) -> Result<(), String> {
+        let name = scene_name(name)?;
+        if self
+            .preset_store
+            .presets
+            .iter()
+            .take(self.preset_store.builtin_count)
+            .any(|(existing, _)| existing == &name)
+        {
+            return Err(format!("{name} is a built-in scene"));
+        }
+
+        let mut removed_file = false;
+        if let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) {
+            let preset_path = root.join("presets").join(format!("{name}.json"));
+            if preset_path.is_file() {
+                std::fs::remove_file(&preset_path).map_err(|err| err.to_string())?;
+                let _ = std::fs::remove_file(
+                    root.join("palette-bindings").join(format!("{name}.json")),
+                );
+                let _ = std::fs::remove_file(
+                    root.join("audio-bindings")
+                        .join(format!("{name}.bindings.json")),
+                );
+                removed_file = true;
+            }
+        }
+        let user_path =
+            crate::preset::store::PresetStore::presets_dir().join(format!("{name}.json"));
+        if user_path.is_file() {
+            std::fs::remove_file(&user_path).map_err(|err| err.to_string())?;
+            removed_file = true;
+        }
+        let in_list = self
+            .preset_store
+            .presets
+            .iter()
+            .any(|(existing, _)| existing == &name);
+        if !removed_file && !in_list {
+            return Err(format!("{name} is not a scene file"));
+        }
+        if let Some(index) = self
+            .preset_store
+            .presets
+            .iter()
+            .position(|(existing, _)| existing == &name)
+        {
+            self.preset_store.presets.remove(index);
+            match self.preset_store.current_preset {
+                Some(current) if current == index => self.preset_store.current_preset = None,
+                Some(current) if current > index => {
+                    self.preset_store.current_preset = Some(current - 1);
+                }
+                _ => {}
+            }
+        }
+        if let Some(show) = self.show.as_mut() {
+            let on_clock = show
+                .definition
+                .scene_track
+                .iter()
+                .any(|cue| cue.preset_id == name);
+            if on_clock {
+                show.definition
+                    .scene_track
+                    .retain(|cue| cue.preset_id != name);
+                let elapsed = show.clock.elapsed().as_secs().min(u64::from(u32::MAX)) as u32;
+                show.scene.last_processed_scheduled_index =
+                    crate::show::scheduler::SceneScheduler::scheduled_index(
+                        &show.definition.scene_track,
+                        elapsed,
+                    );
+                write_show_file(&show.pack_root, &show.definition)?;
+            }
+            show.bindings.remove(&name);
+            show.preset_ids.retain(|id| id != &name);
+            if show.scene.active_preset_id.as_deref() == Some(name.as_str()) {
+                show.scene.active_preset_id = None;
+            }
+        }
+        if self.applied_scene_id.as_deref() == Some(name.as_str()) {
+            self.applied_scene_id = None;
+            self.scene_dirty = false;
+            self.scene_dirty_at = None;
+        }
+        if self.requested_preset.as_deref() == Some(name.as_str()) {
+            self.requested_preset = self.applied_scene_id.clone();
+        }
+        Ok(())
+    }
+
+    pub fn rename_palette(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let from = scene_name(from)?;
+        let to = scene_name(to)?;
+        if from == to {
+            return Ok(());
+        }
+        let Some(show) = self.show.as_mut() else {
+            return Err("No show pack is open".into());
+        };
+        if show.palettes.contains_key(&to) {
+            return Err(format!("A palette named {to} already exists"));
+        }
+        let Some(mut palette) = show.palettes.remove(&from) else {
+            return Err(format!("{from} is not a palette"));
+        };
+        let root = show.pack_root.clone();
+        let from_path = root.join("palettes").join(format!("{from}.json"));
+        let to_path = root.join("palettes").join(format!("{to}.json"));
+        if to_path.exists() {
+            show.palettes.insert(from.clone(), palette);
+            return Err(format!("A palette named {to} already exists"));
+        }
+        palette.id = to.clone();
+        palette.name = to.clone();
+        if from_path.is_file() {
+            if let Err(err) = std::fs::rename(&from_path, &to_path) {
+                show.palettes.insert(from, palette);
+                return Err(err.to_string());
+            }
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&palette) {
+            let _ = std::fs::write(&to_path, json);
+        }
+        for cue in &mut show.definition.palette_track {
+            if cue.palette_id == from {
+                cue.palette_id = to.clone();
+            }
+        }
+        if show.palette.active_palette_id.as_deref() == Some(from.as_str()) {
+            show.palette.active_palette_id = Some(to.clone());
+        }
+        show.palettes.insert(to, palette);
+        write_show_file(&root, &show.definition)
+    }
+
     /// True when a manual scene change must not run yet.
     ///
     /// Prepare saves first and blocks the switch when that save fails.
@@ -3225,7 +3582,11 @@ impl App {
             self.status_error = Some((format!("Save failed: {message}"), Instant::now()));
             return Err(message);
         }
-        if let Some(set) = self.show.as_ref().and_then(|show| show.bindings.get(id).cloned()) {
+        if let Some(set) = self
+            .show
+            .as_ref()
+            .and_then(|show| show.bindings.get(id).cloned())
+        {
             if let Err(err) = crate::palette::bindings::save_set(&pack_root, &set) {
                 self.status_error = Some((
                     format!("Scene saved, but the palette binding was not: {err}"),
@@ -3234,7 +3595,12 @@ impl App {
             }
         }
         crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
-        if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == id) {
+        if let Some(index) = self
+            .preset_store
+            .presets
+            .iter()
+            .position(|(name, _)| name == id)
+        {
             self.preset_store.current_preset = Some(index);
         }
         self.scene_dirty = false;
@@ -3277,20 +3643,21 @@ impl App {
         self.post_process.grade.enabled = workspace.grade_enabled;
         self.post_process.grade.strength = workspace.grade_strength;
         let known = |id: &str| self.preset_store.presets.iter().any(|(name, _)| name == id);
-        let scene = workspace
-            .scene
-            .filter(|id| known(id))
-            .or_else(|| {
-                self.show
-                    .as_ref()
-                    .and_then(|show| show.definition.scene_track.first())
-                    .map(|cue| cue.preset_id.clone())
-            });
+        let scene = workspace.scene.filter(|id| known(id)).or_else(|| {
+            self.show
+                .as_ref()
+                .and_then(|show| show.definition.scene_track.first())
+                .map(|cue| cue.preset_id.clone())
+        });
         if let Some(id) = scene {
             if let Some(show) = self.show.as_mut() {
                 show.scene.manual_set_preset(id.clone());
             }
-            if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == &id)
+            if let Some(index) = self
+                .preset_store
+                .presets
+                .iter()
+                .position(|(name, _)| name == &id)
             {
                 self.load_preset(index);
             }
@@ -3330,7 +3697,9 @@ impl App {
     }
 
     fn autosave_if_due(&mut self, now: Instant) {
-        if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare || !self.scene_dirty {
+        if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare
+            || !self.scene_dirty
+        {
             return;
         }
         if matches!(
@@ -3426,10 +3795,10 @@ impl App {
         // content (music = motion/energy, never palette-owned color params),
         // versioned with the pack, and portable across machines. Falls back to
         // the config-dir sidecar when the pack ships none for this preset.
-        let pack_sidecar: Option<std::path::PathBuf> = self
-            .show
-            .as_ref()
-            .map(|show| show.pack_root.join(format!("audio-bindings/{preset_name}.bindings.json")));
+        let pack_sidecar: Option<std::path::PathBuf> = self.show.as_ref().map(|show| {
+            show.pack_root
+                .join(format!("audio-bindings/{preset_name}.bindings.json"))
+        });
         match pack_sidecar {
             Some(path) if path.is_file() => {
                 self.binding_bus.load_preset_bindings_from(&path);
@@ -4225,8 +4594,8 @@ impl App {
         blackout: bool,
         ui: &mut egui::Ui,
     ) -> ShowUiAction {
-        use crate::ui::panels::palette_panel::{draw_palette_panel, PalettePanelAction};
-        use crate::ui::panels::show_panel::{draw_show_panel, ShowPanelAction};
+        use crate::ui::panels::palette_panel::{PalettePanelAction, draw_palette_panel};
+        use crate::ui::panels::show_panel::{ShowPanelAction, draw_show_panel};
         let Some(show) = show else {
             return ShowUiAction::none();
         };
@@ -4327,8 +4696,9 @@ impl App {
                                 &controller.pack_root,
                                 stored,
                             ),
-                            estimated_ram_bytes:
-                                crate::show::validation::estimate_rgba_ram(1280, 720, 15.0, 8.0),
+                            estimated_ram_bytes: crate::show::validation::estimate_rgba_ram(
+                                1280, 720, 15.0, 8.0,
+                            ),
                         });
                     }
                 }
@@ -4372,15 +4742,13 @@ impl App {
                         continue;
                     }
                     match &b.target {
-                        crate::bindings::types::BindingTarget::Param {
-                            layer,
-                            param,
-                            ..
-                        } => pack_audio_targets.push((
-                            format!("audio-bindings({preset_id})"),
-                            *layer,
-                            param.clone(),
-                        )),
+                        crate::bindings::types::BindingTarget::Param { layer, param, .. } => {
+                            pack_audio_targets.push((
+                                format!("audio-bindings({preset_id})"),
+                                *layer,
+                                param.clone(),
+                            ))
+                        }
                         crate::bindings::types::BindingTarget::LegacyParam { param, .. } => {
                             pack_audio_targets.push((
                                 format!("audio-bindings({preset_id})"),
@@ -4398,22 +4766,15 @@ impl App {
                     continue;
                 }
                 match &b.target {
-                    crate::bindings::types::BindingTarget::Param {
-                        layer,
-                        param,
-                        ..
-                    } => external.push((
-                        format!("binding-bus({})", b.source),
-                        *layer,
-                        param.clone(),
-                    )),
-                    crate::bindings::types::BindingTarget::LegacyParam {
-                        param, ..
-                    } => external.push((
-                        format!("binding-bus({})", b.source),
-                        self.layer_stack.active_layer,
-                        param.clone(),
-                    )),
+                    crate::bindings::types::BindingTarget::Param { layer, param, .. } => {
+                        external.push((format!("binding-bus({})", b.source), *layer, param.clone()))
+                    }
+                    crate::bindings::types::BindingTarget::LegacyParam { param, .. } => external
+                        .push((
+                            format!("binding-bus({})", b.source),
+                            self.layer_stack.active_layer,
+                            param.clone(),
+                        )),
                     _ => {}
                 }
             }
@@ -4578,27 +4939,22 @@ impl App {
                     // go through `TimelineEvent` so the render path captures
                     // the outgoing frame (see `dissolve_capture_pending`).
                     let from = self.timeline.current_cue_index();
-                    let tl_event = if action.kind
-                        == crate::show::definition::TransitionKind::Cut
-                    {
+                    let tl_event = if action.kind == crate::show::definition::TransitionKind::Cut {
                         // Align cursor then load directly: `go_to_cue` on a
                         // Cut cue already emits `LoadCue`, which
                         // `process_timeline_event` handles.
                         self.timeline.go_to_cue(idx)
                     } else {
                         let cue = &self.timeline.cues[idx];
-                        self.timeline.state = crate::scene::timeline::PlaybackState::Transitioning {
-                            from_cue: from.min(self.timeline.cues.len().saturating_sub(1)),
-                            to_cue: idx,
-                            progress: 0.0,
-                            transition_type: cue.transition,
-                            duration: action.duration_ms as f32 / 1000.0,
-                        };
-                        crate::show::timeline_event_for_cue(
-                            idx,
-                            action.kind,
-                            action.duration_ms,
-                        )
+                        self.timeline.state =
+                            crate::scene::timeline::PlaybackState::Transitioning {
+                                from_cue: from.min(self.timeline.cues.len().saturating_sub(1)),
+                                to_cue: idx,
+                                progress: 0.0,
+                                transition_type: cue.transition,
+                                duration: action.duration_ms as f32 / 1000.0,
+                            };
+                        crate::show::timeline_event_for_cue(idx, action.kind, action.duration_ms)
                     };
                     self.process_timeline_event(tl_event);
                 } else if let Some(preset_idx) = self
@@ -4618,15 +4974,15 @@ impl App {
         }
     }
 
-fn slot_rgb(
-    colors: &std::collections::HashMap<String, crate::params::ParamValue>,
-    slot: &str,
-) -> Option<[f32; 3]> {
-    match colors.get(slot) {
-        Some(crate::params::ParamValue::Color(c)) => Some([c[0], c[1], c[2]]),
-        _ => None,
+    fn slot_rgb(
+        colors: &std::collections::HashMap<String, crate::params::ParamValue>,
+        slot: &str,
+    ) -> Option<[f32; 3]> {
+        match colors.get(slot) {
+            Some(crate::params::ParamValue::Color(c)) => Some([c[0], c[1], c[2]]),
+            _ => None,
+        }
     }
-}
 
     /// Route an interpolated slot→color map through the active preset's
     /// `PaletteBindingSet` and write via `set_runtime` (never dirty).
@@ -4634,7 +4990,10 @@ fn slot_rgb(
     /// Fallback rule (MVP): when the active preset has no binding set, the
     /// first set in the pack applies — every Hibernation preset ships one,
     /// so this only fires for ad-hoc packs.
-    pub fn apply_palette_map(&mut self, colors: std::collections::HashMap<String, crate::params::ParamValue>) {
+    pub fn apply_palette_map(
+        &mut self,
+        colors: std::collections::HashMap<String, crate::params::ParamValue>,
+    ) {
         // Whole-frame grade roles. color-5 and color-6 stay on the per-effect
         // bindings (highlights and line work) and are not consumed here.
         if let Some(c) = Self::slot_rgb(&colors, "color-1") {
@@ -5637,6 +5996,28 @@ fn changes_touch_effect(
             .particles
             .as_ref()
             .is_some_and(|pd| touches(&pd.compute_shader))
+}
+
+fn scene_name(id: &str) -> Result<String, String> {
+    crate::show::scene_file::scene_file_stem(id).map_err(|err| err.to_string())
+}
+
+fn rename_if_present(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    if !from.is_file() {
+        return Ok(());
+    }
+    if to.exists() {
+        return Err(format!("{} already exists", to.display()));
+    }
+    std::fs::rename(from, to).map_err(|err| err.to_string())
+}
+
+fn write_show_file(
+    root: &std::path::Path,
+    definition: &crate::show::definition::ShowDefinition,
+) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(definition).map_err(|err| err.to_string())?;
+    std::fs::write(root.join("show.json"), json).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

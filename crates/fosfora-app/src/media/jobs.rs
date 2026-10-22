@@ -237,7 +237,11 @@ fn run_job(job: MediaJob, budget: &MediaBudget) -> MediaJobResult {
         outcome: MediaJobOutcome::Refused(message),
     };
     // ffprobe each clip before any frame is decoded.
-    let plans: Vec<ClipPlan> = job.paths.iter().map(|path| library::plan_clip(path)).collect();
+    let plans: Vec<ClipPlan> = job
+        .paths
+        .iter()
+        .map(|path| library::plan_clip(path))
+        .collect();
     if let Some(message) = library::admission_error(
         crate::bindings::catalog::MAX_LAYERS - job.free_slots,
         budget.available(),
@@ -319,7 +323,8 @@ mod tests {
         let budget = Arc::new(MediaBudget::new(20_000));
         budget.set_resident(10_000);
         let mut jobs = MediaJobs::new(budget.clone());
-        jobs.submit(1, MediaTarget::Add, vec![still.clone()], 4).unwrap();
+        jobs.submit(1, MediaTarget::Add, vec![still.clone()], 4)
+            .unwrap();
         let result = loop {
             if let Some(result) = jobs.try_recv() {
                 break result;
@@ -327,7 +332,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
         match result.outcome {
-            MediaJobOutcome::Refused(message) => assert!(message.contains("memory budget"), "{message}"),
+            MediaJobOutcome::Refused(message) => {
+                assert!(message.contains("memory budget"), "{message}")
+            }
             MediaJobOutcome::Ready(_) => panic!("decoded past the budget"),
         }
         assert_eq!(budget.in_flight(), 0);

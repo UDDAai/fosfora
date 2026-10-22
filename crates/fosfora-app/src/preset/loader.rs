@@ -234,7 +234,10 @@ impl PresetLoader {
                     }
                 }
                 if let Err(message) = budget.reserve(reserved) {
-                    log::warn!("Preset '{}' refused before decode: {message}", request.preset_index);
+                    log::warn!(
+                        "Preset '{}' refused before decode: {message}",
+                        request.preset_index
+                    );
                     let result = PresetDecodeResult {
                         preset_index: request.preset_index,
                         preset: request.preset,
@@ -483,10 +486,17 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
-        assert_eq!(applied, Some(2), "the last requested preset must be the one applied");
+        assert_eq!(
+            applied,
+            Some(2),
+            "the last requested preset must be the one applied"
+        );
         assert!(matches!(loader.state, PresetLoadingState::Idle));
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(loader.try_recv().is_none(), "a later decode must not overwrite C");
+        assert!(
+            loader.try_recv().is_none(),
+            "a later decode must not overwrite C"
+        );
         assert!(matches!(loader.state, PresetLoadingState::Idle));
     }
 
@@ -499,7 +509,8 @@ mod tests {
 
     #[test]
     fn a_scene_that_cannot_fit_beside_the_current_one_is_refused_before_decode() {
-        let dir = std::env::temp_dir().join(format!("fosfora-loader-budget-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fosfora-loader-budget-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let still = dir.join("plate.png");
         image::RgbaImage::new(32, 32).save(&still).unwrap();
@@ -511,7 +522,12 @@ mod tests {
         let mut loader = PresetLoader::with_budget(budget.clone());
         loader.request_load(0, empty_preset(), vec![(0, still.clone())], "Big".into());
         let result = wait_for(&mut loader);
-        assert!(result.refused.as_deref().is_some_and(|m| m.contains("Scene not loaded")));
+        assert!(
+            result
+                .refused
+                .as_deref()
+                .is_some_and(|m| m.contains("Scene not loaded"))
+        );
         assert!(result.decoded_media.is_empty(), "nothing may be decoded");
         assert_eq!(budget.in_flight(), 0);
 

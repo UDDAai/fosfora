@@ -1,9 +1,9 @@
 pub mod client;
 pub mod server;
-pub mod upload;
 #[allow(dead_code)]
 pub mod state;
 pub mod types;
+pub mod upload;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -179,6 +179,21 @@ impl WebSystem {
                 WsInMessage::LoadEffect { index } => {
                     result.effect_loads.push(index);
                 }
+                WsInMessage::ClearLayerEffect { index } => {
+                    result.clear_effects.push(index);
+                }
+                WsInMessage::SavePreset { name } => {
+                    result.save_preset_name = Some(name);
+                }
+                WsInMessage::RenamePreset { from, to } => {
+                    result.rename_preset = Some((from, to));
+                }
+                WsInMessage::DeletePreset { name } => {
+                    result.delete_preset = Some(name);
+                }
+                WsInMessage::RenamePalette { from, to } => {
+                    result.rename_palette = Some((from, to));
+                }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
@@ -237,7 +252,13 @@ impl WebSystem {
                 WsInMessage::SetWorkspaceMode { mode } => {
                     result.workspace_mode = Some(mode);
                 }
-                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                WsInMessage::SetMediaPlace {
+                    layer,
+                    fit,
+                    width,
+                    x,
+                    y,
+                } => {
                     result.media_place.push((layer, fit, width, x, y));
                 }
                 WsInMessage::SetGrade { strength, enabled } => {
@@ -326,6 +347,21 @@ impl WebSystem {
                 WsInMessage::LoadEffect { index } => {
                     result.effect_loads.push(index);
                 }
+                WsInMessage::ClearLayerEffect { index } => {
+                    result.clear_effects.push(index);
+                }
+                WsInMessage::SavePreset { name } => {
+                    result.save_preset_name = Some(name);
+                }
+                WsInMessage::RenamePreset { from, to } => {
+                    result.rename_preset = Some((from, to));
+                }
+                WsInMessage::DeletePreset { name } => {
+                    result.delete_preset = Some(name);
+                }
+                WsInMessage::RenamePalette { from, to } => {
+                    result.rename_palette = Some((from, to));
+                }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
@@ -384,7 +420,13 @@ impl WebSystem {
                 WsInMessage::SetWorkspaceMode { mode } => {
                     result.workspace_mode = Some(mode);
                 }
-                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                WsInMessage::SetMediaPlace {
+                    layer,
+                    fit,
+                    width,
+                    x,
+                    y,
+                } => {
                     result.media_place.push((layer, fit, width, x, y));
                 }
                 WsInMessage::SetGrade { strength, enabled } => {

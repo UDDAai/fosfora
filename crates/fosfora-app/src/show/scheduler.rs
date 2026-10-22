@@ -1,4 +1,4 @@
-use super::definition::{scheduled_index, SceneCue, TransitionKind};
+use super::definition::{SceneCue, TransitionKind, scheduled_index};
 
 /// Edge-triggered scene scheduler. Manual NEXT/PREV changes the active visual
 /// without moving `last_processed_scheduled_index`.
@@ -47,7 +47,11 @@ impl SceneScheduler {
         self.active_preset_id = Some(preset_id);
     }
 
-    pub fn seek_snap(&mut self, cues: &[SceneCue], elapsed_secs: u32) -> Option<ScheduledSceneAction> {
+    pub fn seek_snap(
+        &mut self,
+        cues: &[SceneCue],
+        elapsed_secs: u32,
+    ) -> Option<ScheduledSceneAction> {
         let idx = Self::scheduled_index(cues, elapsed_secs);
         self.last_processed_scheduled_index = idx;
         let cue = idx.and_then(|i| cues.get(i))?;
@@ -153,9 +157,6 @@ mod tests {
         assert_eq!(SceneScheduler::scheduled_index(&cues, 20 * 60 - 1), Some(0));
         assert_eq!(SceneScheduler::scheduled_index(&cues, 20 * 60), Some(1));
         // 8s dissolve does not shift the next cue
-        assert_eq!(
-            SceneScheduler::scheduled_index(&cues, 20 * 60 + 8),
-            Some(1)
-        );
+        assert_eq!(SceneScheduler::scheduled_index(&cues, 20 * 60 + 8), Some(1));
     }
 }

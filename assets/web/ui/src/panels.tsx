@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import type { DragEvent, PointerEvent, ReactNode } from 'react'
-import { GripVertical, Info, Trash2 } from 'lucide-react'
+import { GripVertical, Info, Pause, Play, Square, Star, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -29,6 +29,58 @@ import { HeldSlider } from '@/held-slider'
 import { useFosfora } from '@/fosfora/client'
 import { BLENDS, clock } from '@/fosfora/types'
 import type { LayerState, LibraryItem } from '@/fosfora/types'
+
+const STARS_KEY = 'fosfora-stars'
+
+function readStars() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STARS_KEY) || '[]')
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : []
+  } catch {
+    return [] as string[]
+  }
+}
+
+function useStars() {
+  const [stars, setStars] = useState<string[]>(readStars)
+  function toggle(key: string) {
+    setStars((current) => {
+      const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+      localStorage.setItem(STARS_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+  return { stars, toggle }
+}
+
+function starKeyForLayer(layer: LayerState) {
+  if (layer.effect_name) return `effect:${layer.effect_name}`
+  if (layer.media_name) return `media:${layer.media_name}`
+  return `layer:${layer.name}`
+}
+
+function StarMark({ on, label, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={on ? `Unstar ${label}` : `Star ${label}`}
+      title={on ? `Unstar ${label}` : `Star ${label}`}
+      className={`inline-flex size-7 shrink-0 items-center justify-center rounded-md ${on ? 'text-amber-400' : 'text-muted-foreground hover:text-foreground'}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        onToggle()
+      }}
+    >
+      <Star className={`size-4 ${on ? 'fill-current' : ''}`} />
+    </button>
+  )
+}
+
+function swatchCss(rgba: number[]) {
+  const [r = 0, g = 0, b = 0, a = 1] = rgba
+  return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`
+}
 
 function activeLayer(layers: LayerState[], index: number) {
   return layers[index]
@@ -117,7 +169,9 @@ function neighborShift(index: number, drag: LayerDrag | null) {
 
 export function LayersPanel() {
   const { state, send } = useFosfora()
+  const { stars, toggle } = useStars()
   const layers = state?.layers ?? []
+  const [presetName, setPresetName] = useState('')
   const cards = useRef<Array<HTMLDivElement | null>>([])
   const dragRef = useRef<LayerDrag | null>(null)
   const [drag, setDrag] = useState<LayerDrag | null>(null)
@@ -204,7 +258,7 @@ export function LayersPanel() {
           <span className="text-sm font-medium">Layers</span>
           <SectionInfo
             label="About layers"
-            text="Click a layer to choose what Look and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. This works from a second window on this same page. Solo shows only the selected layer and is not saved."
+            text="Click a layer to choose what Look and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. This works from a second window on this same page. Solo shows only the selected layer and is not saved. The star remembers a layer or its effect on this computer."
           />
         </div>
         <Button
@@ -217,6 +271,32 @@ export function LayersPanel() {
           {state?.solo_layer != null ? 'Exit solo' : 'Solo selected'}
         </Button>
       </div>
+      <div className="flex items-center gap-2">
+        <Input
+          value={presetName}
+          placeholder="Name this composition"
+          aria-label="Preset name"
+          onChange={(event) => setPresetName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && presetName.trim()) {
+              send({ type: 'save_preset', name: presetName.trim() })
+              setPresetName('')
+            }
+          }}
+        />
+        <Button
+          disabled={!presetName.trim()}
+          onClick={() => {
+            send({ type: 'save_preset', name: presetName.trim() })
+            setPresetName('')
+          }}
+        >
+          Save as preset
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Save scene in the header writes the open scene under its current name. This stores a new named copy of these layers.
+      </p>
       <div
         className={`rounded-xl border border-dashed px-3 py-2 text-center text-xs ${dropAt === 'new' ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground'}`}
         onDragEnter={(event) => takeMedia(event, 'new')}
@@ -283,6 +363,23 @@ export function LayersPanel() {
                     {dropAt === index ? <span className="text-xs text-muted-foreground">Replace</span> : null}
                   </div>
                 </div>
+                {layer.effect_name && !layer.locked ? (
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      send({ type: 'clear_layer_effect', index })
+                    }}
+                  >
+                    Remove effect
+                  </button>
+                ) : null}
+                <StarMark
+                  on={stars.includes(starKeyForLayer(layer))}
+                  label={layer.effect_name || layer.media_name || layer.name}
+                  onToggle={() => toggle(starKeyForLayer(layer))}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${layer.name}`}
@@ -299,6 +396,7 @@ export function LayersPanel() {
                 <Switch
                   checked={layer.enabled}
                   disabled={layer.locked}
+                  className="data-unchecked:!bg-red-600 data-checked:!bg-green-600"
                   onClick={(event) => event.stopPropagation()}
                   onCheckedChange={(checked) =>
                     send({ type: 'set_layer_enabled', layer: index, value: checked })
@@ -368,11 +466,17 @@ export function LayersPanel() {
             </ContextMenuSub>
             <ContextMenuSeparator />
             <ContextMenuItem
+              disabled={!layer.effect_name || layer.locked}
+              onSelect={() => send({ type: 'clear_layer_effect', index })}
+            >
+              Remove effect
+            </ContextMenuItem>
+            <ContextMenuItem
               variant="destructive"
               disabled={removeLocked}
               onSelect={() => send({ type: 'remove_layer', index })}
             >
-              Remove
+              Remove layer
             </ContextMenuItem>
           </ContextMenuContent>
           </ContextMenu>
@@ -385,11 +489,16 @@ export function LayersPanel() {
 
 export function LookPanel() {
   const { state, send } = useFosfora()
+  const { stars, toggle } = useStars()
   const layer = state ? activeLayer(state.layers, state.active_layer) : undefined
   const [query, setQuery] = useState('')
-  const effects = (state?.effects ?? []).filter((effect) =>
-    effect.name.toLowerCase().includes(query.trim().toLowerCase()),
-  )
+  const effects = (state?.effects ?? [])
+    .filter((effect) => effect.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((left, right) => {
+      const leftStar = stars.includes(`effect:${left.name}`) ? 0 : 1
+      const rightStar = stars.includes(`effect:${right.name}`) ? 0 : 1
+      return leftStar - rightStar
+    })
 
   return (
     <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
@@ -399,7 +508,7 @@ export function LookPanel() {
             Effects
             <SectionInfo
               label="About effects"
-              text="Loads onto the layer you selected on Layers. The highlighted name is the effect already on that layer. Choosing one replaces the look on that layer and leaves the other layers as they are."
+              text="Loads onto the layer you selected on Layers. The highlighted name is the effect already on that layer. Choosing one replaces the look on that layer and leaves the other layers as they are. Star an effect to keep it at the top of this list."
             />
           </CardTitle>
           <CardDescription>Loads onto {layer?.name ?? 'the selected layer'}.</CardDescription>
@@ -409,14 +518,20 @@ export function LookPanel() {
           <ScrollArea className="h-[28rem]">
             <div className="flex flex-col gap-1 pr-3">
               {effects.map((effect) => (
-                <Button
-                  key={effect.index}
-                  variant={layer?.effect_name === effect.name ? 'secondary' : 'ghost'}
-                  className="justify-start"
-                  onClick={() => send({ type: 'load_effect', index: effect.index })}
-                >
-                  {effect.name}
-                </Button>
+                <div key={effect.index} className="flex items-center gap-1">
+                  <Button
+                    variant={layer?.effect_name === effect.name ? 'secondary' : 'ghost'}
+                    className="min-w-0 flex-1 justify-start"
+                    onClick={() => send({ type: 'load_effect', index: effect.index })}
+                  >
+                    <span className="truncate">{effect.name}</span>
+                  </Button>
+                  <StarMark
+                    on={stars.includes(`effect:${effect.name}`)}
+                    label={effect.name}
+                    onToggle={() => toggle(`effect:${effect.name}`)}
+                  />
+                </div>
               ))}
             </div>
           </ScrollArea>
@@ -742,7 +857,7 @@ export function LibraryPanel() {
           Library
           <SectionInfo
             label="About the library"
-            text="Drag a file here from Finder to register it where it already is. Nothing is copied. Drop a library item on the Layers page to replace a layer, or on the dashed row to add one. The trash icon removes it from this list. A file a scene still uses is kept. Upload is separate: that button does copy the file into the show."
+            text="Drag a file here from Finder to register it where it already is. Nothing is copied. Drop a library item on the Layers page to replace a layer, or on the dashed row to add one. The trash icon hides it from this list and leaves the original file where it is. A file a scene still uses stays in the list. Upload is separate: that button does copy the file into the show."
           />
         </CardTitle>
         <CardDescription>
@@ -844,9 +959,7 @@ export function LibraryPanel() {
                     title={
                       item.scenes && item.scenes.length > 0
                         ? `Used by ${item.scenes.join(', ')}`
-                        : item.location === 'linked'
-                          ? `Remove ${item.name} from the library. The file stays where it is.`
-                          : `Remove ${item.name} from the show media folder`
+                        : `Hide ${item.name} from the library. The file stays where it is.`
                     }
                     className="text-muted-foreground hover:text-destructive"
                     onClick={() => send({ type: 'remove_library_item', id: item.id })}
@@ -880,7 +993,7 @@ export function ShowPanel() {
             {show?.loaded ? clock(show.elapsed_ms) : 'No show'}
             <SectionInfo
               label="About the show"
-              text="The show clock moves scenes and palettes on its own after Start. Prev and next step the scene or palette by hand. Blackout cuts the output. Palette auto lets the schedule choose colours again."
+              text="The show clock moves scenes and palettes on its own after Start. Each cue is an absolute time in show.json. Prev and next step the scene or palette by hand. Blackout cuts the output. Palette auto lets the schedule choose colours again. Right-click a palette to rename it. Right-click a scene to rename or remove it."
             />
           </CardTitle>
           <CardDescription>{show?.validation || 'Open a show pack in Fosfora.'}</CardDescription>
@@ -888,23 +1001,51 @@ export function ShowPanel() {
         <CardContent className="space-y-4">
           <div className="flex justify-between text-sm">
             <span>{show?.scene || 'Scene'}</span>
-            <span className="text-muted-foreground">{show?.next_scene ? `next ${show.next_scene}` : ''}</span>
+            <span className="text-muted-foreground">
+              {show?.next_scene
+                ? `next ${show.next_scene}${show.next_scene_secs != null ? ` at ${clock(show.next_scene_secs * 1000)}` : ''}`
+                : ''}
+            </span>
           </div>
           <div className="flex justify-between text-sm">
             <span>{show?.palette || 'Palette'}</span>
             <Badge variant="secondary">{show?.palette_manual ? 'Manual' : 'Auto'}</Badge>
           </div>
           <div className="flex flex-wrap gap-2">
-            {(show?.palettes ?? []).map((id) => (
-              <Button
-                key={id}
-                size="sm"
-                variant={show?.palette === id ? 'default' : 'outline'}
-                onClick={() => showAction('select_palette', { id })}
-              >
-                {id}
-              </Button>
-            ))}
+            {(show?.palettes ?? []).map((id) => {
+              const strip = show?.palette_colors?.find((entry) => entry.id === id)
+              return (
+                <ContextMenu key={id}>
+                  <ContextMenuTrigger asChild>
+                    <div className="flex w-40 flex-col gap-1">
+                      <div className="flex h-1.5 overflow-hidden rounded-full bg-muted">
+                        {(strip?.colors ?? []).map((rgba, swatch) => (
+                          <span key={swatch} className="h-full flex-1" style={{ background: swatchCss(rgba) }} />
+                        ))}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant={show?.palette === id ? 'default' : 'outline'}
+                        onClick={() => showAction('select_palette', { id })}
+                      >
+                        <span className="truncate">{id}</span>
+                      </Button>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem
+                      onSelect={() => {
+                        const next = window.prompt('Rename palette', id)
+                        if (!next || next.trim() === id) return
+                        send({ type: 'rename_palette', from: id, to: next.trim() })
+                      }}
+                    >
+                      Rename
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
+              )
+            })}
           </div>
           <Field label="Palette strength" value={`${grade}%`}>
             <HeldSlider
@@ -919,11 +1060,35 @@ export function ShowPanel() {
             <Button variant="outline" onClick={() => showAction('next_visual')}>Scene next</Button>
             <Button variant="outline" onClick={() => showAction('prev_palette')}>Palette prev</Button>
             <Button variant="outline" onClick={() => showAction('next_palette')}>Palette next</Button>
-            <Button variant="outline" onClick={() => showAction('start')}>Start</Button>
-            <Button variant="outline" onClick={() => showAction('pause')}>Pause</Button>
-            <Button variant="outline" onClick={() => showAction('resume')}>Resume</Button>
-            <Button variant="outline" onClick={() => showAction('stop_auto')}>Stop auto</Button>
-            <Button variant="outline" onClick={() => showAction('reset')}>Reset</Button>
+            <Button
+              className={show?.transport !== 'running' && show?.transport !== 'paused' ? '!bg-green-700 !text-white hover:!bg-green-600' : ''}
+              variant={show?.transport !== 'running' && show?.transport !== 'paused' ? 'default' : 'outline'}
+              onClick={() => showAction('start')}
+            >
+              <Play />
+              Start
+            </Button>
+            <Button
+              className={show?.transport === 'running' ? '!bg-amber-600 !text-white hover:!bg-amber-500' : ''}
+              variant={show?.transport === 'running' ? 'default' : 'outline'}
+              onClick={() => showAction('pause')}
+            >
+              <Pause />
+              Pause
+            </Button>
+            <Button
+              className={show?.transport === 'paused' ? '!bg-green-700 !text-white hover:!bg-green-600' : ''}
+              variant={show?.transport === 'paused' ? 'default' : 'outline'}
+              onClick={() => showAction('resume')}
+            >
+              <Play />
+              Resume
+            </Button>
+            <Button className="!bg-red-700 !text-white hover:!bg-red-600" onClick={() => showAction('stop_auto')}>
+              <Square />
+              Stop
+            </Button>
+            <Button variant="outline" onClick={() => showAction('reset')}>Back to start</Button>
             <Button variant={show?.blackout ? 'destructive' : 'outline'} onClick={() => showAction('toggle_blackout')}>
               {show?.blackout ? 'Blackout on' : 'Blackout off'}
             </Button>
@@ -952,17 +1117,45 @@ export function ShowPanel() {
                 const waiting =
                   state?.requested_preset === preset.name && !applied && !loading
                 return (
-                  <Button
-                    key={preset.index}
-                    variant={applied ? 'secondary' : 'ghost'}
-                    className="justify-start"
-                    onClick={() => send({ type: 'load_preset', index: preset.index })}
-                  >
-                    {preset.name}
-                    {loading ? ' · loading' : ''}
-                    {waiting ? ' · queued' : ''}
-                    {preset.builtin ? <Badge variant="outline">Built-in</Badge> : null}
-                  </Button>
+                  <ContextMenu key={preset.index}>
+                    <ContextMenuTrigger asChild>
+                      <Button
+                        variant={applied ? 'secondary' : 'ghost'}
+                        className="justify-start"
+                        onClick={() => send({ type: 'load_preset', index: preset.index })}
+                      >
+                        {preset.name}
+                        {loading ? ' · loading' : ''}
+                        {waiting ? ' · queued' : ''}
+                        {preset.builtin ? <Badge variant="outline">Built-in</Badge> : null}
+                      </Button>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem
+                        disabled={preset.builtin}
+                        onSelect={() => {
+                          const next = window.prompt('Rename scene', preset.name)
+                          if (!next || next.trim() === preset.name) return
+                          send({ type: 'rename_preset', from: preset.name, to: next.trim() })
+                        }}
+                      >
+                        Rename
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        variant="destructive"
+                        disabled={preset.builtin}
+                        onSelect={() => {
+                          const ok = window.confirm(
+                            `Remove “${preset.name}”? The saved scene is deleted. If it is on the show clock, that cue is removed too. The picture stays as it is.`,
+                          )
+                          if (!ok) return
+                          send({ type: 'delete_preset', name: preset.name })
+                        }}
+                      >
+                        Remove
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 )
               })}
             </div>

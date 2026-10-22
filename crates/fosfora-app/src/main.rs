@@ -23,9 +23,9 @@ mod osc;
     all(target_os = "macos", feature = "syphon")
 ))]
 mod output;
+mod palette;
 mod params;
 mod paths;
-mod palette;
 mod preset;
 mod recording;
 mod scene;

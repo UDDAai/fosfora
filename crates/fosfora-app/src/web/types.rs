@@ -17,6 +17,16 @@ pub enum WsInMessage {
     },
     /// Load an effect by index on the active layer.
     LoadEffect { index: usize },
+    /// Take the effect off one layer and leave the layer in the stack.
+    ClearLayerEffect { index: usize },
+    /// Store the live stack as a new named preset.
+    SavePreset { name: String },
+    /// Rename a scene file. Built-in presets stay as they are.
+    RenamePreset { from: String, to: String },
+    /// Delete a scene file. Built-in presets stay. A cue that names it leaves the show clock.
+    DeletePreset { name: String },
+    /// Rename a show-pack palette and the cues that name it.
+    RenamePalette { from: String, to: String },
     /// Select the active layer. Does not change visibility.
     SelectLayer { index: usize },
     /// Show only this layer until Solo is cleared. Authored `enabled` flags stay.
@@ -133,6 +143,11 @@ pub struct WebFrameResult {
     pub layer_enabled: Vec<(usize, bool)>,
     pub postprocess_enabled: Option<bool>,
     pub effect_loads: Vec<usize>,
+    pub clear_effects: Vec<usize>,
+    pub save_preset_name: Option<String>,
+    pub rename_preset: Option<(String, String)>,
+    pub delete_preset: Option<String>,
+    pub rename_palette: Option<(String, String)>,
     pub select_layer: Option<usize>,
     pub solo: Option<SoloRequest>,
     pub layer_moves: Vec<(usize, usize)>,
@@ -168,6 +183,11 @@ impl WebFrameResult {
             layer_enabled: Vec::new(),
             postprocess_enabled: None,
             effect_loads: Vec::new(),
+            clear_effects: Vec::new(),
+            save_preset_name: None,
+            rename_preset: None,
+            delete_preset: None,
+            rename_palette: None,
             select_layer: None,
             solo: None,
             layer_moves: Vec::new(),

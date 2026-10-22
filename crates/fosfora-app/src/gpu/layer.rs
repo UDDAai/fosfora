@@ -603,7 +603,11 @@ impl LayerStack {
     /// Solo shows that one layer even when its authored `enabled` flag is off.
     /// An out-of-range solo falls back to the authored mask.
     pub fn visible_indices(&self) -> Vec<usize> {
-        visible_layer_indices(self.layers.len(), |i| self.layers[i].enabled, self.solo_layer)
+        visible_layer_indices(
+            self.layers.len(),
+            |i| self.layers[i].enabled,
+            self.solo_layer,
+        )
     }
 
     pub fn active(&self) -> Option<&Layer> {
@@ -646,7 +650,19 @@ impl LayerStack {
                         m.transport.speed,
                         m.transport.looping,
                     ),
-                    _ => (false, None, false, false, false, String::new(), 1.0, 0.0, 0.0, 1.0, true),
+                    _ => (
+                        false,
+                        None,
+                        false,
+                        false,
+                        false,
+                        String::new(),
+                        1.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        true,
+                    ),
                 };
                 LayerInfo {
                     name: l.name.clone(),

@@ -43,9 +43,7 @@ pub(crate) fn apply_binding_target(
     // final word via `set_runtime` in `tick_show` (runs after this).
     if let Some(owned) = ctx.palette_owned.as_ref() {
         let blocked = match target {
-            BindingTarget::Param { layer, param, .. } => {
-                owned.contains(&(*layer, param.clone()))
-            }
+            BindingTarget::Param { layer, param, .. } => owned.contains(&(*layer, param.clone())),
             BindingTarget::LegacyParam { param, .. } => {
                 let active = ctx.layer_stack.active_layer;
                 owned.contains(&(active, param.clone()))

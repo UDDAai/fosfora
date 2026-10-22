@@ -1,6 +1,6 @@
 //! Adobe Color URL importer — query-string / form decoding only.
 
-use super::types::{Palette, Swatch, DEFAULT_SLOTS};
+use super::types::{DEFAULT_SLOTS, Palette, Swatch};
 
 /// Decode `application/x-www-form-urlencoded` (`+` and `%xx`).
 pub fn form_decode(input: &str) -> String {
@@ -10,7 +10,8 @@ pub fn form_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
             {
                 out.push(v);
                 i += 3;
@@ -61,7 +62,10 @@ pub fn import_adobe_url(url: &str, id: &str) -> Result<Palette, String> {
     let nums: Vec<f32> = rgbvalues
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<f32>().map_err(|_| format!("bad rgbvalues number '{s}'")))
+        .map(|s| {
+            s.parse::<f32>()
+                .map_err(|_| format!("bad rgbvalues number '{s}'"))
+        })
         .collect::<Result<_, _>>()?;
 
     if nums.len() < 3 || nums.len() % 3 != 0 {

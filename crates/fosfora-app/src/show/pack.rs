@@ -24,7 +24,9 @@ pub struct ShowPack {
 
 impl ShowPack {
     pub fn open(show_json: &Path) -> Result<Self> {
-        let show_json = show_json.canonicalize().unwrap_or_else(|_| show_json.to_path_buf());
+        let show_json = show_json
+            .canonicalize()
+            .unwrap_or_else(|_| show_json.to_path_buf());
         let root = show_json
             .parent()
             .map(Path::to_path_buf)
@@ -116,8 +118,8 @@ fn load_json_map<T: serde::de::DeserializeOwned>(
             continue;
         }
         let raw = fs::read_to_string(&path)?;
-        let value: T = serde_json::from_str(&raw)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let value: T =
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         out.insert(id(&value), value);
     }
     Ok(out)
@@ -158,7 +160,11 @@ mod tests {
         fs::create_dir_all(&dest).unwrap();
         fs::copy(root.join("show.json"), dest.join("show.json")).unwrap();
         fs::create_dir_all(dest.join("palettes")).unwrap();
-        fs::copy(root.join("palettes/earth.json"), dest.join("palettes/earth.json")).unwrap();
+        fs::copy(
+            root.join("palettes/earth.json"),
+            dest.join("palettes/earth.json"),
+        )
+        .unwrap();
         let pack2 = ShowPack::open(&dest.join("show.json")).unwrap();
         assert_eq!(pack2.definition.id, "pack-test");
     }

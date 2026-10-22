@@ -2,7 +2,7 @@ use egui::{RichText, Ui};
 
 use crate::palette::import_adobe::import_adobe_url;
 use crate::palette::types::{
-    hex_to_rgba, hsl_to_rgba, rgba_to_hex, rgba_to_hsl, Palette, DEFAULT_SLOTS,
+    DEFAULT_SLOTS, Palette, hex_to_rgba, hsl_to_rgba, rgba_to_hex, rgba_to_hsl,
 };
 use crate::show::controller::ShowController;
 
@@ -52,7 +52,11 @@ pub fn draw_palette_panel(
     ui.label(RichText::new("PALETTES").size(11.0).strong());
 
     ui.horizontal(|ui| {
-        ui.label(if show.palette.manual { "MANUAL" } else { "AUTO" });
+        ui.label(if show.palette.manual {
+            "MANUAL"
+        } else {
+            "AUTO"
+        });
         if ui.small_button("◀ PREV").clicked() {
             action = PalettePanelAction::PrevPalette;
         }
@@ -66,7 +70,9 @@ pub fn draw_palette_panel(
 
     let ids: Vec<String> = show.palettes.keys().cloned().collect();
     for id in &ids {
-        if ui.selectable_label(show.palette.active_palette_id.as_deref() == Some(id), id).clicked()
+        if ui
+            .selectable_label(show.palette.active_palette_id.as_deref() == Some(id), id)
+            .clicked()
         {
             show.palette.manual_set(id.clone());
             action = PalettePanelAction::ApplyNow;

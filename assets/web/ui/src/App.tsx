@@ -6,14 +6,15 @@ import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { FosforaProvider, useFosfora } from '@/fosfora/client'
+import { clock } from '@/fosfora/types'
 import { LayersPanel, LibraryPanel, LookPanel, PicturePanel, SectionInfo, ShowPanel } from '@/panels'
 
 const NAV = [
+  { id: 'show', label: 'Show', icon: Clapperboard },
   { id: 'layers', label: 'Layers', icon: Layers },
   { id: 'look', label: 'Look', icon: SlidersHorizontal },
   { id: 'picture', label: 'Picture', icon: Image },
   { id: 'library', label: 'Library', icon: Library },
-  { id: 'show', label: 'Show', icon: Clapperboard },
 ] as const
 
 type Section = (typeof NAV)[number]['id']
@@ -142,11 +143,19 @@ function Shell() {
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b px-4 py-3">
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">{scene}</div>
-            <div className="truncate text-xs text-muted-foreground">
-              {loading ? `Loading ${loading}` : waiting ? `Waiting for ${waiting}` : state?.layers?.[state.active_layer]?.name || 'No layer selected'}
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <div className="font-mono text-lg tabular-nums tracking-tight">
+              {state?.show?.loaded ? clock(state.show.elapsed_ms) : '--:--:--'}
             </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium">{scene}</div>
+              <div className="text-[10px] leading-none tracking-wide text-muted-foreground">Scene</div>
+            </div>
+            {loading || waiting ? (
+              <div className="truncate text-xs text-muted-foreground">
+                {loading ? `Loading ${loading}` : `Waiting for ${waiting}`}
+              </div>
+            ) : null}
           </div>
           <div className="hidden items-end gap-1 sm:flex" aria-hidden>
             {BARS.map((band) => (
