@@ -1,0 +1,36 @@
+name: Embedded controller build
+
+on:
+  pull_request:
+    paths:
+      - 'assets/web/ui/**'
+      - 'assets/web/control.html'
+      - '.github/workflows/embedded-controller.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'assets/web/ui/**'
+      - 'assets/web/control.html'
+      - '.github/workflows/embedded-controller.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  embedded-controller:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: assets/web/ui/package-lock.json
+      - name: Install locked dependencies
+        working-directory: assets/web/ui
+        run: npm ci
+      - name: Build embedded single-file controller
+        working-directory: assets/web/ui
+        run: npm run build
+      - name: Verify controller served by release binary is current
+        run: git diff --exit-code -- assets/web/control.html
