@@ -1252,6 +1252,41 @@ mod tests {
         assert!(particles.max_scaled_count <= 300_000); // quality scaler cap
     }
 
+    #[test]
+    fn hibernation_performance_effects_parse_with_original_shaders() {
+        // Keep optional lower-cost variants discoverable by the regular
+        // EffectLoader, without changing existing Murmur/Tide scene assets.
+        let cases = [
+            (
+                include_str!("../../../../assets/effects/murmur_performance.pfx"),
+                "Murmur Performance",
+                "murmur_sim.wgsl",
+                60_000,
+                8_000.0,
+                11,
+            ),
+            (
+                include_str!("../../../../assets/effects/tide_performance.pfx"),
+                "Tide Performance",
+                "tide_sim.wgsl",
+                65_000,
+                16_000.0,
+                8,
+            ),
+        ];
+        for (json, name, shader, count, rate, inputs) in cases {
+            let effect: PfxEffect =
+                serde_json::from_str(json).expect("performance .pfx must deserialize");
+            assert_eq!(effect.name, name);
+            assert_eq!(effect.inputs.len(), inputs);
+            let particles = effect.particles.expect("effect must have particles");
+            assert_eq!(particles.compute_shader, shader);
+            assert_eq!(particles.max_count, count);
+            assert_eq!(particles.max_scaled_count, count);
+            assert_eq!(particles.emit_rate, rate);
+        }
+    }
+
     // Generic offscreen preview for ANY particle effect, through the production
     // ParticleSystem — the repo previously had only splat- and frost-specific
     // probes, so a change to a shared sim helper had no cheap before/after.
