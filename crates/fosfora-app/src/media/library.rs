@@ -946,7 +946,7 @@ fn describe_file(
     let modified_ms = modified_ms(&meta);
     let cached = cache.entries.iter().find(|entry| {
         entry.path == seen.id
-            && entry.source_path == seen.path.to_string_lossy()
+            && entry.source_path == seen.path.to_string_lossy().as_ref()
             && entry.bytes == meta.len()
             && entry.modified_ms == modified_ms
     });
@@ -1341,7 +1341,7 @@ fn find_fingerprint(pack_root: &Path, fingerprint: &str) -> Option<(String, Stri
     for cached in load_cache(pack_root).entries {
         if cached.fingerprint == fingerprint && !cached.fingerprint.is_empty() {
             let path = resolve_pack_media_path(pack_root, &cached.path);
-            if cached.source_path == path.to_string_lossy() && fs::metadata(&path).ok().is_some_and(|meta| {
+            if cached.source_path == path.to_string_lossy().as_ref() && fs::metadata(&path).ok().is_some_and(|meta| {
                 meta.len() == cached.bytes && modified_ms(&meta) == cached.modified_ms
             }) {
                 let name = Path::new(&cached.path).file_name()?.to_string_lossy().to_string();
