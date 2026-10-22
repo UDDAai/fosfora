@@ -285,6 +285,35 @@ mod tests {
     }
 
     #[test]
+    fn external_primary_outside_the_pack_stays_portable() {
+        let root = temp_pack("real_external");
+        let cloud = std::env::temp_dir().join(format!(
+            "fosfora_external_media_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&cloud);
+        fs::create_dir_all(cloud.join("video")).unwrap();
+        let clip = cloud.join("video/clip.mp4");
+        fs::write(&clip, b"frames").unwrap();
+        fs::write(
+            root.join("media-sources.json"),
+            serde_json::json!({"primary_media_root": cloud.to_string_lossy()}).to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            portable_media_path(&root, &clip.to_string_lossy()),
+            "assets/video/clip.mp4"
+        );
+        assert_eq!(
+            portable_media_path(&root, "assets/video/clip.mp4"),
+            "assets/video/clip.mp4"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cloud);
+    }
+
+    #[test]
     fn pack_path_is_stored_relative_and_the_previous_file_is_kept() {
         let root = temp_pack("rel");
         let abs = root.join("assets/video/clip.mp4");
