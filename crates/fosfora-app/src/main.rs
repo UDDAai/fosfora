@@ -2690,8 +2690,10 @@ impl ApplicationHandler for FosforaApp {
                 if let Some(ref rx) = self.file_dialog_rx {
                     match rx.try_recv() {
                         Ok(path) => {
+                            // Selecting a file only starts background decoding.
+                            // Mark the preset dirty once the layer is installed;
+                            // a refused/unsupported video must not appear saved.
                             app.add_media_layer(path);
-                            app.preset_store.mark_dirty();
                             self.file_dialog_rx = None;
                         }
                         Err(crossbeam_channel::TryRecvError::Disconnected) => {

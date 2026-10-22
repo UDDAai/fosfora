@@ -201,8 +201,10 @@ function Shell() {
             The engine dropped {state?.command_drops} commands because its queue was full.
           </div>
         ) : null}
-        {state?.show?.notice && !state.load_error ? (
-          <div className="border-b px-4 py-2 text-sm text-muted-foreground">{state.show.notice}</div>
+        {state?.show?.notice && state.show.notice !== state.load_error ? (
+          <div role="status" className="whitespace-pre-wrap border-b px-4 py-2 text-sm text-muted-foreground">
+            {state.show.notice}
+          </div>
         ) : null}
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
           {section === 'layers' ? <LayersPanel /> : (

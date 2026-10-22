@@ -2278,6 +2278,18 @@ impl App {
     /// against the memory budget and decoded on the media worker. The layer
     /// appears when [`App::poll_media_jobs`] takes the result.
     pub fn add_media_layer(&mut self, path: std::path::PathBuf) {
+        // Browser upload responses carry portable IDs (assets/video/clip.mp4)
+        // rather than Mac-specific paths. The native file dialog already
+        // supplies an absolute path. Resolve only relative inputs through
+        // the open show pack, including its opt-in external/iCloud media root.
+        let path = if path.is_relative() {
+            self.show
+                .as_ref()
+                .map(|show| show.resolve_path(&path.to_string_lossy()))
+                .unwrap_or(path)
+        } else {
+            path
+        };
         self.submit_media(crate::media::jobs::MediaTarget::Add, vec![path]);
     }
 
@@ -2345,23 +2357,27 @@ impl App {
     fn poll_media_jobs(&mut self, now: Instant) -> bool {
         use crate::media::jobs::{MediaJobOutcome, MediaTarget};
         let mut changed = false;
+        let mut notice_changed = false;
         while let Some(result) = self.media_jobs.try_recv() {
             match result.outcome {
                 MediaJobOutcome::Refused(message) => {
                     log::warn!("Media job refused: {message}");
                     self.status_error = Some((message, now));
+                    notice_changed = true;
                 }
                 MediaJobOutcome::Ready(_) if result.scene_generation != self.scene_generation => {
                     self.status_error = Some((
                         "The scene changed while the clip loaded, so it was not added.".into(),
                         now,
                     ));
+                    notice_changed = true;
                 }
                 MediaJobOutcome::Ready(sources) => match result.target {
                     MediaTarget::Add => {
                         for (path, source) in sources {
                             if self.layer_stack.layers.len() >= crate::bindings::catalog::MAX_LAYERS {
                                 self.status_error = Some(("No free layer slot is left".into(), now));
+                                notice_changed = true;
                                 break;
                             }
                             self.install_media_layer(path, source);
@@ -2384,6 +2400,7 @@ impl App {
                                     "That layer changed while the clip loaded, so it was not replaced.".into(),
                                     now,
                                 ));
+                                notice_changed = true;
                             }
                         }
                     }
@@ -2394,9 +2411,22 @@ impl App {
             self.media_jobs.budget().release(result.reserved);
         }
         if changed {
-            self.note_scene_edit(now);
+            // Queuing a file does not edit the scene; installing it does.
+            // Show-pack scenes use their own save state; vanilla Fosfora
+            // uses the preset-store dirty indicator.
+            if self.show.is_some() {
+                self.note_scene_edit(now);
+            } else {
+                self.preset_store.mark_dirty();
+            }
+            // Clear a stale "Loading" notice only after something arrived.
+            if self.status_error.as_ref().is_some_and(|(msg, _)| msg.starts_with("Loading ")) {
+                self.status_error = None;
+            }
         }
-        changed
+        // Browser clients must get refused/stale-job errors immediately too,
+        // even though no layer was created and nothing should be saved.
+        changed || notice_changed
     }
 
     /// Decoded frames plus an estimate of GPU targets: one surface-sized
