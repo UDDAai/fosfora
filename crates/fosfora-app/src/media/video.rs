@@ -316,3 +316,77 @@ pub fn decode_all_frames(
 
 /// Maximum video duration (seconds) we'll pre-decode. Beyond this, reject.
 pub const MAX_PREDECODE_SECS: f64 = 60.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_video() -> serde_json::Value {
+        json!({
+            "streams": [{
+                "codec_type": "video",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "0/0",
+                "r_frame_rate": "24/1",
+                "nb_frames": "192",
+                "pix_fmt": "yuv420p"
+            }],
+            "format": { "duration": "8.000" }
+        })
+    }
+
+    #[test]
+    fn picks_valid_avg_fps_or_falls_back_to_stream_rate() {
+        let mut sample = sample_video();
+        let meta = parse_video_metadata(&sample).unwrap();
+        assert_eq!(meta.fps, 24.0);
+        assert_eq!(meta.frame_count(), 192);
+        assert_eq!(meta.decoded_bytes(), 1280 * 720 * 4 * 192);
+
+        sample["streams"][0]["avg_frame_rate"] = json!("30000/1001");
+        let meta = parse_video_metadata(&sample).unwrap();
+        assert!((meta.fps - 29.97002997).abs() < 0.00001);
+    }
+
+    #[test]
+    fn derives_missing_container_duration_from_frames() {
+        let mut sample = sample_video();
+        sample["format"]["duration"] = serde_json::Value::Null;
+        let meta = parse_video_metadata(&sample).unwrap();
+        assert_eq!(meta.duration_secs, 8.0);
+    }
+
+    #[test]
+    fn refuses_zero_fps_and_missing_duration_instead_of_failing_during_decode() {
+        let mut sample = sample_video();
+        sample["streams"][0]["r_frame_rate"] = json!("0/0");
+        let err = parse_video_metadata(&sample).unwrap_err();
+        assert!(err.contains("frame rate"), "{err}");
+
+        sample["streams"][0]["r_frame_rate"] = json!("24/1");
+        sample["streams"][0]["nb_frames"] = serde_json::Value::Null;
+        sample["format"]["duration"] = serde_json::Value::Null;
+        let err = parse_video_metadata(&sample).unwrap_err();
+        assert!(err.contains("duration or frame count"), "{err}");
+    }
+
+    #[test]
+    fn rejects_invalid_video_dimensions_and_nonvideo_files() {
+        let mut sample = sample_video();
+        sample["streams"][0]["width"] = json!(0);
+        assert!(parse_video_metadata(&sample).unwrap_err().contains("width"));
+
+        let image = json!({
+            "streams": [{
+                "codec_type": "audio",
+                "sample_rate": "48000"
+            }],
+            "format": {"duration": "8.0"}
+        });
+        assert!(parse_video_metadata(&image)
+            .unwrap_err()
+            .contains("No video stream"));
+    }
+}
