@@ -4,6 +4,16 @@ import { GripVertical, Info, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
@@ -223,9 +233,16 @@ export function LayersPanel() {
         const shift = neighborShift(index, drag)
         const dragging = drag?.from === index
         const travel = dragging ? drag.offset : shift * (drag ? drag.height + gap : 0)
+        const removeLocked = layer.pinned || layers.length < 2
         return (
-          <Card
+          <ContextMenu
             key={`${layer.effect_name || layer.media_name || layer.name}-${index}`}
+            onOpenChange={(open) => {
+              if (open) send({ type: 'select_layer', index })
+            }}
+          >
+          <ContextMenuTrigger asChild>
+          <Card
             size="sm"
             ref={(node) => {
               cards.current[index] = node
@@ -308,7 +325,7 @@ export function LayersPanel() {
                   <SelectTrigger className="w-32">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent position="popper" sideOffset={4} className="max-h-72">
                     {BLENDS.map((name, blend) => (
                       <SelectItem key={name} value={String(blend)}>
                         {name}
@@ -319,6 +336,46 @@ export function LayersPanel() {
               </div>
             </CardContent>
           </Card>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem
+              onSelect={() => {
+                if (solo) send({ type: 'clear_solo' })
+                else send({ type: 'set_solo', index })
+              }}
+            >
+              {solo ? 'Exit solo' : 'Solo'}
+            </ContextMenuItem>
+            <ContextMenuItem
+              disabled={layer.locked}
+              onSelect={() => send({ type: 'set_layer_enabled', layer: index, value: !layer.enabled })}
+            >
+              {layer.enabled ? 'Disable' : 'Enable'}
+            </ContextMenuItem>
+            <ContextMenuSub>
+              <ContextMenuSubTrigger>Blend</ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                {BLENDS.map((name, blend) => (
+                  <ContextMenuItem
+                    key={name}
+                    onSelect={() => send({ type: 'set_layer_blend', layer: index, value: blend })}
+                  >
+                    <span className="flex-1">{name}</span>
+                    {layer.blend_mode === blend ? <span className="text-xs text-muted-foreground">On</span> : null}
+                  </ContextMenuItem>
+                ))}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              disabled={removeLocked}
+              onSelect={() => send({ type: 'remove_layer', index })}
+            >
+              Remove
+            </ContextMenuItem>
+          </ContextMenuContent>
+          </ContextMenu>
         )
       })}
       </div>

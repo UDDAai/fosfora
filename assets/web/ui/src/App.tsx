@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Clapperboard, Image, Layers, Library, PanelLeft, SlidersHorizontal } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { FosforaProvider, useFosfora } from '@/fosfora/client'
 import { LayersPanel, LibraryPanel, LookPanel, PicturePanel, SectionInfo, ShowPanel } from '@/panels'
 
@@ -18,12 +19,60 @@ const NAV = [
 type Section = (typeof NAV)[number]['id']
 
 const BARS = ['sub_bass', 'bass', 'low_mid', 'mid', 'upper_mid', 'presence', 'brilliance'] as const
+const NAV_MIN = 144
+const NAV_MAX = 320
+
+function pageFromPath(path: string): Section | null {
+  const name = path.split('?')[0].replace(/\/+$/, '').replace(/^\//, '')
+  return NAV.some((item) => item.id === name) ? (name as Section) : null
+}
+
+function readNavWidth() {
+  const raw = localStorage.getItem('fosfora-nav-width')
+  const saved = Number(raw)
+  if (raw == null || !Number.isFinite(saved)) return 160
+  return Math.min(NAV_MAX, Math.max(NAV_MIN, saved))
+}
 
 function Shell() {
   const { connected, linkError, state, audio, send } = useFosfora()
-  const [section, setSection] = useState<Section>('layers')
+  const [section, setSection] = useState<Section>(() => pageFromPath(window.location.pathname) ?? 'layers')
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('fosfora-nav') === 'icons')
+  const [navWidth, setNavWidth] = useState(readNavWidth)
   const mode = state?.workspace_mode === 'perform' ? 'perform' : 'prepare'
+
+  useEffect(() => {
+    if (pageFromPath(window.location.pathname) == null) {
+      history.replaceState(null, '', '/layers')
+    }
+    const onPop = () => setSection(pageFromPath(window.location.pathname) ?? 'layers')
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  function openSection(id: Section) {
+    setSection(id)
+    const path = `/${id}`
+    if (window.location.pathname !== path) history.pushState(null, '', path)
+  }
+
+  function resizeNav(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    const startX = event.clientX
+    const startW = navWidth
+    function move(next: PointerEvent) {
+      setNavWidth(Math.min(NAV_MAX, Math.max(NAV_MIN, startW + next.clientX - startX)))
+    }
+    function up(next: PointerEvent) {
+      const width = Math.min(NAV_MAX, Math.max(NAV_MIN, startW + next.clientX - startX))
+      setNavWidth(width)
+      localStorage.setItem('fosfora-nav-width', String(Math.round(width)))
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
   const save = state?.save_state || 'saved'
   const scene = state?.applied_preset || 'No scene'
   const loading = state?.loading_preset
@@ -32,7 +81,18 @@ function Shell() {
 
   return (
     <div className="flex h-full bg-background text-foreground">
-      <aside className={`flex shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground transition-[width] duration-200 ${collapsed ? 'w-14' : 'w-40'}`}>
+      <aside
+        className={`relative flex shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground ${collapsed ? 'w-[4.5rem]' : ''}`}
+        style={collapsed ? undefined : { width: navWidth }}
+      >
+        {collapsed ? null : (
+          <button
+            type="button"
+            aria-label="Resize menu"
+            className="absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-primary/40"
+            onPointerDown={resizeNav}
+          />
+        )}
         <div className={`flex items-center ${collapsed ? 'justify-center px-1 py-3' : 'justify-between px-3 py-3'}`}>
           {collapsed ? null : (
             <div className="min-w-0">
@@ -44,7 +104,7 @@ function Shell() {
             variant="ghost"
             size="icon"
             className="size-8"
-            aria-label={collapsed ? 'Show menu labels' : 'Show icons only'}
+            aria-label={collapsed ? 'Expand menu' : 'Compact menu'}
             onClick={() => {
               const next = !collapsed
               localStorage.setItem('fosfora-nav', next ? 'icons' : 'open')
@@ -55,28 +115,23 @@ function Shell() {
           </Button>
         </div>
         <Separator />
-        <nav className={`flex flex-1 flex-col gap-1 ${collapsed ? 'items-center p-1' : 'p-1.5'}`}>
+        <nav className={`flex flex-1 flex-col ${collapsed ? 'gap-3 p-1.5' : 'gap-2 p-1.5'}`}>
           {NAV.map((item) => {
             const Icon = item.icon
             const on = section === item.id
-            const button = (
+            return (
               <Button
+                key={item.id}
                 variant={on ? 'secondary' : 'ghost'}
-                size={collapsed ? 'icon' : 'sm'}
-                className={collapsed ? 'size-9' : 'w-full justify-start px-2'}
+                size={collapsed ? 'default' : 'sm'}
+                className={collapsed ? 'h-auto w-full flex-col gap-1 px-1 py-2 text-[10px] leading-none font-normal' : 'w-full justify-start px-2'}
                 aria-label={item.label}
-                onClick={() => setSection(item.id)}
+                aria-current={on ? 'page' : undefined}
+                onClick={() => openSection(item.id)}
               >
                 <Icon />
-                {collapsed ? <span className="sr-only">{item.label}</span> : item.label}
+                {item.label}
               </Button>
-            )
-            if (!collapsed) return <div key={item.id}>{button}</div>
-            return (
-              <Tooltip key={item.id}>
-                <TooltipTrigger asChild>{button}</TooltipTrigger>
-                <TooltipContent side="right">{item.label}</TooltipContent>
-              </Tooltip>
             )
           })}
         </nav>
