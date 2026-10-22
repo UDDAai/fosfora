@@ -134,11 +134,15 @@ pub fn portable_media_path(pack_root: &Path, stored: &str) -> String {
     } else {
         pack_root.join(path)
     };
-    if let Ok(rel) = absolute.strip_prefix(pack_root) {
-        return rel.to_string_lossy().replace('\\', "/");
-    }
+    // Prefer a configured media-root alias even if the external folder is
+    // physically nested under the pack (as in a test fixture or local worktree).
+    // Otherwise a path such as "cloud library/video/clip.mp4" leaks into the
+    // saved preset instead of its portable assets/video/clip.mp4 identity.
     if let Some(alias) = crate::media::library::virtual_media_path(pack_root, &absolute) {
         return alias;
+    }
+    if let Ok(rel) = absolute.strip_prefix(pack_root) {
+        return rel.to_string_lossy().replace('\\', "/");
     }
     stored.replace('\\', "/")
 }
@@ -278,6 +282,35 @@ mod tests {
         assert!(clip.exists());
         assert!(still.exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_primary_outside_the_pack_stays_portable() {
+        let root = temp_pack("real_external");
+        let cloud = std::env::temp_dir().join(format!(
+            "fosfora_external_media_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&cloud);
+        fs::create_dir_all(cloud.join("video")).unwrap();
+        let clip = cloud.join("video/clip.mp4");
+        fs::write(&clip, b"frames").unwrap();
+        fs::write(
+            root.join("media-sources.json"),
+            serde_json::json!({"primary_media_root": cloud.to_string_lossy()}).to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            portable_media_path(&root, &clip.to_string_lossy()),
+            "assets/video/clip.mp4"
+        );
+        assert_eq!(
+            portable_media_path(&root, "assets/video/clip.mp4"),
+            "assets/video/clip.mp4"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cloud);
     }
 
     #[test]
