@@ -3582,7 +3582,7 @@ impl App {
             if !is_webcam_layer {
                 if let Some(ref media_path) = lp.media_path {
                     let path = self.resolve_show_media_path(media_path);
-                    // Try pre-decoded media first, fall back to sync decode
+                    // Use only media prepared by the background loader; never decode here
                     let loaded = if let Some(decode_result) = decoded_media.remove(&i) {
                         match decode_result {
                             MediaDecodeResult::Ok(source) => {
@@ -3597,9 +3597,17 @@ impl App {
                             }
                         }
                     } else if path.exists() {
-                        // Fallback: sync decode (shouldn't happen in normal flow)
-                        self.load_media_on_layer(i, path.clone());
-                        true
+                        // Every existing media path was submitted to PresetLoader
+                        // before this scene was applied. A missing result is a
+                        // loader invariant failure, not permission to decode
+                        // hundreds of MB synchronously on the render thread.
+                        // Preserve responsive output and report the bad layer.
+                        let msg = format!(
+                            "Media '{media_path}' on layer {i} was not prepared by the preset loader"
+                        );
+                        log::warn!("{msg}");
+                        self.note_load_error(msg);
+                        false
                     } else {
                         let msg = format!("Missing media '{media_path}' on layer {i}");
                         log::warn!("{msg}");
