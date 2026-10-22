@@ -154,6 +154,8 @@ pub struct App {
     // Transient status error (displayed in status bar, auto-clears)
     pub status_error: Option<(String, Instant)>,
     pub media_library: Option<crate::media::library::MediaLibrary>,
+    /// Names provided by the open show pack, including overlays of built-in names.
+    show_pack_preset_ids: Vec<String>,
     pub workspace_mode: crate::show::scene_file::WorkspaceMode,
     pub save_state: crate::show::scene_file::SaveState,
     pub scene_dirty: bool,
@@ -699,6 +701,7 @@ impl App {
             quit_requested: false,
             status_error: None,
             media_library: None,
+            show_pack_preset_ids: Vec::new(),
             workspace_mode: crate::show::scene_file::WorkspaceMode::Prepare,
             save_state: crate::show::scene_file::SaveState::Saved,
             scene_dirty: false,
@@ -2769,6 +2772,7 @@ impl App {
         let workspace = crate::web::state::WebWorkspace {
             library: &library,
             warnings: &warnings,
+            show_pack_preset_ids: &self.show_pack_preset_ids,
             save_state: self.save_state.code(),
             save_detail: &save_detail,
             mode: self.workspace_mode.as_str(),
@@ -4269,6 +4273,7 @@ impl App {
                 return;
             }
         };
+        self.show_pack_preset_ids = pack.presets.keys().cloned().collect();
         // Populate the native preset store with the pack's presets so cue
         // loads resolve by stable preset_id.
         let mut preset_ids: Vec<String> = pack.presets.keys().cloned().collect();
