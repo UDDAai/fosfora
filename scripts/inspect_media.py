@@ -55,7 +55,7 @@ def probe(file, ffprobe):
         info = json.loads(result.stdout)
     except ValueError as exc:
         return None, f"invalid ffprobe JSON: {exc}"
-    streams = info.get("streams", [])
+    streams = info.get("streams") or []
     stream = next((s for s in streams if s.get("codec_type") == "video"), None)
     if stream is None:
         return None, "no video stream found"
@@ -71,7 +71,7 @@ def probe(file, ffprobe):
         frames = int(frames) if frames is not None and int(frames) > 0 else None
     except (ValueError, TypeError):
         frames = None
-    fmt = info.get("format", {})
+    fmt = info.get("format") or {}
     duration = positive_float(fmt.get("duration")) or positive_float(stream.get("duration"))
     duration = duration or (frames / fps if frames else None)
     if duration is None:
