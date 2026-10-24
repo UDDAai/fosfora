@@ -817,6 +817,46 @@ mod tests {
         assert!(!alive, "ffmpeg pid {pid} still running");
     }
 
+    #[test]
+    fn kill_is_idempotent_and_safe_after_exit() {
+        let Some(tool) = ffmpeg_or_skip("kill_is_idempotent_and_safe_after_exit") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make_clip(tool, dir.path(), "clip.mp4");
+
+        // Two killers on a live stream, then Drop on top.
+        let spec = StreamSpec {
+            looping: true,
+            ..StreamSpec::new(30.0, W, H)
+        };
+        let mut stream = spawn_stream(&clip, &spec).unwrap();
+        let (kill_a, kill_b) = (stream.killer(), stream.killer());
+        let mut frame = vec![0u8; spec.frame_bytes().unwrap()];
+        stream.read_exact(&mut frame).unwrap();
+        kill_a();
+        kill_b();
+        assert!(
+            stream.read_to_end(&mut Vec::new()).is_ok(),
+            "kill reads as EOF"
+        );
+        drop(stream);
+
+        // Killers called after a natural end (child exited and reaped), and after Drop.
+        let mut stream = spawn_stream(&clip, &StreamSpec::new(10.0, W, H)).unwrap();
+        let (kill_a, kill_b) = (stream.killer(), stream.killer());
+        stream.read_to_end(&mut Vec::new()).unwrap();
+        kill_a();
+        drop(stream);
+        kill_b();
+
+        // Through the boxed pipe, after the stream has failed.
+        let StreamPipe { mut reader, kill } =
+            spawn_pipe(&dir.path().join("nope.mp4"), &StreamSpec::new(10.0, W, H)).unwrap();
+        assert!(reader.read(&mut [0u8; 8]).is_err());
+        kill();
+    }
+
     /// Open question from the streaming design: with `-ss T -stream_loop -1`, does the
     /// second pass restart at media time 0 or at T? Answer: 0, so frame `n` is media time
     /// `(T + n / fps) mod duration`, which is what `StreamClock` assumes.
