@@ -1,0 +1,21 @@
+[package]
+name = "fosfora-native-video"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Experimental macOS streamed video playback for Fosfora"
+
+[dependencies]
+log = "0.4"
+
+[[bin]]
+name = "native-video-harness"
+path = "src/bin/harness.rs"
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true
