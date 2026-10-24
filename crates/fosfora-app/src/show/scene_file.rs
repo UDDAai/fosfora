@@ -498,9 +498,10 @@ mod tests {
         .unwrap();
         assert_eq!(palette["preset"], "glass-room");
         assert_eq!(palette["bindings"][0]["parameter"], "tint");
-        assert!(root
-            .join("audio-bindings/glass-room.bindings.json")
-            .is_file());
+        assert!(
+            root.join("audio-bindings/glass-room.bindings.json")
+                .is_file()
+        );
         assert_eq!(
             fs::read_to_string(root.join("palette-bindings/thaw.json")).unwrap(),
             r#"{"schema_version":1,"preset":"thaw","bindings":[{"slot":"color-3","layer":2,"parameter":"tint"}]}"#

@@ -116,7 +116,11 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta, String> {
         return Err(format!(
             "ffprobe could not inspect {}: {}",
             path.display(),
-            if detail.is_empty() { "file is unreadable or has an unsupported video container" } else { detail }
+            if detail.is_empty() {
+                "file is unreadable or has an unsupported video container"
+            } else {
+                detail
+            }
         ));
     }
 
@@ -462,9 +466,11 @@ mod tests {
             }],
             "format": {"duration": "8.0"}
         });
-        assert!(parse_video_metadata(&image)
-            .unwrap_err()
-            .contains("No video stream"));
+        assert!(
+            parse_video_metadata(&image)
+                .unwrap_err()
+                .contains("No video stream")
+        );
     }
 
     #[test]
@@ -572,7 +578,10 @@ mod tests {
         assert_eq!(allowance.ram_bytes, slack_frames as u64 * frame_bytes);
         assert_ne!(allowance.ram_bytes, bare);
         assert!(allowance.ram_bytes <= crate::media::library::MAX_CLIP_RAM);
-        assert_eq!(allowance.ram_bytes, allowance.frame_cap as u64 * frame_bytes);
+        assert_eq!(
+            allowance.ram_bytes,
+            allowance.frame_cap as u64 * frame_bytes
+        );
     }
 
     #[test]

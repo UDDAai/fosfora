@@ -6,9 +6,9 @@ use winit::window::Window;
 
 use crate::audio::AudioSystem;
 use crate::bindings::bus::BindingBus;
+use crate::effect::EffectLoader;
 use crate::effect::format::PostProcessDef;
 use crate::effect::loader::assets_dir;
-use crate::effect::EffectLoader;
 use crate::gpu::audio_textures::{AudioTextures, WAVEFORM_PEEK};
 use crate::gpu::compositor::Compositor;
 use crate::gpu::layer::{EffectLayer, Layer, LayerContent, LayerInfo, LayerStack};
@@ -23,22 +23,22 @@ use crate::gpu::{GpuContext, ShaderPipeline, ShaderUniforms, UniformBuffer};
 use crate::media::MediaLayer;
 #[cfg(feature = "webcam")]
 use crate::media::WebcamBackend;
+use crate::midi::MidiSystem;
 use crate::midi::clock::MidiClock;
 use crate::midi::types::TriggerAction;
-use crate::midi::MidiSystem;
 use crate::osc::OscSystem;
 use crate::params::{ParamStore, ParamValue};
+use crate::preset::PresetStore;
 use crate::preset::loader::{MediaDecodeResult, PresetLoader};
 use crate::preset::store::LayerPreset;
-use crate::preset::PresetStore;
+use crate::scene::SceneStore;
 use crate::scene::timeline::{Timeline, TimelineEvent};
 use crate::scene::transition::TransitionRenderer;
 use crate::scene::types::AdvanceMode;
-use crate::scene::SceneStore;
 use crate::settings::SettingsConfig;
 use crate::shader::ShaderWatcher;
-use crate::ui::panels::shader_editor::ShaderEditorState;
 use crate::ui::EguiOverlay;
+use crate::ui::panels::shader_editor::ShaderEditorState;
 use crate::web::WebSystem;
 
 /// A manual scene change that is waiting for Save, Discard, or Cancel.
