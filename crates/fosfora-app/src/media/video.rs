@@ -38,14 +38,51 @@ impl VideoMeta {
             .unwrap_or_else(|| (self.duration_secs * self.fps).ceil().max(0.0) as u64)
     }
 
-    /// RAM for the decoded clip. Every frame is held as RGBA8 (4 bytes/px),
-    /// whatever the source pixel format.
+    /// RAM for the probed frame count. Every frame is held as RGBA8 (4 bytes/px),
+    /// whatever the source pixel format. Admission reserves [`decode_allowance`],
+    /// which is larger than this when the decoder's slack still fits.
     pub fn decoded_bytes(&self) -> u64 {
         self.frame_count()
             .saturating_mul(u64::from(self.width))
             .saturating_mul(u64::from(self.height))
             .saturating_mul(4)
     }
+}
+
+/// What the all-frames decoder may store for one probed clip.
+///
+/// ffprobe can under-count variable-frame-rate video, so the decoder accepts
+/// `estimated + estimated/4 + 8` frames and never more than
+/// [`super::library::MAX_CLIP_RAM`]. `ram_bytes` is that unclamped slack.
+/// Admission reserves it, and refuses the clip when it is over the cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeAllowance {
+    /// Frames `decode_all_frames` will accept before failing the read.
+    pub frame_cap: usize,
+    /// `(estimate + 25% + 8 frames) * RGBA bytes`, saturating.
+    /// Under the per-clip cap this is exactly `frame_cap` frames.
+    pub ram_bytes: u64,
+}
+
+pub(crate) fn decode_allowance(
+    width: u32,
+    height: u32,
+    estimated_frames: u64,
+) -> Result<DecodeAllowance, String> {
+    let frame_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| "Video has invalid decoded frame dimensions".to_string())?;
+    let estimated = usize::try_from(estimated_frames)
+        .map_err(|_| "Video has too many frames to pre-decode".to_string())?;
+    let slack_frames = estimated.saturating_add(estimated / 4).saturating_add(8);
+    let memory_frames =
+        usize::try_from(super::library::MAX_CLIP_RAM / frame_bytes).unwrap_or(usize::MAX);
+    Ok(DecodeAllowance {
+        frame_cap: slack_frames.min(memory_frames),
+        ram_bytes: (slack_frames as u64).saturating_mul(frame_bytes),
+    })
 }
 
 /// Probe video metadata using ffprobe.
@@ -224,13 +261,12 @@ pub fn decode_all_frames(
         return Err("Video has an invalid frame rate".into());
     }
     let delay_ms = (1000.0 / meta.fps).round().max(1.0) as u32;
+    let allowance = decode_allowance(meta.width, meta.height, meta.frame_count())?;
     let est_frames = usize::try_from(meta.frame_count())
         .map_err(|_| "Video has too many frames to pre-decode")?;
-    // A variable-frame-rate container can under-report its frame count.
-    // Tolerate a modest mismatch but never grow beyond the per-clip RAM cap.
-    let estimated_cap = est_frames.saturating_add(est_frames / 4).saturating_add(8);
-    let memory_cap = (super::library::MAX_CLIP_RAM / frame_size as u64) as usize;
-    let frame_cap = estimated_cap.min(memory_cap);
+    // Same cap admission reserves. A variable-frame-rate file can under-report
+    // its count; never grow past the per-clip RAM cap.
+    let frame_cap = allowance.frame_cap;
     if frame_cap == 0 {
         return Err("Even one decoded video frame exceeds the clip memory budget".into());
     }
@@ -523,5 +559,33 @@ mod tests {
         let (frames, _) = read_rgba_frames(&mut reader, 1, 1, 40, 4, 1).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, vec![9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn reservation_uses_decoder_frame_cap_not_the_probe_count() {
+        let estimated = 100u64;
+        let frame_bytes = 16u64 * 16 * 4;
+        let bare = estimated * frame_bytes;
+        let allowance = decode_allowance(16, 16, estimated).unwrap();
+        let slack_frames = 100 + 25 + 8;
+        assert_eq!(allowance.frame_cap, slack_frames);
+        assert_eq!(allowance.ram_bytes, slack_frames as u64 * frame_bytes);
+        assert_ne!(allowance.ram_bytes, bare);
+        assert!(allowance.ram_bytes <= crate::media::library::MAX_CLIP_RAM);
+        assert_eq!(allowance.ram_bytes, allowance.frame_cap as u64 * frame_bytes);
+    }
+
+    #[test]
+    fn slack_over_two_gib_stays_over_the_clip_cap_and_the_decoder_does_not_grow() {
+        let estimated = 1_700_000u64;
+        let frame_bytes = 16u64 * 16 * 4;
+        let bare = estimated * frame_bytes;
+        assert!(bare <= crate::media::library::MAX_CLIP_RAM);
+        let allowance = decode_allowance(16, 16, estimated).unwrap();
+        let slack_frames = estimated as usize + (estimated as usize) / 4 + 8;
+        assert!(allowance.ram_bytes > crate::media::library::MAX_CLIP_RAM);
+        assert!(allowance.frame_cap < slack_frames);
+        let stored = allowance.frame_cap as u64 * frame_bytes;
+        assert!(stored <= crate::media::library::MAX_CLIP_RAM);
     }
 }

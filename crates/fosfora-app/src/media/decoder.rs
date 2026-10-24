@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use super::types::DecodedFrame;
@@ -145,6 +147,171 @@ fn load_static_image(path: &Path) -> Result<MediaSource, String> {
         width: w,
         height: h,
     }))
+}
+
+/// Canvas size and how many RGBA frames [`load_gif`] / [`load_webp`] will store.
+pub(crate) struct StoredImage {
+    pub width: u32,
+    pub height: u32,
+    pub frames: u64,
+}
+
+/// Frame count for admission. Does not expand pixels.
+///
+/// WebP reads `num_frames()` from the ANMF headers while opening the decoder.
+/// GIF has no count in the header; image separators are counted and LZW
+/// sub-blocks are skipped. [`load_gif`] stores one full canvas per separator,
+/// and [`load_webp`] stores one RGBA buffer per counted frame. A count that
+/// cannot be read is an error, so planning does not fall back to one frame.
+pub(crate) fn stored_image(path: &Path) -> Result<StoredImage, String> {
+    match file_extension(path).as_str() {
+        "gif" => gif_storage(path),
+        "webp" => webp_storage(path),
+        _ => {
+            let (width, height) = image::image_dimensions(path).map_err(|err| err.to_string())?;
+            Ok(StoredImage {
+                width,
+                height,
+                frames: 1,
+            })
+        }
+    }
+}
+
+pub(crate) fn stored_rgba_bytes(image: &StoredImage) -> u64 {
+    u64::from(image.width)
+        .saturating_mul(u64::from(image.height))
+        .saturating_mul(4)
+        .saturating_mul(image.frames)
+}
+
+fn file_extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn gif_storage(path: &Path) -> Result<StoredImage, String> {
+    let mut file = File::open(path).map_err(|err| format!("Failed to open GIF: {err}"))?;
+    read_gif_storage(&mut file)
+}
+
+fn read_gif_storage<R: Read>(reader: &mut R) -> Result<StoredImage, String> {
+    let mut header = [0u8; 13];
+    reader
+        .read_exact(&mut header)
+        .map_err(|_| gif_count_unknown())?;
+    if &header[..6] != b"GIF87a" && &header[..6] != b"GIF89a" {
+        return Err(gif_count_unknown());
+    }
+    let width = u32::from(u16::from_le_bytes([header[6], header[7]]));
+    let height = u32::from(u16::from_le_bytes([header[8], header[9]]));
+    if width == 0 || height == 0 {
+        return Err(gif_count_unknown());
+    }
+    if header[10] & 0x80 != 0 {
+        skip_bytes(reader, color_table_bytes(header[10])?)?;
+    }
+    let mut frames = 0u64;
+    loop {
+        let mut marker = [0u8; 1];
+        reader
+            .read_exact(&mut marker)
+            .map_err(|_| gif_count_unknown())?;
+        match marker[0] {
+            0x3B => {
+                if frames == 0 {
+                    return Err("GIF has no frames".to_string());
+                }
+                return Ok(StoredImage {
+                    width,
+                    height,
+                    frames,
+                });
+            }
+            0x2C => {
+                frames = frames.saturating_add(1);
+                let mut desc = [0u8; 9];
+                reader
+                    .read_exact(&mut desc)
+                    .map_err(|_| gif_count_unknown())?;
+                if desc[8] & 0x80 != 0 {
+                    skip_bytes(reader, color_table_bytes(desc[8])?)?;
+                }
+                // LZW minimum code size, then compressed sub-blocks. Not decoded.
+                skip_bytes(reader, 1)?;
+                skip_sub_blocks(reader)?;
+            }
+            0x21 => {
+                skip_bytes(reader, 1)?;
+                skip_sub_blocks(reader)?;
+            }
+            _ => return Err(gif_count_unknown()),
+        }
+    }
+}
+
+fn gif_count_unknown() -> String {
+    "GIF frame count cannot be known".to_string()
+}
+
+fn color_table_bytes(packed: u8) -> Result<usize, String> {
+    3usize
+        .checked_shl(u32::from(packed & 0x07) + 1)
+        .ok_or_else(gif_count_unknown)
+}
+
+fn skip_sub_blocks<R: Read>(reader: &mut R) -> Result<(), String> {
+    loop {
+        let mut len = [0u8; 1];
+        reader
+            .read_exact(&mut len)
+            .map_err(|_| gif_count_unknown())?;
+        if len[0] == 0 {
+            return Ok(());
+        }
+        skip_bytes(reader, usize::from(len[0]))?;
+    }
+}
+
+fn skip_bytes<R: Read>(reader: &mut R, mut remaining: usize) -> Result<(), String> {
+    let mut buf = [0u8; 256];
+    while remaining > 0 {
+        let n = remaining.min(buf.len());
+        reader
+            .read_exact(&mut buf[..n])
+            .map_err(|_| gif_count_unknown())?;
+        remaining -= n;
+    }
+    Ok(())
+}
+
+fn webp_storage(path: &Path) -> Result<StoredImage, String> {
+    use image_webp::WebPDecoder;
+
+    let file = File::open(path).map_err(|err| format!("Failed to open WebP: {err}"))?;
+    // Counts ANMF chunks while seeking. `read_frame` is what expands pixels.
+    let decoder = WebPDecoder::new(BufReader::new(file))
+        .map_err(|err| format!("WebP frame count cannot be known: {err}"))?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 {
+        return Err("WebP frame count cannot be known".to_string());
+    }
+    let frames = if decoder.is_animated() {
+        let count = decoder.num_frames();
+        if count == 0 {
+            return Err("WebP frame count cannot be known".to_string());
+        }
+        u64::from(count)
+    } else {
+        1
+    };
+    Ok(StoredImage {
+        width,
+        height,
+        frames,
+    })
 }
 
 /// Load an animated GIF, pre-decoding all frames.

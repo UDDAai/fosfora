@@ -797,32 +797,7 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
     };
     if kind == "video" {
         match probe_video_meta(path) {
-            Ok(meta) => {
-                let ram = meta.decoded_bytes;
-                let mut problem = None;
-                if meta.duration_secs > max_predecode_secs() {
-                    problem = Some(format!(
-                        "{:.0}s is over the {:.0}s decode limit",
-                        meta.duration_secs,
-                        max_predecode_secs()
-                    ));
-                } else if ram > MAX_CLIP_RAM {
-                    problem = Some(format!(
-                        "{}x{} {} × {} frames would decode to {}, over {} per clip",
-                        meta.width,
-                        meta.height,
-                        meta.pix_fmt,
-                        meta.frames,
-                        format_bytes(ram),
-                        format_bytes(MAX_CLIP_RAM)
-                    ));
-                }
-                ClipPlan {
-                    name,
-                    ram_bytes: ram,
-                    problem,
-                }
-            }
+            Ok(meta) => plan_video(name, &meta),
             Err(err) => ClipPlan {
                 name,
                 ram_bytes: 0,
@@ -830,9 +805,9 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
             },
         }
     } else {
-        match image::image_dimensions(path) {
-            Ok((width, height)) => {
-                let ram = u64::from(width) * u64::from(height) * 4;
+        match super::decoder::stored_image(path) {
+            Ok(image) => {
+                let ram = super::decoder::stored_rgba_bytes(&image);
                 ClipPlan {
                     name,
                     ram_bytes: ram,
@@ -848,9 +823,62 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
             Err(err) => ClipPlan {
                 name,
                 ram_bytes: 0,
-                problem: Some(err.to_string()),
+                problem: Some(err),
             },
         }
+    }
+}
+
+/// Reserve the decoder's frame allowance, not the raw ffprobe count.
+///
+/// `decode_all_frames` may store `frames + frames/4 + 8` RGBA frames, still
+/// capped at [`MAX_CLIP_RAM`]. A clip whose allowance exceeds that cap is
+/// refused here so the shared budget cannot be reserved short.
+fn plan_video(name: String, meta: &VideoProbe) -> ClipPlan {
+    let ram = match video_ram_bytes(meta) {
+        Ok(ram) => ram,
+        Err(err) => {
+            return ClipPlan {
+                name,
+                ram_bytes: 0,
+                problem: Some(err),
+            };
+        }
+    };
+    let mut problem = None;
+    if meta.duration_secs > max_predecode_secs() {
+        problem = Some(format!(
+            "{:.0}s is over the {:.0}s decode limit",
+            meta.duration_secs,
+            max_predecode_secs()
+        ));
+    } else if ram > MAX_CLIP_RAM {
+        problem = Some(format!(
+            "{}x{} {} × {} frames would decode to {}, over {} per clip",
+            meta.width,
+            meta.height,
+            meta.pix_fmt,
+            meta.frames,
+            format_bytes(ram),
+            format_bytes(MAX_CLIP_RAM)
+        ));
+    }
+    ClipPlan {
+        name,
+        ram_bytes: ram,
+        problem,
+    }
+}
+
+fn video_ram_bytes(meta: &VideoProbe) -> Result<u64, String> {
+    #[cfg(feature = "video")]
+    {
+        Ok(super::video::decode_allowance(meta.width, meta.height, meta.frames)?.ram_bytes)
+    }
+    #[cfg(not(feature = "video"))]
+    {
+        let _ = meta;
+        Err("video decoding is not enabled".into())
     }
 }
 
@@ -1024,7 +1052,19 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
     if kind == "video" {
         match probe_video_meta(path) {
             Ok(meta) => {
-                let ram = meta.decoded_bytes;
+                let ram = match video_ram_bytes(&meta) {
+                    Ok(ram) => ram,
+                    Err(err) => {
+                        return Probed {
+                            width: meta.width,
+                            height: meta.height,
+                            fps: meta.fps,
+                            duration_secs: meta.duration_secs,
+                            status: "unsupported".into(),
+                            detail: err,
+                        };
+                    }
+                };
                 let too_long = meta.duration_secs > max_predecode_secs();
                 let too_big = ram > MAX_CLIP_RAM;
                 let (status, detail) = if too_long {
@@ -1063,9 +1103,11 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
             },
         }
     } else {
-        match image::image_dimensions(path) {
-            Ok((width, height)) => {
-                let ram = u64::from(width) * u64::from(height) * 4;
+        match super::decoder::stored_image(path) {
+            Ok(image) => {
+                let ram = super::decoder::stored_rgba_bytes(&image);
+                let width = image.width;
+                let height = image.height;
                 if ram > MAX_CLIP_RAM {
                     Probed {
                         width,
@@ -1105,7 +1147,6 @@ struct VideoProbe {
     duration_secs: f64,
     frames: u64,
     pix_fmt: String,
-    decoded_bytes: u64,
 }
 
 fn max_predecode_secs() -> f64 {
@@ -1129,8 +1170,7 @@ fn probe_video_meta(path: &Path) -> Result<VideoProbe, String> {
             fps: meta.fps,
             duration_secs: meta.duration_secs,
             frames: meta.frame_count(),
-            pix_fmt: meta.pix_fmt.clone(),
-            decoded_bytes: meta.decoded_bytes(),
+            pix_fmt: meta.pix_fmt,
         })
     }
     #[cfg(not(feature = "video"))]
@@ -2036,6 +2076,146 @@ mod tests {
         let kept = lib.items.iter().find(|item| item.name == "clip.png").unwrap();
         assert_eq!(kept.status, "missing");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn write_indexed_gif(path: &Path, frames: u8) {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder =
+                gif::Encoder::new(&mut bytes, 2, 2, &[0, 0, 0, 255, 255, 255]).unwrap();
+            for index in 0..frames {
+                let mut frame = gif::Frame::default();
+                frame.width = 2;
+                frame.height = 2;
+                frame.delay = 4;
+                frame.buffer = std::borrow::Cow::Owned(vec![index; 4]);
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn lossless_vp8l_chunk() -> Vec<u8> {
+        let mut file = Vec::new();
+        image_webp::WebPEncoder::new(&mut file)
+            .encode(&[255, 0, 0], 1, 1, image_webp::ColorType::Rgb8)
+            .unwrap();
+        file[12..].to_vec()
+    }
+
+    fn write_riff_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+    }
+
+    fn write_animated_webp(path: &Path, frames: u32) {
+        let vp8l = lossless_vp8l_chunk();
+        let mut payload = Vec::new();
+        let mut vp8x = [0u8; 10];
+        vp8x[0] = 0b0000_0010;
+        write_riff_chunk(&mut payload, b"VP8X", &vp8x);
+        write_riff_chunk(&mut payload, b"ANIM", &[0, 0, 0, 0, 0, 0]);
+        for _ in 0..frames {
+            let mut anmf = vec![0u8; 16];
+            anmf[12] = 50;
+            anmf.extend_from_slice(&vp8l);
+            write_riff_chunk(&mut payload, b"ANMF", &anmf);
+        }
+        let mut file = Vec::new();
+        file.extend_from_slice(b"RIFF");
+        file.extend_from_slice(&((4 + payload.len()) as u32).to_le_bytes());
+        file.extend_from_slice(b"WEBP");
+        file.extend_from_slice(&payload);
+        fs::write(path, file).unwrap();
+    }
+
+    #[test]
+    fn animated_gif_and_webp_plans_count_every_stored_frame() {
+        let dir = std::env::temp_dir().join(format!("fosfora-anim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let gif_path = dir.join("two.gif");
+        write_indexed_gif(&gif_path, 2);
+        let gif_plan = plan_clip(&gif_path);
+        assert!(gif_plan.problem.is_none(), "{:?}", gif_plan.problem);
+        assert_eq!(gif_plan.ram_bytes, 2 * 2 * 4 * 2);
+        let gif = crate::media::decoder::load_media(&gif_path).unwrap();
+        assert_eq!(gif.frame_count(), 2);
+
+        let one = dir.join("one.gif");
+        write_indexed_gif(&one, 1);
+        assert_eq!(plan_clip(&one).ram_bytes, 2 * 2 * 4);
+
+        let webp_path = dir.join("three.webp");
+        write_animated_webp(&webp_path, 3);
+        let webp_plan = plan_clip(&webp_path);
+        assert!(webp_plan.problem.is_none(), "{:?}", webp_plan.problem);
+        assert_eq!(webp_plan.ram_bytes, 3 * 4);
+        let webp = crate::media::decoder::load_media(&webp_path).unwrap();
+        assert_eq!(webp.frame_count(), 3);
+
+        let still = dir.join("still.webp");
+        let mut still_bytes = Vec::new();
+        image_webp::WebPEncoder::new(&mut still_bytes)
+            .encode(&[0, 255, 0], 1, 1, image_webp::ColorType::Rgb8)
+            .unwrap();
+        fs::write(&still, still_bytes).unwrap();
+        assert_eq!(plan_clip(&still).ram_bytes, 4);
+
+        let broken = dir.join("broken.gif");
+        fs::write(&broken, b"GIF89a\x01\x00\x01\x00\x00\x00\x00").unwrap();
+        let broken_plan = plan_clip(&broken);
+        assert_eq!(broken_plan.ram_bytes, 0);
+        let problem = broken_plan.problem.expect("unknown gif frame count");
+        assert!(problem.contains("cannot be known"), "{problem}");
+
+        let png = dir.join("plate.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&png)
+            .unwrap();
+        assert_eq!(plan_clip(&png).ram_bytes, 16);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn video_reservation_uses_the_decoder_frame_cap() {
+        let meta = VideoProbe {
+            width: 16,
+            height: 16,
+            fps: 24.0,
+            duration_secs: 4.0,
+            frames: 100,
+            pix_fmt: "yuv420p".into(),
+        };
+        let plan = plan_video("clip.mp4".into(), &meta);
+        let bare = 100 * 16 * 16 * 4;
+        let slack_frames = 100 + 25 + 8;
+        assert_eq!(plan.ram_bytes, slack_frames as u64 * 16 * 16 * 4);
+        assert_ne!(plan.ram_bytes, bare);
+        assert!(plan.ram_bytes <= MAX_CLIP_RAM);
+        assert!(plan.problem.is_none(), "{:?}", plan.problem);
+
+        let over = VideoProbe {
+            width: 16,
+            height: 16,
+            fps: 24.0,
+            duration_secs: 10.0,
+            frames: 1_700_000,
+            pix_fmt: "yuv420p".into(),
+        };
+        let bare_over = 1_700_000u64 * 16 * 16 * 4;
+        assert!(bare_over <= MAX_CLIP_RAM);
+        let refused = plan_video("long.mp4".into(), &over);
+        assert!(refused.ram_bytes > MAX_CLIP_RAM);
+        let problem = refused.problem.expect("slack over the per-clip cap");
+        assert!(problem.contains("per clip"), "{problem}");
     }
 
     #[test]
