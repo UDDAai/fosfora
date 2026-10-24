@@ -2911,9 +2911,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             ),
             (
                 "organic_liquid_state.wgsl",
-                "a reaction-diffusion integrator, not an image: nothing decays, and its \
-                 step size is scaled by frame_steps() so the chemistry advances the same \
-                 amount per second at any frame rate",
+                "a reaction-diffusion integrator, not an image: nothing decays; its \
+                 per-frame step is not frame-time scaled yet (follow-up)",
             ),
             (
                 "phosphor.wgsl",

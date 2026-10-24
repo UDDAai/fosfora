@@ -40,9 +40,7 @@ fn fs_main(@builtin(position) frag_coord: vec4f) -> @location(0) vec4f {
     let blur_j = input0(fract(uv_red + jitter)).x;
 
     // 0.5 on the slider is the original coefficient. 0 holds the field still.
-    // The original steps once per 60 Hz frame; frame_steps() keeps the chemistry
-    // advancing the same amount per second at any frame rate (#1986).
-    let flow = max(param(0u), 0.0) * 2.0 * frame_steps();
+    let flow = max(param(0u), 0.0) * 2.0;
     var new_red = prev;
     new_red += ((noise.x - 0.5) * 0.0025 - 0.002 + u.bass * 0.003) * flow;
     new_red -= (blur_j - prev_j) * 0.047 * flow;
