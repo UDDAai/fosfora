@@ -382,7 +382,7 @@ export function LayersPanel() {
                 {layer.effect_name && !layer.locked ? (
                   <button
                     type="button"
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className="shrink-0 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground"
                     onClick={(event) => {
                       event.stopPropagation()
                       send({ type: 'clear_layer_effect', index })
@@ -1184,9 +1184,9 @@ export function ShowPanel() {
           <CardDescription>{show?.validation || 'Open a show pack in Fosfora.'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex justify-between text-sm">
-            <span>{show?.scene || 'Scene'}</span>
-            <span className="text-muted-foreground">
+          <div className="flex justify-between gap-3 text-sm">
+            <span className="min-w-0 truncate">{show?.scene || 'Scene'}</span>
+            <span className="min-w-0 truncate text-muted-foreground">
               {show?.next_scene
                 ? `next ${show.next_scene}${show.next_scene_secs != null ? ` at ${clock(show.next_scene_secs * 1000)}` : ''}`
                 : ''}

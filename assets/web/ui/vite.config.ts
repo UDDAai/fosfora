@@ -4,6 +4,9 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 
+// The dev server proxies to a running engine; FOSFORA_ENGINE points it at another one.
+const engine = process.env.FOSFORA_ENGINE ?? 'http://127.0.0.1:9002'
+
 // Fosfora serves one HTML document and redirects every other path to /.
 // The production build inlines JS and CSS into that document.
 export default defineConfig({
@@ -18,9 +21,9 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/ws': { target: 'http://127.0.0.1:9002', ws: true },
-      '/api': { target: 'http://127.0.0.1:9002' },
-      '/health': { target: 'http://127.0.0.1:9002' },
+      '/ws': { target: engine, ws: true },
+      '/api': { target: engine },
+      '/health': { target: engine },
     },
   },
   build: {
