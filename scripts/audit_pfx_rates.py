@@ -258,8 +258,8 @@ def scan_body(raw, all_lines, lo, hi, helpers=frozenset()):
         # Taint does not cross a call, so a helper handed unbounded time AND a
         # param is reported as a site of its own: Tesla's
         # `get_dipole_positions(u.time, mode, rotation, ...)` computes
-        # `t * rotation` inside, and Etch's `etch_clearing(clear_cycle, u.time)`
-        # computes `fract(t / clear_cycle)` — both invisible to the product walk.
+        # `t * rotation` inside, and the (since removed) Etch's
+        # `etch_clearing(clear_cycle, u.time)` computes `fract(t / clear_cycle)` — both invisible to the product walk.
         for fn, arg in call_args(line):
             if fn not in helpers or FN_START.match(line):
                 continue

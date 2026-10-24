@@ -435,7 +435,7 @@ mod tests {
             );
             // The render must not be empty — a black/transparent output would
             // pass equality vacuously. Checked MID-cycle: a loop's start can
-            // legitimately be its quietest frame (Fenestra opens released).
+            // legitimately be its quietest frame (an overlay can open released).
             // frames/2 of an 8-bar loop is a cycle BOUNDARY (quiet again for a
             // 4-bar cycle) — probe one bar in, where every family member is live.
             let f_mid = session.render_frame_at(session.timing.frames / 8).unwrap();
@@ -1053,13 +1053,10 @@ mod tests {
         // value, because a ceiling nobody has seen fail is not a guard.
         #[rustfmt::skip]
         let sites = [
-            // FLOOR REFERENCES. Every damping in these three is already
+            // FLOOR REFERENCES. Every damping in these two is already
             // pow(k, dt*60) or 1-exp(-k*dt), so whatever they read is stochastic
             // spawn scatter, not a bug. Nothing below their level is a claim.
-            // Morph is the true zero: it places particles from a target image and
-            // never touches u.seed, so it reads 0.00 on every statistic.
             SimSite { effect: "Pegboard",     trail_param: None, audio: N, mad: 0.60, witness: None },
-            SimSite { effect: "Morph",        trail_param: None, audio: N, mad: 0.10, witness: None },
             SimSite { effect: "Cleave",       trail_param: T,    audio: N, mad: 0.40, witness: None },
             // GUARDED. Sub-stepping the RK4 integrator: 0.75 -> 0.06 blocked, and
             // the brightness ramp across 30/60/120 went 4.35/3.77/3.48 (-20%) to
@@ -1155,7 +1152,7 @@ mod tests {
 
         // Bisecting one site means editing its shader and re-reading it, and
         // assets/ is read at RUNTIME, so a cell is a text edit plus a test run
-        // with no rebuild. Running all sixteen sites per cell would make that
+        // with no rebuild. Running all fifteen sites per cell would make that
         // two minutes instead of five seconds. Unset, every site runs.
         let only = std::env::var("PSIM_ONLY").unwrap_or_default();
         // Audio mode override, for asking whether a site's verdict is a property

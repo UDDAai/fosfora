@@ -2,8 +2,8 @@
 //!
 //! Models could already be *obstacles* (#1851) but never a particle **source**:
 //! `morph::load_morph_target` knew `geometry:`, `text:`, `image:` and `video:`, and
-//! the image emitter knew stills, video and webcam. A user could not point Raster,
-//! Morph, Pegboard or Etch at their own mesh or scanned capture.
+//! the image emitter knew stills, video and webcam. A user could not point Raster
+//! or Pegboard at their own mesh or scanned capture.
 //!
 //! # How a model becomes particles
 //!
@@ -921,8 +921,8 @@ mod tests {
         assert!(sd > 0.01, "flat frame — luminance sd {sd} (mean {mean})");
         // The shading is encoded perceptually (see srgb_to_linear in
         // model_sample.wgsl) so the cube's lit and shadowed faces land far apart.
-        // A model whose tones all bunch together gives Pegboard's peg tray and
-        // Etch's scan bands nothing to quantize.
+        // A model whose tones all bunch together gives Pegboard's peg tray
+        // nothing to quantize.
         //
         // The threshold is calibrated against the regression it exists to catch,
         // by measuring BOTH ways on this fixed cube and pose: with the perceptual

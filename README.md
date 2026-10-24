@@ -18,34 +18,28 @@
 
 Fosfora is a free, open-source music visualizer built for actually performing with. There's
 nothing to code, no account to make, and no project to set up: open it, play music, and it
-reacts. When you want more, every knob is there — 56 effects, an eight-layer stack, MIDI, OSC,
+reacts. When you want more, every knob is there — 52 effects, an eight-layer stack, MIDI, OSC,
 your phone as a control surface, a webcam, and four ways out to your video mixer: NDI, Spout,
 Syphon, or a virtual camera.
 
 ## See it move
 
-Nine of the fifty-six, eight at default settings. Fluvid reacts to whatever moves on the
-layers beneath it, so it is shown over a dancer video with tuned settings:
+Six of the fifty-two, all at default settings:
 
 <table>
 <tr>
 <td width="33%"><img src="assets/media/tiles/cymatics.webp" width="100%" alt="Cymatics"><br><b>Cymatics</b><br><sub>Chladni standing waves, per band</sub></td>
-<td width="33%"><img src="assets/media/tiles/morph.webp" width="100%" alt="Morph"><br><b>Morph</b><br><sub>Particles spring between images</sub></td>
 <td width="33%"><img src="assets/media/tiles/murmur.webp" width="100%" alt="Murmur"><br><b>Murmur</b><br><sub>Starling murmuration at twilight</sub></td>
+<td width="33%"><img src="assets/media/tiles/intarsia.webp" width="100%" alt="Intarsia"><br><b>Intarsia</b><br><sub>Beat-revealed mosaic inlay</sub></td>
 </tr>
 <tr>
-<td><img src="assets/media/tiles/intarsia.webp" width="100%" alt="Intarsia"><br><b>Intarsia</b><br><sub>Beat-revealed mosaic inlay</sub></td>
 <td><img src="assets/media/tiles/symbiosis.webp" width="100%" alt="Symbiosis"><br><b>Symbiosis</b><br><sub>Particle life, ecosystems emerging</sub></td>
-<td><img src="assets/media/tiles/fluvid.webp" width="100%" alt="Fluvid"><br><b>Fluvid</b><br><sub>Motion stirs a fluid, here a dancer</sub></td>
-</tr>
-<tr>
 <td><img src="assets/media/tiles/genesis.webp" width="100%" alt="Genesis"><br><b>Genesis</b><br><sub>Two species, self-organizing</sub></td>
 <td><img src="assets/media/tiles/accretion.webp" width="100%" alt="Accretion"><br><b>Accretion</b><br><sub>N-body gravity, discs and slingshots</sub></td>
-<td><img src="assets/media/tiles/lumen.webp" width="100%" alt="Lumen"><br><b>Lumen</b><br><sub>Real-time global illumination</sub></td>
 </tr>
 </table>
 
-**→ [See all 56 effects in the gallery](docs/GALLERY.md)**
+**→ [See all 52 effects in the gallery](docs/GALLERY.md)**
 
 ## Past the defaults
 
@@ -130,13 +124,13 @@ prebuilt downloads don't include it. Building it from source for your own rig is
 
 ## The effects
 
-**56 built-in**, all audio-reactive out of the box, every parameter a slider you can map to
+**52 built-in**, all audio-reactive out of the box, every parameter a slider you can map to
 MIDI or OSC. [Full gallery with clips →](docs/GALLERY.md)
 
-**Shaders** — Aurora · Beam · Drift · Fluvid · Frost · Iris · Prism · Pulse · Shards · Storm · Strata · Tunnel
+**Shaders** — Aurora · Beam · Drift · Frost · Iris · Prism · Pulse · Shards · Storm · Strata · Tunnel
 
 **Particle simulations** — Accretion · Array · Cascade · Chaos · Cleave · Cymatics · Flux ·
-Genesis · Morph · Murmur · Mycelium · Polycephalum · Raster · Splat · Symbiosis · Tesla · Tide ·
+Genesis · Murmur · Mycelium · Polycephalum · Raster · Splat · Symbiosis · Tesla · Tide ·
 Turing · Vessel
 
 **Lattice** (3D cellular automata, ray-marched) — 445 · Brain · Builder · Chunky · Clouds ·

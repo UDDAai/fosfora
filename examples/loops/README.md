@@ -11,7 +11,6 @@ fosfora --render-loop examples/loops/tessera.loop.json
 | spec | effect | bpm | bars | the look |
 |---|---|---|---|---|
 | `tessera.loop.json` | Tessera | 120 | 8 | center-out tile breath, punching through the scrim |
-| `fenestra.loop.json` | Fenestra | 124 | 4 | GUI panels snapping in and releasing |
 | `reticle.loop.json` | Reticle | 128 | 4 | four crosshairs rotating targets each bar |
 | `bezel.loop.json` | Bezel | 120 | 4 | border chrome with drifting scanlines |
 | `astrolabe.loop.json` | Astrolabe | 120 | 8 | the full targeting instrument, assembling and retracting |

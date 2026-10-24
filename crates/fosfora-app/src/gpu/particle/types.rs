@@ -240,7 +240,7 @@ pub struct ParticleUniforms {
     /// does. Appended as a fresh 32-byte block — every existing offset stays
     /// put, so a custom sim declaring the old struct still reads correctly.
     /// Needed because `"rates"` integrals go after the packed params, and an
-    /// effect that packs eight (Tesla, Etch) puts them at slot 8.
+    /// effect that packs eight (Tesla) puts them at slot 8.
     pub effect_params_hi: [f32; 8],
     // Total = 992 bytes
 }
@@ -591,7 +591,7 @@ fn default_scale() -> f32 {
     1.0
 }
 /// Shadow floor for model shading. High enough that a cavity still carries tone
-/// for Pegboard/Etch to quantize, low enough that the form still reads.
+/// for Pegboard to quantize, low enough that the form still reads.
 fn default_ambient() -> f32 {
     0.25
 }

@@ -3,6 +3,11 @@
 <!-- Release workflow extracts notes between ## vX.Y.Z headers via awk. -->
 <!-- Keep the "## vX.Y.Z — date" format for automatic release notes. -->
 
+## Unreleased
+
+### Removed
+- Removed the Etch, Fenestra, Fluvid and Morph effects.
+
 ## v1.39.0 — 2026-09-22
 
 <table>
