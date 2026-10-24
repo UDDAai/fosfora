@@ -10,7 +10,11 @@ type HeldSliderProps = {
   onChange: (value: number) => void
 }
 
-/** Keeps the thumb where the operator left it while a state broadcast arrives. */
+/**
+ * Keeps the thumb where the operator left it while a state broadcast arrives.
+ * A press anywhere on the row jumps there and drags on; a press within 12 px
+ * of the thumb grabs it instead (see Slider).
+ */
 export function HeldSlider({
   value,
   min = 0,

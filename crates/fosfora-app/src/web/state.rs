@@ -58,10 +58,16 @@ fn first_error_line(raw: &str) -> String {
 }
 
 /// Short messages for the controller: the engine's load error split on its
-/// "; " joins, plus each failed layer shader as "effect: first error line"
-/// (never the shader source). Repeats are dropped, order is kept.
-pub fn error_messages(load_error: Option<&str>, layers: &[LayerInfo]) -> Vec<String> {
+/// "; " joins, the last save failure (for example a refused scene name), plus
+/// each failed layer shader as "effect: first error line" (never the shader
+/// source). Repeats are dropped, order is kept.
+pub fn error_messages(
+    load_error: Option<&str>,
+    save_error: Option<&str>,
+    layers: &[LayerInfo],
+) -> Vec<String> {
     let loads = load_error.into_iter().flat_map(|e| e.split("; "));
+    let saves = save_error.into_iter();
     let shaders = layers.iter().enumerate().filter_map(|(i, l)| {
         let err = l.shader_error.as_deref()?;
         let who = l
@@ -72,7 +78,7 @@ pub fn error_messages(load_error: Option<&str>, layers: &[LayerInfo]) -> Vec<Str
         Some(format!("{who}: {}", first_error_line(err)))
     });
     let mut out: Vec<String> = Vec::new();
-    for msg in loads.map(first_error_line).chain(shaders) {
+    for msg in loads.chain(saves).map(first_error_line).chain(shaders) {
         if !msg.is_empty() && !out.contains(&msg) {
             out.push(msg);
         }
@@ -348,7 +354,11 @@ pub fn build_full_state(
         requested_preset: workspace.requested_preset.clone(),
         loading_preset: workspace.loading_preset.clone(),
         load_error: workspace.load_error.clone(),
-        error_messages: error_messages(workspace.load_error.as_deref(), layer_infos),
+        error_messages: error_messages(
+            workspace.load_error.as_deref(),
+            Some(workspace.save_detail),
+            layer_infos,
+        ),
         command_drops: workspace.command_drops,
         show: show.cloned(),
     };
@@ -549,7 +559,11 @@ mod tests {
 
     #[test]
     fn error_messages_repeat_is_shown_once() {
-        let msgs = error_messages(Some("Missing media 'a.mp4'; Missing media 'a.mp4'"), &[]);
+        let msgs = error_messages(
+            Some("Missing media 'a.mp4'; Missing media 'a.mp4'"),
+            None,
+            &[],
+        );
         assert_eq!(msgs, vec!["Missing media 'a.mp4'".to_string()]);
     }
 
@@ -558,7 +572,7 @@ mod tests {
         let raw = "Load error: parsing error: bad token\n  ┌─ wgsl:3:1\nfn main() {}";
         let layers = [layer_with_error(Some("Aurora"), Some(raw))];
         assert_eq!(
-            error_messages(None, &layers),
+            error_messages(None, None, &layers),
             vec!["Aurora: parsing error: bad token".to_string()]
         );
     }
@@ -570,7 +584,7 @@ mod tests {
             layer_with_error(Some("Ok"), None),
             layer_with_error(None, Some(&long)),
         ];
-        let msgs = error_messages(None, &layers);
+        let msgs = error_messages(None, None, &layers);
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].starts_with("Layer 2: xxx"));
         assert!(msgs[0].ends_with("..."));
@@ -580,7 +594,23 @@ mod tests {
     #[test]
     fn error_messages_dedupes_across_sources() {
         let layers = [layer_with_error(Some("A"), Some("boom"))];
-        assert_eq!(error_messages(Some("A: boom"), &layers), vec!["A: boom"]);
+        assert_eq!(
+            error_messages(Some("A: boom"), None, &layers),
+            vec!["A: boom"]
+        );
+    }
+
+    #[test]
+    fn error_messages_include_save_refusal_once() {
+        let refusal = "A scene named glass-room already exists";
+        assert_eq!(
+            error_messages(None, Some(refusal), &[]),
+            vec![refusal.to_string()]
+        );
+        // A repeat of the load error is not shown twice, and an empty detail
+        // (no failed save) adds nothing.
+        assert_eq!(error_messages(Some(refusal), Some(refusal), &[]).len(), 1);
+        assert!(error_messages(None, Some(""), &[]).is_empty());
     }
 
     #[test]
