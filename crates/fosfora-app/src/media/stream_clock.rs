@@ -126,14 +126,14 @@ impl StreamClock {
         if epoch != self.epoch {
             return FrameVerdict::Drop;
         }
-        if !self.looping && index >= self.frame_count {
+        let time = self.start_secs + index as f64 / self.fps;
+        if !self.looping && time > self.last_frame_secs() + EPS_SECS {
             return FrameVerdict::Drop; // padding or loop-around past the end
         }
         if self.last_shown.is_some_and(|last| index <= last) {
             return FrameVerdict::Drop;
         }
         let period = 1.0 / self.fps;
-        let time = self.start_secs + index as f64 / self.fps;
         self.newest_secs = Some(self.newest_secs.map_or(time, |n| n.max(time)));
 
         if !self.anchored {
@@ -369,6 +369,28 @@ mod tests {
         assert!((c.position_secs() - 29.0 / 30.0).abs() < 1e-9);
         assert!(c.position_secs() < 1.0);
         assert!(c.wants_seek().is_none());
+    }
+
+    #[test]
+    fn non_looping_seek_into_middle_drops_frames_past_the_end() {
+        // 60 s clip at 30 fps (1800 frames); seek to 30 s, so index 900 is the last frame.
+        let mut c = StreamClock::new(30.0, 60.0, 0.5).unwrap();
+        let t = transport(true, false, 1.0);
+        c.advance(DT_60, &t);
+        c.seek(30.0);
+        let (mut next, mut dropped, mut shown) = (0, Vec::new(), Vec::new());
+        for i in 0..2400 {
+            shown.extend(tick(&mut c, &t, &mut next, &mut dropped));
+            if i < 1700 {
+                assert!(!c.finished(), "finished early at tick {i}");
+            }
+        }
+        assert_eq!(shown.last(), Some(&899));
+        assert!(c.finished());
+        assert!(dropped.iter().all(|&i| i >= 900), "dropped {dropped:?}");
+        assert_eq!(c.offer(1, 900), FrameVerdict::Drop);
+        assert_eq!(c.offer(1, 1799), FrameVerdict::Drop);
+        assert!(c.position_secs() < 60.0);
     }
 
     #[test]
