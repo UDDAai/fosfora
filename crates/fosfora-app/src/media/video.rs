@@ -28,6 +28,11 @@ pub struct VideoMeta {
     pub frames: Option<u64>,
     /// Source pixel format, e.g. `yuv420p10le`. Decode always yields RGBA8.
     pub pix_fmt: String,
+    /// Size as shown: width and height swap for a clip rotated a quarter turn, and a
+    /// non-square pixel aspect ratio widens or narrows it. ffmpeg applies the rotation
+    /// when it decodes, so a streamed clip is scaled to this, not to `width` x `height`.
+    pub display_width: u32,
+    pub display_height: u32,
 }
 
 impl VideoMeta {
@@ -169,6 +174,8 @@ fn parse_video_metadata(json: &serde_json::Value) -> Result<VideoMeta, String> {
         .or_else(|| frames.map(|n| n as f64 / fps))
         .ok_or("Video has no usable duration or frame count for pre-decoding")?;
 
+    let (display_width, display_height) = display_size(width, height, video_stream);
+
     Ok(VideoMeta {
         width,
         height,
@@ -176,7 +183,32 @@ fn parse_video_metadata(json: &serde_json::Value) -> Result<VideoMeta, String> {
         duration_secs,
         frames,
         pix_fmt: video_stream["pix_fmt"].as_str().unwrap_or("").to_string(),
+        display_width,
+        display_height,
     })
+}
+
+/// Coded size with the pixel aspect ratio applied, then turned by the rotation
+/// (display matrix side data, or the old `rotate` tag). A missing or odd value
+/// leaves the size as coded.
+fn display_size(width: u32, height: u32, stream: &serde_json::Value) -> (u32, u32) {
+    let sar = stream["sample_aspect_ratio"]
+        .as_str()
+        .and_then(|s| s.split_once(':'))
+        .and_then(|(n, d)| Some(n.parse::<f64>().ok()? / d.parse::<f64>().ok()?))
+        .filter(|r| (0.1..=10.0).contains(r))
+        .unwrap_or(1.0);
+    let width = ((f64::from(width) * sar).round() as u32).max(1);
+    let rotation = stream["side_data_list"]
+        .as_array()
+        .and_then(|list| list.iter().find_map(|d| d["rotation"].as_f64()))
+        .or_else(|| stream["tags"]["rotate"].as_str()?.parse().ok())
+        .unwrap_or(0.0);
+    if (rotation / 90.0).round().rem_euclid(2.0) == 1.0 {
+        (height, width)
+    } else {
+        (width, height)
+    }
 }
 
 fn parse_frame_rate(rate: &str) -> Option<f64> {
@@ -452,6 +484,32 @@ mod tests {
         sample["format"]["duration"] = serde_json::Value::Null;
         let err = parse_video_metadata(&sample).unwrap_err();
         assert!(err.contains("duration or frame count"), "{err}");
+    }
+
+    #[test]
+    fn display_size_follows_rotation_and_pixel_aspect() {
+        let size = |extra: serde_json::Value| {
+            let mut sample = sample_video();
+            for (key, value) in extra.as_object().unwrap() {
+                sample["streams"][0][key] = value.clone();
+            }
+            let meta = parse_video_metadata(&sample).unwrap();
+            assert_eq!((meta.width, meta.height), (1280, 720));
+            (meta.display_width, meta.display_height)
+        };
+        assert_eq!(size(json!({})), (1280, 720));
+        assert_eq!(size(json!({"sample_aspect_ratio": "1:1"})), (1280, 720));
+        assert_eq!(size(json!({"sample_aspect_ratio": "0:1"})), (1280, 720));
+        assert_eq!(size(json!({"sample_aspect_ratio": "N/A"})), (1280, 720));
+        assert_eq!(size(json!({"sample_aspect_ratio": "4:3"})), (1707, 720));
+        let turned =
+            json!({"side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}]});
+        assert_eq!(size(turned), (720, 1280));
+        let half_turn = json!({"side_data_list": [{"rotation": 180}]});
+        assert_eq!(size(half_turn), (1280, 720));
+        assert_eq!(size(json!({"tags": {"rotate": "270"}})), (720, 1280));
+        let both = json!({"sample_aspect_ratio": "2:1", "tags": {"rotate": "90"}});
+        assert_eq!(size(both), (720, 2560));
     }
 
     #[test]

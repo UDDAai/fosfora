@@ -2,10 +2,16 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+#[cfg(feature = "video")]
+use super::stream_playback::StreamPlayback;
+use super::stream_policy::StreamPolicy;
+#[cfg(feature = "video")]
+use super::stream_policy::stream_reserve_bytes;
 use super::types::DecodedFrame;
 
 /// Decoded media source: either a static image or animated frames.
 /// Video files are pre-decoded to Animated (same as GIF), enabling instant random access.
+/// A clip too big to hold that way is `Streamed` instead.
 pub enum MediaSource {
     /// Single static image.
     Static(DecodedFrame),
@@ -17,6 +23,15 @@ pub enum MediaSource {
         #[cfg(feature = "video")]
         from_video: bool,
     },
+    /// Video decoded as it plays: a few frames in RAM whatever the clip length.
+    /// Forward only; a seek restarts ffmpeg, so it is not instant like `Animated`.
+    #[cfg(feature = "video")]
+    Streamed {
+        playback: StreamedClip,
+        /// Displayed size, which is also the size of every frame.
+        width: u32,
+        height: u32,
+    },
     /// Live webcam feed — frames arrive from capture thread, not stored here.
     #[cfg(feature = "webcam")]
     Live { width: u32, height: u32 },
@@ -27,19 +42,27 @@ impl MediaSource {
         match self {
             MediaSource::Static(_) => 1,
             MediaSource::Animated { frames, .. } => frames.len(),
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { playback, .. } => playback.estimated_frames() as usize,
             #[cfg(feature = "webcam")]
             MediaSource::Live { .. } => 1,
         }
     }
 
     pub fn is_animated(&self) -> bool {
+        #[cfg(feature = "video")]
+        if matches!(self, MediaSource::Streamed { .. }) {
+            return true;
+        }
         matches!(self, MediaSource::Animated { .. })
     }
 
     pub fn is_video(&self) -> bool {
         #[cfg(feature = "video")]
-        if let MediaSource::Animated { from_video, .. } = self {
-            return *from_video;
+        match self {
+            MediaSource::Animated { from_video, .. } => return *from_video,
+            MediaSource::Streamed { .. } => return true,
+            _ => {}
         }
         false
     }
@@ -52,11 +75,14 @@ impl MediaSource {
         false
     }
 
-    /// First stored frame. Live sources have none until a capture arrives.
+    /// First stored frame. Live and streamed sources have none to lend: a streamed
+    /// clip's frame belongs to its playback.
     pub fn first_frame(&self) -> Option<&super::types::DecodedFrame> {
         match self {
             MediaSource::Static(frame) => Some(frame),
             MediaSource::Animated { frames, .. } => frames.first(),
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { .. } => None,
             #[cfg(feature = "webcam")]
             MediaSource::Live { .. } => None,
         }
@@ -69,10 +95,117 @@ impl MediaSource {
             MediaSource::Animated { frames, .. } => {
                 frames.first().map_or((1, 1), |f| (f.width, f.height))
             }
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { width, height, .. } => (*width, *height),
             #[cfg(feature = "webcam")]
             MediaSource::Live { width, height } => (*width, *height),
         }
     }
+
+    /// RAM this source holds, as the decode budget counts it. Frames held in memory cost
+    /// one RGBA frame each; a streamed clip costs a fixed [`stream_reserve_bytes`],
+    /// the same amount admission reserved for it.
+    pub fn resident_bytes(&self) -> u64 {
+        #[cfg(feature = "video")]
+        if let MediaSource::Streamed { width, height, .. } = self {
+            return stream_reserve_bytes(*width, *height);
+        }
+        let (width, height) = self.dimensions();
+        u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(4)
+            .saturating_mul(self.frame_count() as u64)
+    }
+}
+
+/// A [`StreamPlayback`] that is never torn down on the thread that drops it.
+///
+/// Dropping a playback joins its decoder worker and kills ffmpeg, which takes
+/// milliseconds: too long for the render thread, which drops a layer's media when the
+/// layer is removed or replaced. So dropping a clip hands the playback to one
+/// background reaper thread (`stream-reaper`) and returns at once. If the reaper is
+/// gone, as at shutdown, the playback is dropped in place.
+#[cfg(feature = "video")]
+pub struct StreamedClip(Option<Box<StreamPlayback>>);
+
+/// Streamed clips alive: opened and not yet fully torn down. Zero when every clip
+/// has been dropped and reaped.
+#[cfg(feature = "video")]
+static LIVE_STREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many streamed clips are alive, reaper queue included.
+#[cfg(feature = "video")]
+pub fn live_streams() -> usize {
+    LIVE_STREAMS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(feature = "video")]
+fn reaper() -> Option<&'static crossbeam_channel::Sender<Box<StreamPlayback>>> {
+    static REAPER: std::sync::OnceLock<Option<crossbeam_channel::Sender<Box<StreamPlayback>>>> =
+        std::sync::OnceLock::new();
+    REAPER
+        .get_or_init(|| {
+            let (tx, rx) = crossbeam_channel::unbounded::<Box<StreamPlayback>>();
+            std::thread::Builder::new()
+                .name("stream-reaper".into())
+                .spawn(move || {
+                    for playback in rx {
+                        drop(playback);
+                        LIVE_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                })
+                .ok()?;
+            Some(tx)
+        })
+        .as_ref()
+}
+
+#[cfg(feature = "video")]
+impl StreamedClip {
+    pub(crate) fn new(playback: StreamPlayback) -> Self {
+        LIVE_STREAMS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(Some(Box::new(playback)))
+    }
+}
+
+#[cfg(feature = "video")]
+impl std::ops::Deref for StreamedClip {
+    type Target = StreamPlayback;
+    fn deref(&self) -> &StreamPlayback {
+        self.0.as_deref().expect("playback is present until drop")
+    }
+}
+
+#[cfg(feature = "video")]
+impl std::ops::DerefMut for StreamedClip {
+    fn deref_mut(&mut self) -> &mut StreamPlayback {
+        self.0
+            .as_deref_mut()
+            .expect("playback is present until drop")
+    }
+}
+
+#[cfg(feature = "video")]
+impl Drop for StreamedClip {
+    fn drop(&mut self) {
+        let Some(playback) = self.0.take() else {
+            return;
+        };
+        let playback = match reaper() {
+            Some(tx) => match tx.send(playback) {
+                Ok(()) => return,
+                Err(failed) => failed.0,
+            },
+            None => playback,
+        };
+        drop_now(playback);
+    }
+}
+
+#[cfg(feature = "video")]
+fn drop_now(playback: Box<StreamPlayback>) {
+    drop(playback);
+    LIVE_STREAMS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// Video file extensions.
@@ -81,6 +214,15 @@ pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "webm", "m4v
 
 /// Load an image or animation from a file path.
 pub fn load_media(path: &Path) -> Result<MediaSource, String> {
+    load_media_with(path, StreamPolicy::from_env())
+}
+
+/// [`load_media`] with the streaming policy given, not read from the environment.
+/// A streamed video blocks up to three seconds for its first frame, so call this from
+/// a loader thread, never the render thread.
+pub fn load_media_with(path: &Path, policy: StreamPolicy) -> Result<MediaSource, String> {
+    #[cfg(not(feature = "video"))]
+    let _ = policy;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -89,7 +231,7 @@ pub fn load_media(path: &Path) -> Result<MediaSource, String> {
 
     #[cfg(feature = "video")]
     if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
-        return load_video(path);
+        return load_video(path, policy);
     }
 
     match ext.as_str() {
@@ -99,10 +241,15 @@ pub fn load_media(path: &Path) -> Result<MediaSource, String> {
     }
 }
 
-/// Load a video file by pre-decoding all frames via ffmpeg.
+/// Load a video file: pre-decode all frames via ffmpeg, or stream it when the
+/// [`StreamPolicy`] says the clip is too big or long for that.
 #[cfg(feature = "video")]
-fn load_video(path: &Path) -> Result<MediaSource, String> {
-    use super::video::{MAX_PREDECODE_SECS, decode_all_frames, ffmpeg_available, probe_video};
+fn load_video(path: &Path, policy: StreamPolicy) -> Result<MediaSource, String> {
+    use super::library::max_clip_ram;
+    use super::stream_policy::{describe_decision, should_stream};
+    use super::video::{
+        MAX_PREDECODE_SECS, decode_all_frames, decode_allowance, ffmpeg_available, probe_video,
+    };
 
     if !ffmpeg_available() {
         return Err(format!(
@@ -120,6 +267,21 @@ fn load_video(path: &Path) -> Result<MediaSource, String> {
         meta.duration_secs,
     );
 
+    // The same inputs admission (`library::plan_video`) used to reserve.
+    let all_frames = decode_allowance(meta.width, meta.height, meta.frame_count())?.ram_bytes;
+    let cap = max_clip_ram();
+    if should_stream(policy, meta.duration_secs, all_frames, cap) {
+        let why = describe_decision(
+            policy,
+            meta.duration_secs,
+            meta.frame_count(),
+            all_frames,
+            cap,
+        );
+        log::info!("{}: {}", path.display(), why.unwrap_or_default());
+        return open_streamed(path, &meta);
+    }
+
     if meta.duration_secs > MAX_PREDECODE_SECS {
         return Err(format!(
             "Video too long for pre-decode ({:.0}s > {:.0}s max). \
@@ -133,6 +295,33 @@ fn load_video(path: &Path) -> Result<MediaSource, String> {
         frames,
         delays_ms,
         from_video: true,
+    })
+}
+
+/// Start ffmpeg on the clip and wait (at most three seconds) for its first frame, so
+/// call it from a loader thread. Frames come at the clip's own rate, at the displayed
+/// size, and the layer starts looping like any other media layer.
+#[cfg(feature = "video")]
+fn open_streamed(path: &Path, meta: &super::video::VideoMeta) -> Result<MediaSource, String> {
+    use super::stream_ffmpeg::{StreamSpec, stream_producer};
+
+    let (width, height) = (meta.display_width, meta.display_height);
+    let spec = StreamSpec {
+        source_fps: Some(meta.fps),
+        ..StreamSpec::new(meta.fps, width, height)
+    };
+    let playback = StreamPlayback::open(
+        width,
+        height,
+        meta.fps,
+        meta.duration_secs,
+        true,
+        stream_producer(path.to_path_buf(), spec),
+    )?;
+    Ok(MediaSource::Streamed {
+        playback: StreamedClip::new(playback),
+        width,
+        height,
     })
 }
 
@@ -478,4 +667,149 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
         rgba.push(255);
     }
     rgba
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(width: u32, height: u32) -> DecodedFrame {
+        DecodedFrame {
+            data: vec![0; width as usize * height as usize * 4],
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn frames_in_memory_cost_one_rgba_frame_each() {
+        let still = MediaSource::Static(frame(5, 3));
+        assert_eq!(still.resident_bytes(), 5 * 3 * 4);
+        let clip = MediaSource::Animated {
+            frames: vec![frame(4, 2), frame(4, 2), frame(4, 2)],
+            delays_ms: vec![40; 3],
+            #[cfg(feature = "video")]
+            from_video: true,
+        };
+        // The formula the budget used before streaming: width x height x 4 x frames.
+        assert_eq!(clip.resident_bytes(), 4 * 2 * 4 * 3);
+    }
+
+    /// Resident set of a process, in MB, from `ps` (macOS and Linux).
+    #[cfg(feature = "video")]
+    fn rss_mb(pid: u32) -> f64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+            / 1024.0
+    }
+
+    /// Plays a real clip through the same path a media layer uses, at 60 Hz for
+    /// `FOSFORA_STREAM_SECS` (default 20) of wall time, and prints one `STREAMCHECK`
+    /// line: first-frame time, frames shown against frames expected, drops, seeks and
+    /// peak RSS of this process and of its ffmpeg children. No GPU and no window.
+    ///
+    /// ```text
+    /// FOSFORA_STREAM_CLIP=/path/clip.mp4 nice -n 19 cargo test -p fosfora-app \
+    ///   --features video streams_a_real_clip -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "video")]
+    #[test]
+    #[ignore = "needs ffmpeg and a clip: set FOSFORA_STREAM_CLIP"]
+    fn streams_a_real_clip() {
+        use super::super::types::TransportState;
+        use std::time::{Duration, Instant};
+
+        let path = std::path::PathBuf::from(
+            std::env::var_os("FOSFORA_STREAM_CLIP").expect("set FOSFORA_STREAM_CLIP"),
+        );
+        let secs: f64 = std::env::var("FOSFORA_STREAM_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20.0);
+
+        let opened = Instant::now();
+        let source = load_media_with(&path, StreamPolicy::Auto).expect("load_media");
+        let load_ms = opened.elapsed().as_secs_f64() * 1000.0;
+        let MediaSource::Streamed {
+            mut playback,
+            width,
+            height,
+        } = source
+        else {
+            panic!("{} did not stream", path.display());
+        };
+        let fps = playback.estimated_frames() as f64 / playback.duration_secs();
+        let reserve = source_reserve(width, height);
+
+        let transport = TransportState::default(); // playing, looping, 1x
+        let pid = std::process::id();
+        let children_mb = || -> f64 {
+            let out = std::process::Command::new("pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+                .expect("pgrep");
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .filter_map(|c| c.parse().ok())
+                .map(rss_mb)
+                .sum()
+        };
+        let (mut peak_self, mut peak_children) = (rss_mb(pid), children_mb());
+
+        let frame_time = Duration::from_secs_f64(1.0 / 60.0);
+        let begin = Instant::now();
+        let (mut next, mut last) = (begin, begin);
+        let (mut shown, mut ticks, mut wraps) = (0u64, 0u64, 0u64);
+        let mut last_pos = 0.0;
+        let mut staging = vec![0u8; width as usize * height as usize * 4];
+        while begin.elapsed().as_secs_f64() < secs {
+            next += frame_time;
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            let now = Instant::now();
+            let dt = now.duration_since(last).as_secs_f32().min(0.05);
+            last = now;
+            if playback.tick(dt, &transport) {
+                shown += 1;
+                staging.copy_from_slice(playback.current_frame()); // the upload's CPU cost
+            }
+            let pos = playback.position_secs();
+            wraps += u64::from(pos + 1.0 < last_pos);
+            last_pos = pos;
+            ticks += 1;
+            if ticks % 60 == 0 {
+                peak_self = peak_self.max(rss_mb(pid));
+                peak_children = peak_children.max(children_mb());
+            }
+        }
+        let wall = begin.elapsed().as_secs_f64();
+        let expected = wall * fps;
+        let stats = playback.stats();
+        println!(
+            "STREAMCHECK clip={} size={width}x{height} fps={fps:.2} dur={:.1}s load_ms={load_ms:.0} \
+             first_frame_ms={:.0} shown={shown} expected={expected:.0} pct={:.1} dropped={} \
+             seeks={} restarts={} wraps={wraps} ticks={ticks} rss_self_peak_mb={peak_self:.0} \
+             rss_ffmpeg_peak_mb={peak_children:.0} reserve_mb={:.0} error={:?}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            playback.duration_secs(),
+            stats.first_frame_ms,
+            shown as f64 / expected * 100.0,
+            stats.dropped_frames,
+            stats.seeks,
+            stats.restarts,
+            reserve as f64 / (1024.0 * 1024.0),
+            playback.last_error(),
+        );
+        assert_eq!(staging.len(), width as usize * height as usize * 4);
+    }
+
+    #[cfg(feature = "video")]
+    fn source_reserve(width: u32, height: u32) -> u64 {
+        super::stream_reserve_bytes(width, height)
+    }
 }

@@ -155,6 +155,13 @@ pub struct MediaLayer {
     /// Small JPEG of the first frame, as a data URL, for the control page.
     pub preview_jpeg: Option<String>,
     needs_upload: bool,
+    /// The streamed-clip error the controller was last told about, so one failure
+    /// is reported once however many frames it stays set.
+    #[cfg(feature = "video")]
+    reported_error: Option<String>,
+    /// A message for the controller: an operation this layer cannot do was ignored.
+    #[cfg(feature = "video")]
+    notice: Option<String>,
     // PingPong direction for GIF
     pingpong_forward: bool,
     // Live webcam frame data (set externally by capture thread)
@@ -187,6 +194,9 @@ impl MediaLayer {
             MediaSource::Animated { delays_ms, .. } => {
                 delays_ms.iter().map(|&d| d as f64).sum::<f64>()
             }
+            // Milliseconds, like the summed delays above.
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { playback, .. } => playback.duration_secs() * 1000.0,
             MediaSource::Static(_) => 0.0,
             #[cfg(feature = "webcam")]
             MediaSource::Live { .. } => 0.0,
@@ -229,6 +239,9 @@ impl MediaLayer {
         let first_frame_data: &[u8] = match &source {
             MediaSource::Static(f) => &f.data,
             MediaSource::Animated { frames, .. } => &frames[0].data,
+            // `StreamPlayback::open` waited for this frame.
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { playback, .. } => playback.current_frame(),
             #[cfg(feature = "webcam")]
             MediaSource::Live { width, height } => {
                 black_placeholder = vec![0u8; (*width as usize) * (*height as usize) * 4];
@@ -379,7 +392,13 @@ impl MediaLayer {
             if total_frames == 1 { "" } else { "s" }
         );
 
-        let preview_jpeg = source.first_frame().and_then(preview_data_url);
+        let preview_jpeg = match &source {
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { playback, .. } => {
+                preview_rgba_url(playback.current_frame(), media_width, media_height)
+            }
+            _ => source.first_frame().and_then(preview_data_url),
+        };
 
         Self {
             source,
@@ -404,6 +423,10 @@ impl MediaLayer {
             pos_y: 0.0,
             preview_jpeg,
             needs_upload: false,
+            #[cfg(feature = "video")]
+            reported_error: None,
+            #[cfg(feature = "video")]
+            notice: None,
             pingpong_forward: true,
             #[cfg(feature = "webcam")]
             live_frame_data: None,
@@ -437,6 +460,24 @@ impl MediaLayer {
 
     /// Advance media playback by dt seconds. Sets needs_upload if frame changed.
     pub fn advance(&mut self, dt_secs: f32) {
+        // A streamed clip ticks paused too: its seeks and its end are handled there.
+        #[cfg(feature = "video")]
+        if let MediaSource::Streamed { playback, .. } = &mut self.source {
+            // Forward only: ffmpeg cannot run a clip backwards.
+            if force_forward(&mut self.transport) {
+                log::info!(
+                    "{}: streamed clips play forward only; direction ignored",
+                    self.file_name
+                );
+                self.notice = Some(format!(
+                    "{}: streamed clips play forward only",
+                    self.file_name
+                ));
+            }
+            self.needs_upload |= step_streamed(playback, &mut self.transport, dt_secs);
+            self.current_frame = streamed_frame(playback, self.transport.position);
+            return;
+        }
         if !self.transport.playing {
             return;
         }
@@ -444,6 +485,8 @@ impl MediaLayer {
         let delays_ms = match &self.source {
             MediaSource::Animated { delays_ms, .. } => delays_ms,
             MediaSource::Static(_) => return,
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { .. } => return, // ticked above
             #[cfg(feature = "webcam")]
             MediaSource::Live { .. } => return, // live frames set externally
         };
@@ -523,6 +566,8 @@ impl MediaLayer {
             MediaSource::Animated { frames, .. } => {
                 &frames[self.current_frame.min(frames.len() - 1)].data
             }
+            #[cfg(feature = "video")]
+            MediaSource::Streamed { playback, .. } => playback.current_frame(),
             #[cfg(feature = "webcam")]
             MediaSource::Live { .. } => {
                 live_data = self.live_frame_data.take();
@@ -612,6 +657,12 @@ impl MediaLayer {
 
     /// Seek to a specific frame index. Instant random access (pre-decoded).
     pub fn seek_to_frame(&mut self, frame: usize) {
+        #[cfg(feature = "video")]
+        if let MediaSource::Streamed { playback, .. } = &mut self.source {
+            let secs = playback.duration_secs() * frame as f64 / playback.estimated_frames() as f64;
+            playback.seek(secs);
+            return;
+        }
         let num_frames = self.source.frame_count();
         if num_frames == 0 {
             return;
@@ -626,6 +677,13 @@ impl MediaLayer {
 
     /// Seek to a time position in seconds. Converts to frame index.
     pub fn seek_to_secs(&mut self, secs: f64) {
+        // Runs on the next tick; a streamed seek restarts ffmpeg, so the old frame
+        // stays up until the new one arrives.
+        #[cfg(feature = "video")]
+        if let MediaSource::Streamed { playback, .. } = &mut self.source {
+            playback.seek(secs);
+            return;
+        }
         if let MediaSource::Animated { delays_ms, .. } = &self.source {
             // Walk delays to find frame at this time offset
             let target_ms = secs * 1000.0;
@@ -644,6 +702,10 @@ impl MediaLayer {
 
     /// Current playback position in seconds (computed from current_frame).
     pub fn position_secs(&self) -> f64 {
+        #[cfg(feature = "video")]
+        if let MediaSource::Streamed { playback, .. } = &self.source {
+            return playback.position_secs();
+        }
         if let MediaSource::Animated { delays_ms, .. } = &self.source {
             let ms: f64 = delays_ms
                 .iter()
@@ -659,6 +721,30 @@ impl MediaLayer {
     /// Total duration in seconds.
     pub fn duration_secs(&self) -> f64 {
         self.transport.duration / 1000.0
+    }
+
+    /// A short message for the controller, once: something a streamed clip could not
+    /// do was ignored, or its decoder failed (it then keeps its last frame on screen
+    /// and retries on its own).
+    #[cfg(feature = "video")]
+    pub fn take_notice(&mut self) -> Option<String> {
+        let MediaSource::Streamed { playback, .. } = &self.source else {
+            return None;
+        };
+        if let Some(notice) = self.notice.take() {
+            return Some(notice);
+        }
+        let current = playback.last_error();
+        if current == self.reported_error.as_deref() {
+            return None;
+        }
+        self.reported_error = current.map(str::to_owned);
+        let line = current?.lines().next().unwrap_or_default();
+        Some(format!(
+            "{}: {}",
+            self.file_name,
+            line.chars().take(120).collect::<String>()
+        ))
     }
 
     /// Upload the current placement. Does not touch the decoded frames.
@@ -734,28 +820,69 @@ fn compute_media_uniforms(
     }
 }
 
+/// One render frame of a streamed clip: tick it, then follow its clock. Returns true
+/// when a new frame should be uploaded. The playback keeps `playing` and `looping`
+/// as the operator set them, except that a clip which ran out stops, and pressing
+/// play on a finished clip starts it over.
+#[cfg(feature = "video")]
+fn step_streamed(
+    playback: &mut stream_playback::StreamPlayback,
+    transport: &mut TransportState,
+    dt_secs: f32,
+) -> bool {
+    if transport.playing && playback.finished() {
+        playback.seek(0.0);
+    }
+    let shown = playback.tick(dt_secs, transport);
+    transport.position = playback.position_secs();
+    if transport.playing && playback.finished() {
+        transport.playing = false;
+    }
+    shown
+}
+
+/// Streamed clips cannot run backwards: put the direction back to forward. True when
+/// it was something else, so the caller can say the request was ignored.
+#[cfg(feature = "video")]
+fn force_forward(transport: &mut TransportState) -> bool {
+    let changed = transport.direction != PlayDirection::Forward;
+    transport.direction = PlayDirection::Forward;
+    changed
+}
+
+/// Frame number for the readout: the position as a share of the clip's frames.
+#[cfg(feature = "video")]
+fn streamed_frame(playback: &stream_playback::StreamPlayback, position_secs: f64) -> usize {
+    let frames = playback.estimated_frames();
+    let share = position_secs / playback.duration_secs();
+    ((share * frames as f64) as u64).min(frames - 1) as usize
+}
+
 /// A 96px-wide JPEG of one decoded frame, for the layer row. Nearest sample,
 /// so it stays cheap when a clip is opened.
 fn preview_data_url(frame: &crate::media::types::DecodedFrame) -> Option<String> {
-    if frame.width == 0 || frame.height == 0 {
+    preview_rgba_url(&frame.data, frame.width, frame.height)
+}
+
+fn preview_rgba_url(data: &[u8], width: u32, height: u32) -> Option<String> {
+    if width == 0 || height == 0 {
         return None;
     }
-    let pixels = (frame.width as usize).saturating_mul(frame.height as usize) * 4;
-    if frame.data.len() < pixels {
+    let pixels = (width as usize).saturating_mul(height as usize) * 4;
+    if data.len() < pixels {
         return None;
     }
     let tw: u32 = 96;
-    let th: u32 =
-        ((u64::from(frame.height) * u64::from(tw)) / u64::from(frame.width)).clamp(24, 54) as u32;
+    let th: u32 = ((u64::from(height) * u64::from(tw)) / u64::from(width)).clamp(24, 54) as u32;
     let mut rgb = Vec::with_capacity((tw * th * 3) as usize);
     for y in 0..th {
-        let sy = ((u64::from(y) * u64::from(frame.height)) / u64::from(th))
-            .min(u64::from(frame.height) - 1) as u32;
+        let sy =
+            ((u64::from(y) * u64::from(height)) / u64::from(th)).min(u64::from(height) - 1) as u32;
         for x in 0..tw {
-            let sx = ((u64::from(x) * u64::from(frame.width)) / u64::from(tw))
-                .min(u64::from(frame.width) - 1) as u32;
-            let i = ((sy * frame.width + sx) * 4) as usize;
-            rgb.extend_from_slice(&frame.data[i..i + 3]);
+            let sx = ((u64::from(x) * u64::from(width)) / u64::from(tw)).min(u64::from(width) - 1)
+                as u32;
+            let i = ((sy * width + sx) * 4) as usize;
+            rgb.extend_from_slice(&data[i..i + 3]);
         }
     }
     let mut jpeg = Vec::new();
@@ -857,5 +984,114 @@ mod placement_tests {
             compute_media_uniforms(720, 1280, 1920, 1080, MediaFit::Fit, 1.0, 0.0, 0.0, false);
         assert!(fit.scale[0] < 1.0);
         assert!((fit.scale[1] - 1.0).abs() < 1e-4);
+    }
+}
+
+#[cfg(all(test, feature = "video"))]
+mod stream_it;
+
+#[cfg(all(test, feature = "video"))]
+mod streamed_tests {
+    use super::*;
+    use crate::media::stream_decoder::FrameSource;
+    use crate::media::stream_playback::StreamPlayback;
+    use std::io::Cursor;
+    use std::time::{Duration, Instant};
+
+    const FPS: f64 = 30.0;
+    const DT: f32 = 1.0 / 60.0;
+
+    /// A 2x2 clip of `secs` seconds that ends after its last frame.
+    fn open_clip(secs: f64) -> StreamPlayback {
+        let frames = (secs * FPS).round() as usize;
+        StreamPlayback::open(2, 2, FPS, secs, false, move |start, _looping| {
+            let left = frames - (start * FPS).round() as usize;
+            Ok(FrameSource {
+                reader: Box::new(Cursor::new(vec![0xAB; left * 16])),
+                kill: Box::new(|| {}),
+            })
+        })
+        .unwrap()
+    }
+
+    /// Step at 60 Hz of virtual time, with a pause in real time so the decoder thread
+    /// keeps ahead, until `done(playback, transport, uploads so far)` or a timeout.
+    /// Returns the uploads.
+    fn run(
+        playback: &mut StreamPlayback,
+        transport: &mut TransportState,
+        mut done: impl FnMut(&StreamPlayback, &TransportState, usize) -> bool,
+    ) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut uploads = 0;
+        while !done(playback, transport, uploads) {
+            assert!(Instant::now() < deadline, "timed out");
+            uploads += usize::from(step_streamed(playback, transport, DT));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        uploads
+    }
+
+    #[test]
+    fn a_paused_clip_still_serves_a_seek() {
+        let mut playback = open_clip(2.0);
+        let mut transport = TransportState {
+            playing: false,
+            looping: false,
+            ..TransportState::default()
+        };
+        // Nothing moves while paused.
+        let mut checks = 0;
+        let idle = run(&mut playback, &mut transport, |_, _, _| {
+            checks += 1;
+            checks > 5
+        });
+        assert_eq!(idle, 0);
+        // A seek is handled by the next tick, and its first frame shows while paused.
+        playback.seek(1.0);
+        let uploads = run(&mut playback, &mut transport, |_, _, n| n >= 1);
+        assert_eq!(uploads, 1);
+        assert_eq!(playback.stats().seeks, 1);
+        assert!(transport.position >= 1.0, "{}", transport.position);
+        assert!(!transport.playing);
+    }
+
+    #[test]
+    fn a_clip_that_runs_out_stops_and_play_starts_it_over() {
+        let mut playback = open_clip(0.5);
+        let mut transport = TransportState {
+            looping: false,
+            ..TransportState::default()
+        };
+        let uploads = run(&mut playback, &mut transport, |_, t, _| !t.playing);
+        assert!(uploads >= 10, "{uploads} frames shown");
+        assert!(playback.finished());
+        assert!(transport.position > 0.4, "{}", transport.position);
+
+        // Play again: the clip goes back to the start and keeps playing.
+        transport.playing = true;
+        run(&mut playback, &mut transport, |p, t, _| {
+            t.position < 0.2 && !p.finished()
+        });
+        assert!(transport.playing);
+    }
+
+    #[test]
+    fn reverse_and_ping_pong_are_put_back_to_forward() {
+        let mut transport = TransportState::default();
+        assert!(!force_forward(&mut transport));
+        for direction in [PlayDirection::Reverse, PlayDirection::PingPong] {
+            transport.direction = direction;
+            assert!(force_forward(&mut transport));
+            assert_eq!(transport.direction, PlayDirection::Forward);
+        }
+    }
+
+    #[test]
+    fn the_readout_follows_the_position() {
+        let playback = open_clip(2.0);
+        assert_eq!(streamed_frame(&playback, 0.0), 0);
+        assert_eq!(streamed_frame(&playback, 1.0), 30);
+        assert_eq!(streamed_frame(&playback, 99.0), 59);
     }
 }

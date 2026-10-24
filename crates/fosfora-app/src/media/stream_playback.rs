@@ -20,8 +20,8 @@
 //! even while paused. A new epoch that yields no frame (and no error) within
 //! [`FIRST_FRAME_TIMEOUT`] of tick time counts as an error. Catch-up seeks are gated: the
 //! epoch must be [`CATCH_UP_DWELL_SECS`] old, and the wait doubles after each catch-up
-//! until [`CATCH_UP_QUIET_SECS`] pass without one, so a decoder that cannot keep up does
-//! not thrash.
+//! until the clock has not been behind the decoder for [`CATCH_UP_QUIET_SECS`], so a
+//! decoder that cannot keep up does not thrash.
 //!
 //! Looping is the producer's job (`-stream_loop`), fixed when a stream is opened. Turning
 //! it on mid-clip takes effect when the stream ends (the end is then a restart at the
@@ -34,8 +34,6 @@
 //! If that fails too the clock freezes on the last frame until a seek starts a new epoch.
 //! The retry is re-armed after [`RETRY_REARM_SECS`] of frames, so a stream that breaks at
 //! the same spot cannot loop forever.
-//!
-//! Not yet wired into the app.
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
@@ -56,8 +54,9 @@ pub const CATCH_UP_DWELL_SECS: f64 = 1.0;
 /// Longest wait between catch-up seeks.
 const CATCH_UP_DWELL_MAX_SECS: f64 = 16.0;
 
-/// Tick seconds without a catch-up seek after which the wait drops back to
-/// [`CATCH_UP_DWELL_SECS`].
+/// Tick seconds the clock must stay within the catch-up threshold of the decoder
+/// before the wait drops back to [`CATCH_UP_DWELL_SECS`]. A decoder that stays behind
+/// never resets it, so the wait can double up to its maximum.
 pub const CATCH_UP_QUIET_SECS: f64 = 5.0;
 
 /// Tolerance for float error when comparing media times (0.1 ms), as in the clock.
@@ -111,8 +110,8 @@ pub struct StreamPlayback {
     awaiting_first: bool,
     /// Epoch age needed for the next catch-up seek.
     catch_up_dwell_secs: f64,
-    /// Tick seconds since the last catch-up seek.
-    since_catch_up_secs: f64,
+    /// Tick seconds since the clock last wanted a catch-up seek.
+    quiet_secs: f64,
     /// The stream has nothing more to give: it ended, or ran past the end of a
     /// non-looping clip. Cleared by a seek.
     ended: bool,
@@ -219,7 +218,7 @@ impl StreamPlayback {
             epoch_secs: 0.0,
             awaiting_first: false,
             catch_up_dwell_secs: CATCH_UP_DWELL_SECS,
-            since_catch_up_secs: CATCH_UP_QUIET_SECS,
+            quiet_secs: 0.0,
             ended: false,
             retry_due: false,
             retry_spent: false,
@@ -249,10 +248,6 @@ impl StreamPlayback {
             0.0
         };
         self.epoch_secs += tick_secs;
-        self.since_catch_up_secs += tick_secs;
-        if self.since_catch_up_secs >= CATCH_UP_QUIET_SECS {
-            self.catch_up_dwell_secs = CATCH_UP_DWELL_SECS;
-        }
 
         // Seeks due before the drain: the operator's, and a looping change.
         let mut seek = self.operator_seek.take().map(|s| (SeekReason::Operator, s));
@@ -288,6 +283,18 @@ impl StreamPlayback {
             ));
         }
 
+        // Quiet means the decoder is keeping up. The epoch's age is no measure of that:
+        // it restarts at every seek, so it could never reach the longer waits.
+        let behind = self.clock.wants_seek();
+        if behind.is_some() {
+            self.quiet_secs = 0.0;
+        } else {
+            self.quiet_secs += tick_secs;
+            if self.quiet_secs >= CATCH_UP_QUIET_SECS {
+                self.catch_up_dwell_secs = CATCH_UP_DWELL_SECS;
+            }
+        }
+
         if !seeked {
             let due = if self.retry_due {
                 Some((SeekReason::Retry, self.clock.position_secs()))
@@ -296,8 +303,7 @@ impl StreamPlayback {
             } else if self.ended || self.failed {
                 None
             } else {
-                self.clock
-                    .wants_seek()
+                behind
                     .filter(|_| self.epoch_secs >= self.catch_up_dwell_secs)
                     .map(|s| (SeekReason::CatchUp, s))
             };
@@ -448,7 +454,6 @@ impl StreamPlayback {
                 self.stats.seeks += 1;
                 self.catch_up_dwell_secs =
                     (self.catch_up_dwell_secs * 2.0).min(CATCH_UP_DWELL_MAX_SECS);
-                self.since_catch_up_secs = 0.0;
             }
             SeekReason::Restart => self.stats.restarts += 1,
             SeekReason::Retry => {
@@ -814,6 +819,35 @@ mod tests {
         assert!(shown.first().unwrap() >= &first, "{shown:?}");
         assert!(pb.stats().seeks >= 1);
         assert_eq!(pb.stats().restarts, 0);
+    }
+
+    #[test]
+    fn the_catch_up_wait_keeps_doubling_while_the_decoder_stays_behind() {
+        // Every stream stalls after three frames, so the clock is always behind. The
+        // wait between seeks doubles 1, 2, 4, 8, 16 s: the old reset by epoch age
+        // brought it back to 1 s after about five seconds.
+        let (mut pb, _) = start_with(600.0, false, |_| {
+            Ok(Opts {
+                stall_at: Some(3),
+                ..Opts::default()
+            })
+        });
+        let t = transport(true, false);
+        let mut seek_times = Vec::new();
+        for tick in 1..=40 * 60 {
+            let seeks = pb.stats().seeks;
+            pb.tick(DT, &t);
+            if pb.stats().seeks != seeks {
+                seek_times.push(f64::from(tick) * f64::from(DT));
+                // Let the new stream deliver in real time before virtual time goes on.
+                wait_for("the new stream's first frame", || pb.decoder.queued() > 0);
+            }
+        }
+        let expected = [1.0, 3.0, 7.0, 15.0, 31.0];
+        assert_eq!(seek_times.len(), expected.len(), "{seek_times:?}");
+        for (at, want) in seek_times.iter().zip(expected) {
+            assert!((at - want).abs() < 0.2, "{seek_times:?}");
+        }
     }
 
     #[test]

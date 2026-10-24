@@ -9,13 +9,15 @@
 //! Only the env read in [`StreamPolicy::from_env`] touches the process; everything else
 //! takes the policy as a parameter.
 //!
-//! Not yet wired into the app.
+//! Streaming is off unless [`STREAM_ENV`] says `auto` or `on`: until it has been
+//! rehearsed on the show machine, every clip takes the full-decode path it always had.
 #![allow(dead_code)]
 
 use super::library::format_bytes;
 use super::stream_decoder::POOL_BUFFERS;
 
 /// Env var that picks the [`StreamPolicy`]: `off`, `auto` or `on`, case-insensitive.
+/// Unset means `off`.
 pub const STREAM_ENV: &str = "FOSFORA_VIDEO_STREAM";
 
 /// Under `Auto`, a clip longer than this streams even if it would fit the per-clip cap.
@@ -34,9 +36,10 @@ const PIXELS_1080P: u64 = 1920 * 1080;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StreamPolicy {
     /// Always decode all frames. Clips over the cap are refused, as before streaming.
+    /// The default.
+    #[default]
     Off,
     /// Stream clips that are too big or too long for the all-frames path.
-    #[default]
     Auto,
     /// Stream every clip.
     On,
@@ -53,13 +56,13 @@ impl StreamPolicy {
         }
     }
 
-    /// Policy for an optional env value. Unset is `Auto`; garbage is `Auto` with a warning.
+    /// Policy for an optional env value. Unset is `Off`; garbage is `Off` with a warning.
     pub fn from_env_value(value: Option<&str>) -> Self {
         let Some(value) = value else {
             return Self::default();
         };
         Self::parse(value).unwrap_or_else(|| {
-            log::warn!("{STREAM_ENV}={value:?} is not off, auto or on; using auto");
+            log::warn!("{STREAM_ENV}={value:?} is not off, auto or on; using off");
             Self::default()
         })
     }
@@ -230,13 +233,18 @@ mod tests {
     }
 
     #[test]
-    fn env_value_defaults_to_auto() {
-        assert_eq!(StreamPolicy::from_env_value(None), StreamPolicy::Auto);
+    fn env_value_defaults_to_off() {
+        assert_eq!(StreamPolicy::from_env_value(None), StreamPolicy::Off);
+        assert_eq!(StreamPolicy::default(), StreamPolicy::Off);
         assert_eq!(StreamPolicy::from_env_value(Some("OFF")), StreamPolicy::Off);
+        assert_eq!(
+            StreamPolicy::from_env_value(Some("auto")),
+            StreamPolicy::Auto
+        );
         assert_eq!(StreamPolicy::from_env_value(Some("on")), StreamPolicy::On);
         assert_eq!(
             StreamPolicy::from_env_value(Some("garbage")),
-            StreamPolicy::Auto
+            StreamPolicy::Off
         );
     }
 

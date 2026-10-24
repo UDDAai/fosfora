@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::stream_policy::{StreamPolicy, describe_decision, should_stream, stream_reserve_bytes};
+
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"];
 
 pub const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -85,8 +87,14 @@ pub struct UploadReport {
     pub duplicate: bool,
 }
 
+/// Bump when a probe's verdict can change for the same file, so old entries are
+/// dropped (2: clips over the decode limits became "ok" because they stream).
+const PROBE_CACHE_VERSION: u32 = 2;
+
 #[derive(Default, Serialize, Deserialize)]
 struct ProbeCache {
+    #[serde(default)]
+    version: u32,
     entries: Vec<CachedProbe>,
 }
 
@@ -649,6 +657,7 @@ fn scan_library(request: &ScanRequest) -> (Vec<LibraryItem>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut items = Vec::new();
     let mut next_cache = ProbeCache {
+        version: PROBE_CACHE_VERSION,
         entries: Vec::new(),
     };
 
@@ -917,6 +926,16 @@ pub fn copy_into_library(
 }
 
 pub fn plan_clip(path: &Path) -> ClipPlan {
+    plan_clip_with(path, StreamPolicy::from_env())
+}
+
+/// [`plan_clip`] for a clip that will be decoded in full (a particle or obstacle
+/// source): only a media layer can stream.
+pub fn plan_clip_decoded(path: &Path) -> ClipPlan {
+    plan_clip_with(path, StreamPolicy::Off)
+}
+
+fn plan_clip_with(path: &Path, policy: StreamPolicy) -> ClipPlan {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -935,7 +954,7 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
     };
     if kind == "video" {
         match probe_video_meta(path) {
-            Ok(meta) => plan_video(name, &meta),
+            Ok(meta) => plan_video(name, &meta, policy),
             Err(err) => ClipPlan {
                 name,
                 ram_bytes: 0,
@@ -973,7 +992,10 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
 /// `decode_all_frames` may store `frames + frames/4 + 8` RGBA frames, still
 /// capped at [`max_clip_ram`]. A clip whose allowance exceeds that cap is
 /// refused here so the shared budget cannot be reserved short.
-fn plan_video(name: String, meta: &VideoProbe) -> ClipPlan {
+///
+/// A clip that streams (see [`should_stream`]) is not held to the cap or the
+/// decode length limit: it reserves [`stream_reserve_bytes`], whatever its length.
+fn plan_video(name: String, meta: &VideoProbe, policy: StreamPolicy) -> ClipPlan {
     let ram = match video_ram_bytes(meta) {
         Ok(ram) => ram,
         Err(err) => {
@@ -984,6 +1006,13 @@ fn plan_video(name: String, meta: &VideoProbe) -> ClipPlan {
             };
         }
     };
+    if should_stream(policy, meta.duration_secs, ram, max_clip_ram()) {
+        return ClipPlan {
+            name,
+            ram_bytes: stream_reserve_bytes(meta.display_width, meta.display_height),
+            problem: None,
+        };
+    }
     let mut problem = None;
     if meta.duration_secs > max_predecode_secs() {
         problem = Some(format!(
@@ -1205,7 +1234,18 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
                 };
                 let too_long = meta.duration_secs > max_predecode_secs();
                 let too_big = ram > max_clip_ram();
-                let (status, detail) = if too_long {
+                // A clip that streams is "ok"; the detail says why, and the layer
+                // list shows it only for a status other than "ok".
+                let streams = describe_decision(
+                    StreamPolicy::from_env(),
+                    meta.duration_secs,
+                    meta.frames,
+                    ram,
+                    max_clip_ram(),
+                );
+                let (status, detail) = if let Some(detail) = streams {
+                    ("ok", detail)
+                } else if too_long {
                     (
                         "too_large",
                         format!(
@@ -1281,6 +1321,9 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
 struct VideoProbe {
     width: u32,
     height: u32,
+    /// Size as shown (rotation and pixel aspect applied), which a streamed clip decodes at.
+    display_width: u32,
+    display_height: u32,
     fps: f64,
     duration_secs: f64,
     frames: u64,
@@ -1305,6 +1348,8 @@ fn probe_video_meta(path: &Path) -> Result<VideoProbe, String> {
         Ok(VideoProbe {
             width: meta.width,
             height: meta.height,
+            display_width: meta.display_width,
+            display_height: meta.display_height,
             fps: meta.fps,
             duration_secs: meta.duration_secs,
             frames: meta.frame_count(),
@@ -1620,7 +1665,8 @@ fn cache_path(pack_root: &Path) -> PathBuf {
 fn load_cache(pack_root: &Path) -> ProbeCache {
     fs::read_to_string(cache_path(pack_root))
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+        .and_then(|text| serde_json::from_str::<ProbeCache>(&text).ok())
+        .filter(|cache| cache.version == PROBE_CACHE_VERSION)
         .unwrap_or_default()
 }
 
@@ -2636,12 +2682,14 @@ mod tests {
         let meta = VideoProbe {
             width: 16,
             height: 16,
+            display_width: 16,
+            display_height: 16,
             fps: 24.0,
             duration_secs: 4.0,
             frames: 100,
             pix_fmt: "yuv420p".into(),
         };
-        let plan = plan_video("clip.mp4".into(), &meta);
+        let plan = plan_video("clip.mp4".into(), &meta, StreamPolicy::Auto);
         let bare = 100 * 16 * 16 * 4;
         let slack_frames = 100 + 25 + 8;
         assert_eq!(plan.ram_bytes, slack_frames as u64 * 16 * 16 * 4);
@@ -2652,6 +2700,8 @@ mod tests {
         let over = VideoProbe {
             width: 16,
             height: 16,
+            display_width: 16,
+            display_height: 16,
             fps: 24.0,
             duration_secs: 10.0,
             frames: 1_700_000,
@@ -2659,10 +2709,95 @@ mod tests {
         };
         let bare_over = 1_700_000u64 * 16 * 16 * 4;
         assert!(bare_over <= MAX_CLIP_RAM);
-        let refused = plan_video("long.mp4".into(), &over);
+        let refused = plan_video("long.mp4".into(), &over, StreamPolicy::Off);
         assert!(refused.ram_bytes > MAX_CLIP_RAM);
         let problem = refused.problem.expect("slack over the per-clip cap");
         assert!(problem.contains("per clip"), "{problem}");
+    }
+
+    #[cfg(feature = "video")]
+    fn probe(width: u32, height: u32, fps: f64, secs: f64) -> VideoProbe {
+        VideoProbe {
+            width,
+            height,
+            display_width: width,
+            display_height: height,
+            fps,
+            duration_secs: secs,
+            frames: (fps * secs).round() as u64,
+            pix_fmt: "yuv420p".into(),
+        }
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn a_long_1080p_clip_streams_and_reserves_a_fixed_amount() {
+        let fps = 60000.0 / 1001.0;
+        // The 53.5 s Abstract Liquid clip: 3206 frames, over 26 GB decoded.
+        let long = probe(1920, 1080, fps, 53.486_767);
+        let plan = plan_video("long.mp4".into(), &long, StreamPolicy::Auto);
+        assert!(plan.problem.is_none(), "{:?}", plan.problem);
+        assert_eq!(plan.ram_bytes, stream_reserve_bytes(1920, 1080));
+        // Longer than the decode limit streams too, at the same reserve.
+        let hour = plan_video(
+            "hour.mp4".into(),
+            &probe(1920, 1080, fps, 3600.0),
+            StreamPolicy::Auto,
+        );
+        assert!(hour.problem.is_none(), "{:?}", hour.problem);
+        assert_eq!(hour.ram_bytes, plan.ram_bytes);
+        // A short clip that is only over the per-clip cap streams as well.
+        let short = plan_video(
+            "short.mp4".into(),
+            &probe(1920, 1080, fps, 6.6),
+            StreamPolicy::Auto,
+        );
+        assert!(short.problem.is_none(), "{:?}", short.problem);
+        assert_eq!(short.ram_bytes, plan.ram_bytes);
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn streaming_off_restores_the_old_refusals() {
+        let fps = 60000.0 / 1001.0;
+        let over_cap = plan_video(
+            "long.mp4".into(),
+            &probe(1920, 1080, fps, 53.486_767),
+            StreamPolicy::Off,
+        );
+        let problem = over_cap.problem.expect("over the per-clip cap");
+        assert!(problem.contains("per clip"), "{problem}");
+        let hour = plan_video(
+            "hour.mp4".into(),
+            &probe(1920, 1080, fps, 3600.0),
+            StreamPolicy::Off,
+        );
+        let problem = hour.problem.expect("over the decode limit");
+        assert!(problem.contains("decode limit"), "{problem}");
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn a_short_720p_clip_keeps_the_all_frames_verdict() {
+        // thaw.mp4: 8 s of 720p at 18 fps, 144 frames.
+        let thaw = probe(1280, 720, 18.0, 8.0);
+        let expected = (144 + 144 / 4 + 8) as u64 * 1280 * 720 * 4;
+        for policy in [StreamPolicy::Auto, StreamPolicy::Off] {
+            let plan = plan_video("thaw.mp4".into(), &thaw, policy);
+            assert!(plan.problem.is_none(), "{:?}", plan.problem);
+            assert_eq!(plan.ram_bytes, expected);
+        }
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn a_streamed_clip_reserves_for_its_displayed_size() {
+        let mut turned = probe(1920, 1080, 30.0, 60.0);
+        turned.display_width = 1080;
+        turned.display_height = 3840;
+        let plan = plan_video("portrait.mov".into(), &turned, StreamPolicy::Auto);
+        assert_eq!(plan.ram_bytes, stream_reserve_bytes(1080, 3840));
+        assert!(plan.ram_bytes > stream_reserve_bytes(1920, 1080));
     }
 
     #[test]

@@ -317,14 +317,6 @@ impl FrameStats {
     }
 }
 
-fn decoded_media_layer_bytes(media: &MediaLayer) -> u64 {
-    let (width, height) = media.source.dimensions();
-    u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(4)
-        .saturating_mul(media.source.frame_count() as u64)
-}
-
 impl App {
     pub fn new(window: Arc<Window>) -> Result<Self> {
         let gpu = GpuContext::new(window.clone())?;
@@ -820,8 +812,12 @@ impl App {
         self.last_frame = now;
         if let Some(line) = self.frame_stats.record(now, frame_time) {
             let budget = self.media_jobs.budget();
+            #[cfg(feature = "video")]
+            let streams = crate::media::decoder::live_streams();
+            #[cfg(not(feature = "video"))]
+            let streams = 0;
             log::info!(
-                "perf {line} decoded={} resident={} loading={} budget={}",
+                "perf {line} streams={streams} decoded={} resident={} loading={} budget={}",
                 crate::media::library::format_bytes(self.decoded_media_bytes()),
                 crate::media::library::format_bytes(budget.resident()),
                 crate::media::library::format_bytes(budget.in_flight()),
@@ -1620,6 +1616,11 @@ impl App {
         for layer in &mut self.layer_stack.layers {
             if let LayerContent::Media(ref mut m) = layer.content {
                 m.advance(dt);
+                #[cfg(feature = "video")]
+                if let Some(message) = m.take_notice() {
+                    log::warn!("Streamed clip: {message}");
+                    self.status_error = Some((message, now));
+                }
                 m.upload_frame(&self.gpu.queue);
                 m.write_placement(&self.gpu.queue);
             } else if let Some(parked) = layer.suspended_media.as_mut() {
@@ -2734,7 +2735,7 @@ impl App {
             .layers
             .iter()
             .flat_map(|layer| layer.resident_media())
-            .map(decoded_media_layer_bytes)
+            .map(|media| media.source.resident_bytes())
             .sum()
     }
 
@@ -4855,9 +4856,10 @@ impl App {
                 .map(|cue| cue.preset_id.as_str())
                 .collect();
             // One clip may be referenced by several scenes. Avoid repeated
-            // ffprobe/image-dimensions calls to local or iCloud media.
+            // ffprobe/image-dimensions calls to local or iCloud media. The flag is
+            // whether the clip may stream: only a media layer's clip does.
             let mut probes: std::collections::HashMap<
-                std::path::PathBuf,
+                (std::path::PathBuf, bool),
                 crate::media::library::ClipPlan,
             > = std::collections::HashMap::new();
             for (preset_id, preset) in &pack.presets {
@@ -4869,22 +4871,32 @@ impl App {
                     // Include still-image particle sources and image obstacles;
                     // 3D obstacle models are not decodable RGBA media clips.
                     let paths = [
-                        layer.media_path.as_ref(),
-                        layer.particle_video_path.as_ref(),
-                        layer.particle_image_path.as_ref(),
-                        if layer.obstacle_model.unwrap_or(false) {
-                            None
-                        } else {
-                            layer.obstacle_image_path.as_ref()
-                        },
+                        (layer.media_path.as_ref(), true),
+                        (layer.particle_video_path.as_ref(), false),
+                        (layer.particle_image_path.as_ref(), false),
+                        (
+                            if layer.obstacle_model.unwrap_or(false) {
+                                None
+                            } else {
+                                layer.obstacle_image_path.as_ref()
+                            },
+                            false,
+                        ),
                     ];
-                    for stored in paths.into_iter().flatten() {
+                    for (stored, streams) in paths
+                        .into_iter()
+                        .filter_map(|(stored, streams)| Some((stored?, streams)))
+                    {
                         let path = controller.resolve_path(stored);
                         let exists = path.is_file();
                         let estimated = if exists {
-                            let plan = probes
-                                .entry(path.clone())
-                                .or_insert_with(|| crate::media::library::plan_clip(&path));
+                            let plan = probes.entry((path.clone(), streams)).or_insert_with(|| {
+                                if streams {
+                                    crate::media::library::plan_clip(&path)
+                                } else {
+                                    crate::media::library::plan_clip_decoded(&path)
+                                }
+                            });
                             if let Some(problem) = plan.problem.as_ref() {
                                 media_problems.push(format!("{preset_id} / {stored}: {problem}"));
                             }
