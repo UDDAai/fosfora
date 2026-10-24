@@ -318,8 +318,8 @@ mod tests {
             checked += 1;
         }
         assert!(
-            checked >= 5,
-            "expected the five curated specs, got {checked}"
+            checked >= 4,
+            "expected the four curated specs, got {checked}"
         );
     }
 

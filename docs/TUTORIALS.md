@@ -55,14 +55,14 @@ Effects are the core visual building blocks of Fosfora. Each effect is a WGSL sh
 
 ### Built-In Effects
 
-Fosfora ships with **56 built-in effects**, plus 2 hidden ones (the signature **Phosphor**
+Fosfora ships with **52 built-in effects**, plus 2 hidden ones (the signature **Phosphor**
 intro visual you see at startup, and a rasterizer stress test).
 
 **Shaders** (11): pure fragment shaders, no particles.
 Aurora · Beam · Drift · Frost · Iris · Prism · Pulse · Shards · Storm · Strata · Tunnel
 
-**Particle simulations** (20): GPU compute, from a few thousand particles to two million:
-Accretion · Array · Cascade · Chaos · Cleave · Cymatics · Flux · Genesis · Morph · Murmur ·
+**Particle simulations** (19): GPU compute, from a few thousand particles to two million:
+Accretion · Array · Cascade · Chaos · Cleave · Cymatics · Flux · Genesis · Murmur ·
 Mycelium · Polycephalum · Raster · Reliquary · Splat · Symbiosis · Tesla · Tide · Turing ·
 Vessel
 
@@ -77,7 +77,7 @@ See the **[Effect Gallery](GALLERY.md)** for a clip of every one at default sett
 
 ### Bring Your Own Media
 
-**Raster**, **Morph**, **Pegboard**, **Etch** and **Reliquary** build their picture out of
+**Raster**, **Pegboard** and **Reliquary** build their picture out of
 whatever media you point them at, so swapping the source is the whole point of them. Select one
 of those layers and the Parameters panel grows a source row:
 
@@ -146,22 +146,16 @@ Its own controls decide where the split falls and what the escaping half does:
 
 Reliquary works on any source, not just models. On an ordinary picture the brightest areas
 are the ones that shed. Raster also works for a lit model and keeps the tone intact, it just
-leaves the shafts sitting where they are. Pegboard and Etch are the wrong place to judge a
-light: they re-make your source in a medium with a handful of levels, so the gradient from
-bright cavity to unlit bone collapses into two or three peg brightnesses or scan bands. Worth
+leaves the shafts sitting where they are. Pegboard is the wrong place to judge a
+light: it re-makes your source in a medium with a handful of levels, so the gradient from
+bright cavity to unlit bone collapses into two or three peg brightnesses. Worth
 trying for the graphic look, not for this.
-
-**In Morph**, a model is always a morph *target* rather than the base source. Morph blends
-between four shapes, so there is nothing for a single source to replace. Use the **Model**
-button in the target row (select a slot first to choose where it lands, or let it take the
-next empty one), then blend to it like any other target. The main **Model…** button does the
-same thing on a Morph layer.
 
 Models are saved with presets, pose included.
 
 **Tip:** the bundled art is all bright-subject-on-black, which is what these effects are tuned
-for. A photograph with a dark subject on a light ground comes out inverted. Pegboard and Etch
-have a **Polarity** parameter that flips which end of the tonal range gets inked.
+for. A photograph with a dark subject on a light ground comes out inverted. Pegboard
+has a **Polarity** parameter that flips which end of the tonal range gets inked.
 
 ### Creating Your Own Effects
 
@@ -270,7 +264,7 @@ Fosfora auto-prepends a WGSL shader library to every effect. You can use these f
 - Use `param(0u)` through `param(15u)` to read your effect's parameters
 - Parameters are packed as `array<vec4f, 4>` (16-byte aligned)
 
-**A parameter that sets a speed:** don't write `u.time * speed`. That multiplies every *change* in speed by how long the app has been running, so after a few minutes a binding or a drag on it jumps the picture instead of changing its pace. List it under `"rates"` in the .pfx (`"rates": ["speed"]`, Float or Point2D) and Fosfora keeps its running total, `speed × dt` summed every frame, in the next free slot after your parameters, in the order `"rates"` names them. The parameter's own slot still holds its value, so a shader that also uses the speed as a gain keeps working. If your shader remapped it, as in `u.time * (a * speed + b)`, write `a * param(N) + b * u.time`, which is the same thing integrated. Drift and Storm are short examples. For a parameter that is a period in seconds rather than a speed, write `{"param": "clear_cycle", "period": true}` and the slot holds cycles completed, which replaces `u.time / clear_cycle` (Etch does this). Particle compute shaders read all 16 slots through `param()` too. `scripts/audit_pfx_rates.py` finds the pattern, and the pre-commit hook runs it.
+**A parameter that sets a speed:** don't write `u.time * speed`. That multiplies every *change* in speed by how long the app has been running, so after a few minutes a binding or a drag on it jumps the picture instead of changing its pace. List it under `"rates"` in the .pfx (`"rates": ["speed"]`, Float or Point2D) and Fosfora keeps its running total, `speed × dt` summed every frame, in the next free slot after your parameters, in the order `"rates"` names them. The parameter's own slot still holds its value, so a shader that also uses the speed as a gain keeps working. If your shader remapped it, as in `u.time * (a * speed + b)`, write `a * param(N) + b * u.time`, which is the same thing integrated. Drift and Storm are short examples. For a parameter that is a period in seconds rather than a speed, write `{"param": "clear_cycle", "period": true}` and the slot holds cycles completed, which replaces `u.time / clear_cycle`. Particle compute shaders read all 16 slots through `param()` too. `scripts/audit_pfx_rates.py` finds the pattern, and the pre-commit hook runs it.
 
 **Feedback:**
 - Call `feedback(uv)` to sample the previous frame (when feedback is enabled in the .pfx)
@@ -627,8 +621,8 @@ Layer rows show a diamond and a node count for any layer with a chain. It is **f
 | **Hue Drift** | Rotates hue, optionally drifting over time | `shift` 0–1 turns · `speed` turns per second |
 | **Mix** | Crossfades input 0 toward input 1 | `amount` 0–1 |
 | **Key** | Turns dark into transparent, so a layer can sit on top of another one. `invert` keys out the bright end instead, making a matte | `threshold` 0–1 brightness · `softness` 0–1 ramp · `invert` |
-| **Color Key** | Keeps one family of colors and makes the rest transparent. Under Fluvid, it decides what Fluvid can see: a colored glove, a prop. `invert` drops that color instead | `hue` 0–1 (0 red, ⅓ green, ⅔ blue) · `hue_width` 0–0.5 · `min_saturation` 0–1 · `softness` 0–0.5 · `invert` |
-| **Mask** | Keeps an ellipse or rectangle of the picture and makes the rest transparent. Under Fluvid, put it over your mouth and only your mouth makes smoke; `invert` cuts a region out instead, like a ceiling fan in one corner | `center_x` / `center_y` 0–1 · `width` / `height` 0–1 · `softness` 0–0.5 · `rectangle` · `invert` |
+| **Color Key** | Keeps one family of colors and makes the rest transparent. Under an effect that reads the layers beneath it, it decides what that effect can see: a colored glove, a prop. `invert` drops that color instead | `hue` 0–1 (0 red, ⅓ green, ⅔ blue) · `hue_width` 0–0.5 · `min_saturation` 0–1 · `softness` 0–0.5 · `invert` |
+| **Mask** | Keeps an ellipse or rectangle of the picture and makes the rest transparent. Under an effect that reads the layers beneath it, put it over your mouth and only your mouth drives it; `invert` cuts a region out instead, like a ceiling fan in one corner | `center_x` / `center_y` 0–1 · `width` / `height` 0–1 · `softness` 0–0.5 · `rectangle` · `invert` |
 | **Levels** | Brightness, contrast, gamma and saturation: the grading node | `brightness` ±1 · `contrast` 0–4 · `gamma` 0.2–4 · `saturation` 0–3 |
 | **Blur** | Softens the picture. Partway on `amount` is a haze over a picture that keeps its detail | `radius` 0–48 px · `amount` 0–1 |
 | **Mirror** | Folds the picture about a line, so one half reflects over the other. Both axes gives quadrant symmetry | `horizontal` · `vertical` · `center_x` · `center_y` |
@@ -881,7 +875,7 @@ The shape is read from the image's alpha channel. If the image has no alpha (mos
 
 ### Which effects support it
 
-Accretion, Array, Cascade, Chaos, Cleave, Cymatics, Flux, Genesis, Morph, Murmur, Mycelium, Raster, Splat, Symbiosis, Tesla, Tide, Turing and Vessel. **Tide** and **Vessel** were built around it: Tide parts and pools, Vessel fills the shape and bursts on the drop. Splat is the odd one out: it carves the obstacle out of the splat cloud rather than bouncing anything off it.
+Accretion, Array, Cascade, Chaos, Cleave, Cymatics, Flux, Genesis, Murmur, Mycelium, Raster, Splat, Symbiosis, Tesla, Tide, Turing and Vessel. **Tide** and **Vessel** were built around it: Tide parts and pools, Vessel fills the shape and bursts on the drop. Splat is the odd one out: it carves the obstacle out of the splat cloud rather than bouncing anything off it.
 
 ### Automation
 

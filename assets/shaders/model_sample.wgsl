@@ -28,7 +28,7 @@ struct SampleUniforms {
     radius_scale: f32,
     // Floor on the lambert term. Cavities that fall to pure black still carry
     // alpha 1, so they are a legitimate dark TONE rather than background — but a
-    // mesh whose interior reads solid black gives Pegboard and Etch nothing to
+    // mesh whose interior reads solid black gives Pegboard nothing to
     // quantize, so lift the shadows off the floor.
     ambient: f32,
     // 0 = the shipped directional key light, 1 = only the point light (#1996).
@@ -68,7 +68,7 @@ const LIGHT_FALLOFF = 1.0;
 // Without this the lambert term is treated as linear light and the sRGB encode
 // lifts it: a cube's three visible faces landed at bytes 0.78/0.87/0.97, a fifth
 // of the available range, and every tone-quantizing effect downstream (Pegboard's
-// eight-peg tray, Etch's scan bands) saw them as nearly the same shade. Encoding
+// eight-peg tray) saw them as nearly the same shade. Encoding
 // the intent instead spreads the same three faces across 0.56/0.72/0.92.
 fn srgb_to_linear(c: f32) -> f32 {
     if (c <= 0.04045) {

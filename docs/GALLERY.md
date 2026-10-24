@@ -8,9 +8,9 @@ Effects respond to what they hear, so what you see here is a starting point, not
 Change the music and they change with it; every parameter is also a slider, and can be driven
 by MIDI, OSC, a phone or a webcam.
 
-**56 effects.**
+**52 effects.**
 
-## Shaders (23)
+## Shaders (21)
 
 Pure fragment shaders — no particles, just math evaluated per pixel, every frame.
 
@@ -26,38 +26,33 @@ Pure fragment shaders — no particles, just math evaluated per pixel, every fra
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/drift.webp" width="100%" alt="Drift"><br><b>Drift</b><br><sub>Fluid smoke via triple domain-warped FBM noise with advected feedback</sub></td>
 </tr>
 <tr>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/fenestra.webp" width="100%" alt="Fenestra"><br><b>Fenestra</b><br><sub>GUI panels snapping into place across the bar — staggered brackets and scrims arriving with a white flash, settling into palette color, gone by the next cycle.…</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/fluvid.webp" width="100%" alt="Fluvid"><br><b>Fluvid</b><br><sub>Fluid video: move in front of a camera and your motion stirs a real incompressible fluid, while a reaction-diffusion maze grows inside the ink it leaves. Medium…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/frost.webp" width="100%" alt="Frost"><br><b>Frost</b><br><sub>Spectral-flatness material dissolution: tonal sound freezes into faceted crystal, noisy sound melts it into drifting sand</sub></td>
-</tr>
-<tr>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/intarsia.webp" width="100%" alt="Intarsia"><br><b>Intarsia</b><br><sub>Inlay-work over the layers beneath: a low-res analysis pass finds the color patches of whatever is playing under it, and tiles trade in and out on the bar clock…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/iris.webp" width="100%" alt="Iris"><br><b>Iris</b><br><sub>Spinning dot with fading feedback trails — circular pattern resembles an iris</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/limn.webp" width="100%" alt="Limn"><br><b>Limn</b><br><sub>A living edge-tracer: outlines whatever plays on the layers beneath it, dashes marching along every contour in time with the bars. Layer it over anything — solo…</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/limn.webp" width="100%" alt="Limn"><br><b>Limn</b><br><sub>A living edge-tracer: outlines whatever plays on the layers beneath it, dashes marching along every contour in time with the bars. Layer it over anything — solo…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/lumen.webp" width="100%" alt="Lumen"><br><b>Lumen</b><br><sub>Real-time global illumination by radiance cascades — a swarm of coloured fireflies lights a soft breathing silhouette, and every light casts long soft-edged…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/prism.webp" width="100%" alt="Prism"><br><b>Prism</b><br><sub>Kaleidoscopic N-fold mirror symmetry over FBM and geometric patterns</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/protea.webp" width="100%" alt="Protea"><br><b>Protea</b><br><sub>A mass-conserving Flow Lenia ecosystem — three species of amoebae with membranes and organelles that hunt, merge, and divide, fed by the music itself. Loudness…</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/protea.webp" width="100%" alt="Protea"><br><b>Protea</b><br><sub>A mass-conserving Flow Lenia ecosystem — three species of amoebae with membranes and organelles that hunt, merge, and divide, fed by the music itself. Loudness…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/pulse.webp" width="100%" alt="Pulse"><br><b>Pulse</b><br><sub>Concentric expanding rings synced to beat with light feedback trails</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/reticle.webp" width="100%" alt="Reticle"><br><b>Reticle</b><br><sub>Crosshairs acquiring targets: each reticle re-positions every bar and locks on with a contracting bracket keyed to the beat. Snap between targets or glide.</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/shards.webp" width="100%" alt="Shards"><br><b>Shards</b><br><sub>Animated Voronoi cells with glowing fracture edges</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/shards.webp" width="100%" alt="Shards"><br><b>Shards</b><br><sub>Animated Voronoi cells with glowing fracture edges</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/storm.webp" width="100%" alt="Storm"><br><b>Storm</b><br><sub>Billowing dark clouds lit from within by flashes of lightning</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/strata.webp" width="100%" alt="Strata"><br><b>Strata</b><br><sub>Spectral canyon — a heightfield flythrough over the last ~8 seconds of the mel-spectrogram. Ridges are loud moments, chasms are quiet ones; the terrain scrolls…</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/sumi.webp" width="100%" alt="Sumi"><br><b>Sumi</b><br><sub>Ink drops bloom in water on every onset — a real incompressible fluid (advection, a Jacobi pressure solve, vorticity confinement) whose twelve dye colours are…</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/sumi.webp" width="100%" alt="Sumi"><br><b>Sumi</b><br><sub>Ink drops bloom in water on every onset — a real incompressible fluid (advection, a Jacobi pressure solve, vorticity confinement) whose twelve dye colours are…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/tessera.webp" width="100%" alt="Tessera"><br><b>Tessera</b><br><sub>A grid of tiles revealing in beat-locked waves — hash scatter, row sweep, or center-out. In punch mode a dark scrim covers the frame and revealed tiles knock…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/tunnel.webp" width="100%" alt="Tunnel"><br><b>Tunnel</b><br><sub>Raymarched infinite cylindrical flythrough with twist, ribs, and glow</sub></td>
-<td width="33%"></td>
 </tr>
 </table>
 
-## Particle simulations (25)
+## Particle simulations (23)
 
 GPU compute simulations, from a few thousand particles up to two million.
 
@@ -74,37 +69,32 @@ GPU compute simulations, from a few thousand particles up to two million.
 </tr>
 <tr>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/cymatics.webp" width="100%" alt="Cymatics"><br><b>Cymatics</b><br><sub>Standing wave patterns — particles form Chladni nodal lines synchronized to audio frequency bands, with rotation and symmetry transforms</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/etch.webp" width="100%" alt="Etch"><br><b>Etch</b><br><sub>Your image scratched into aluminium powder one stroke at a time — the stylus zigzags along a handful of scan lines, swinging wide where the picture is dark, then…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/flux.webp" width="100%" alt="Flux"><br><b>Flux</b><br><sub>Organic smoke — particles follow 3D curl noise flow field with audio-reactive turbulence</sub></td>
-</tr>
-<tr>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/genesis.webp" width="100%" alt="Genesis"><br><b>Genesis</b><br><sub>Multi-species Particle Lenia — two species with complementary kernels self-organize into predator/prey, symbiosis, or competition dynamics</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/helix.webp" width="100%" alt="Helix"><br><b>Helix</b><br><sub>The last eight seconds of audio swept into a twisting ribbon you fly along — the cross-section is the spectrum, the colour is the timbre, and every beat stays…</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/morph.webp" width="100%" alt="Morph"><br><b>Morph</b><br><sub>Shape morphing — particles spring between images and geometry on beat drops</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/helix.webp" width="100%" alt="Helix"><br><b>Helix</b><br><sub>The last eight seconds of audio swept into a twisting ribbon you fly along — the cross-section is the spectrum, the colour is the timbre, and every beat stays…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/murmur.webp" width="100%" alt="Murmur"><br><b>Murmur</b><br><sub>Starling murmuration — topological K=7 nearest neighbors, Vicsek noise order-chaos phase transitions, predator avoidance, dark bird silhouettes against twilight sky</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/mycelium.webp" width="100%" alt="Mycelium"><br><b>Mycelium</b><br><sub>Swarming tendrils — leader particles follow curl noise flow fields, depositing follower particles that form spring-connected chains. Chains branch…</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/panorama.webp" width="100%" alt="Panorama"><br><b>Panorama</b><br><sub>The stereo field as a picture — horizontal is where a sound sits between your speakers, vertical is its pitch. A centred kick anchors the bottom while hats and…</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/panorama.webp" width="100%" alt="Panorama"><br><b>Panorama</b><br><sub>The stereo field as a picture — horizontal is where a sound sits between your speakers, vertical is its pitch. A centred kick anchors the bottom while hats and…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/pegboard.webp" width="100%" alt="Pegboard"><br><b>Pegboard</b><br><sub>Your image re-made as a backlit peg toy — samples snap to a square lattice, an ordered dither decides which holes carry a peg, colour quantizes to an eight-peg…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/polycephalum.webp" width="100%" alt="Polycephalum"><br><b>Polycephalum</b><br><sub>Twelve slime-mold organisms — one per pitch class — flood the screen with veined pulsing networks and fight for territory. Loud pitch classes dominate; semitone…</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/raster.webp" width="100%" alt="Raster"><br><b>Raster</b><br><sub>Video wall — particles map to image pixels with audio-driven displacement and spring-return physics</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/raster.webp" width="100%" alt="Raster"><br><b>Raster</b><br><sub>Video wall — particles map to image pixels with audio-driven displacement and spring-return physics</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/reliquary.webp" width="100%" alt="Reliquary"><br><b>Reliquary</b><br><sub>A form that holds light — the surface stays put while the light escaping it streams outward, fades and returns. Point it at a model lit from inside and the…</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/splat.webp" width="100%" alt="Splat"><br><b>Splat</b><br><sub>A captured 3D scene as a breathing cloud of Gaussians — shatters on the drop, re-forms with the beat; bright timbre pulls focus</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/symbiosis.webp" width="100%" alt="Symbiosis"><br><b>Symbiosis</b><br><sub>Particle life — multi-species emergent ecosystems, crystals, and predator-prey dynamics from an asymmetric force matrix</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/symbiosis.webp" width="100%" alt="Symbiosis"><br><b>Symbiosis</b><br><sub>Particle life — multi-species emergent ecosystems, crystals, and predator-prey dynamics from an asymmetric force matrix</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/tesla.webp" width="100%" alt="Tesla"><br><b>Tesla</b><br><sub>Charged particles spiral through magnetic dipole fields — interweaving helical trajectories with audio-reactive field strength and polarity flips</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/tide.webp" width="100%" alt="Tide"><br><b>Tide</b><br><sub>Luminous waterfall that parts, pools, and eddies around silhouettes — enable Obstacle (webcam/depth) with Flow Around mode. Drums make the water break; pads make…</sub></td>
-<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/turing.webp" width="100%" alt="Turing"><br><b>Turing</b><br><sub>Reaction-diffusion sculptor — Gray-Scott chemical fields driving particles into organic patterns</sub></td>
 </tr>
 <tr>
+<td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/turing.webp" width="100%" alt="Turing"><br><b>Turing</b><br><sub>Reaction-diffusion sculptor — Gray-Scott chemical fields driving particles into organic patterns</sub></td>
 <td width="33%"><img src="https://github.com/kevinraymond/fosfora/releases/download/demo-assets/vessel.webp" width="100%" alt="Vessel"><br><b>Vessel</b><br><sub>Your silhouette becomes a vessel: trapped light slowly fills it as the music builds, then bursts outward on the drop</sub></td>
-<td width="33%"></td>
 <td width="33%"></td>
 </tr>
 </table>
@@ -154,9 +144,6 @@ Not effects but what you can do *to* them: a chain of nodes post-processing one 
 Clips were captured from the running app by [`scripts/capture/`](../scripts/capture), which
 drives real playback through the production render pipeline — post-processing and all — rather
 than an offscreen approximation.
-
-The Fluvid clip plays over *Blonde Woman Dancing to Music with Headphones Studio Clip*.
-Free Stock video by <a href="http://www.videezy.com/">Videezy</a>.
 
 Two effects are not shown because they are hidden from the browser: **Phosphor**, the signature
 intro visual you see at startup, and **Stress**, a ten-million-particle rasterizer benchmark.

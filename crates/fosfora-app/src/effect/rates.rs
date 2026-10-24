@@ -24,7 +24,7 @@
 //! `b * u.time` part by the excess, once — a small fixed offset, not a jump, and
 //! the same "slow motion through a stall" trade the particle sims make.
 //!
-//! A param that is a PERIOD rather than a speed — Etch's `clear_cycle`, in
+//! A param that is a PERIOD rather than a speed — e.g. a `clear_cycle`, in
 //! seconds per clear — is declared `{"param": "clear_cycle", "period": true}`:
 //! the engine integrates `dt / value`, the cycles completed, which is what
 //! `fract(u.time / period)` was trying to be. A period of zero or less adds
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&got[0]).unwrap(), r#""speed""#);
     }
 
-    // Etch's clear clock: seconds per clear in, cycles completed out. A change in
+    // A clear clock: seconds per clear in, cycles completed out. A change in
     // the period changes the pace from the next frame, and zero stops the clock
     // rather than dividing by it.
     #[test]

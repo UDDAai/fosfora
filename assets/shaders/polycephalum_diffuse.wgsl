@@ -28,8 +28,7 @@ struct TrailUniforms {
 @group(0) @binding(3) var<storage, read_write> deposit: array<atomic<i32>>;
 
 // Duplicated from lib/chronoflow.wgsl rather than called: this is a standalone
-// pipeline with no lib prepended (see header), the same reason etch_sim/etch_bg
-// duplicate their clear-cycle helper. KEEP THE TWO IN SYNC.
+// pipeline with no lib prepended (see header). KEEP THE TWO IN SYNC.
 //
 // delta_time == 0 means "behave exactly as authored", so an older binary still
 // writing the old padding slot degrades to today's behavior rather than leaving

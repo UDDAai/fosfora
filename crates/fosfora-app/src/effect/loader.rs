@@ -851,7 +851,7 @@ mod composite_decay_guard {
 
             // Only additive compositing has the independent source gain the
             // correction scales. See compute_raster_resolve.wgsl for the algebra
-            // that rules out alpha (Morph, Raster) and wboit (Genesis).
+            // that rules out alpha (Raster) and wboit (Genesis).
             let additive = particles.blend == "additive";
             let Some(cd) = particles.composite_decay.as_ref() else {
                 assert!(
@@ -954,7 +954,7 @@ mod composite_decay_guard {
         assert_eq!(
             declared, 15,
             "expected the 15 additive members of the feedback family to declare \
-             composite_decay (Genesis is wboit, Morph and Raster are alpha)",
+             composite_decay (Genesis is wboit, Raster is alpha)",
         );
     }
 
@@ -1419,7 +1419,7 @@ mod tests {
 
             // Image emitters need their source SAMPLED before they show anything.
             // ParticleSystem::new does not do it — app.rs does, right after — so
-            // without this the probe rendered Raster, Morph, Pegboard, Etch and
+            // without this the probe rendered Raster, Pegboard and
             // Lantern as a flat frame and still printed a clean-looking signature,
             // identical for every one of them and identical across audio states.
             // A blank probe that reports success is worse than no probe.
@@ -1562,18 +1562,18 @@ mod tests {
         eprintln!("rendered {rendered} previews into {out_dir}");
     }
 
-    // Image-sourced effects (Raster, Morph, Pegboard, Etch) render NOTHING in
+    // Image-sourced effects (Raster, Pegboard) render NOTHING in
     // `particle_effect_previews`: aux is uploaded by the app after a source loads, not by
     // `ParticleSystem::new`, so the probe's aux buffer is all zeros and every particle
     // takes the `home_color.a < 0.01` early-out. That probe reported the clear colour
-    // exactly (mean 0.10850, all four quadrants identical) for Raster and Morph for as
-    // long as they have shipped, which reads as "covered" and is not.
+    // exactly (mean 0.10850, all four quadrants identical) for Raster for as long as it
+    // shipped, which reads as "covered" and is not.
     //
     // This probe closes that hole: it samples a real built-in image into aux, uploads it,
     // and renders the effect's background pass and its particles into the same target so
-    // the composed picture is what gets captured. The background matters here — Etch draws
-    // dark ink on light powder, and against the particle probe's near-black clear it would
-    // be invisible even once the particles worked.
+    // the composed picture is what gets captured. The background matters here — an effect
+    // that draws dark ink on a light ground would be invisible against the particle probe's
+    // near-black clear even once the particles worked.
     //
     // Run: cargo test -p fosfora-app -- --ignored media_effect_previews --nocapture
     #[test]
@@ -1666,8 +1666,8 @@ mod tests {
             bass: f32,
             onset_every: u32,
             /// Frame on which `u.drop` pulses, or 0 for never. The A18 drop is one frame
-            /// wide, and Etch hangs its whole erase ritual off it — without a state that
-            /// fires it, a broken shake-clean would look exactly like a working one.
+            /// wide, so an effect that hangs a whole ritual off it needs a state that
+            /// fires it, or a broken response would look exactly like a working one.
             drop_at: u32,
         }
         let states = [
@@ -2870,10 +2870,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
                 "carries its own pow(0.90, dt * 60.0)",
             ),
             (
-                "etch_bg.wgsl",
-                "retention is exactly 1.0 by design — nothing decays per frame",
-            ),
-            (
                 "lumen_cascade.wgsl",
                 "feedback read for target size only; cascades are recomputed each frame",
             ),
@@ -2898,16 +2894,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             (
                 "sumi_pressure.wgsl",
                 "feedback is the previous Jacobi iterate, not frame history",
-            ),
-            (
-                "fluvid_pressure.wgsl",
-                "feedback is the previous SOR iterate, not frame history",
-            ),
-            (
-                "fluvid_rd.wgsl",
-                "a reaction-diffusion integrator, not an image: nothing decays, and its \
-                 step size is scaled by frame_steps() so the chemistry advances the same \
-                 amount per second at any frame rate",
             ),
             (
                 "organic_liquid_state.wgsl",
@@ -2967,41 +2953,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
             checked >= 25,
             "expected the feedback family to be ~27 shaders, found {checked} — has the \
              sweep stopped finding them?"
-        );
-    }
-
-    /// Etch's pen lives in a compute shader and its powder lives in a fragment shader, and
-    /// the two share no buffer — so they agree on when the board is shaken clean only by
-    /// computing the same function of `u.time` independently. If one copy drifts, the pen
-    /// starts redrawing before (or long after) the powder re-coats, and nothing fails: the
-    /// effect just quietly stops erasing properly. Pin the two texts together.
-    ///
-    /// The helper is deliberately duplicated rather than hoisted into a shared lib: adding
-    /// a file to `LIB_FILENAMES` couples `assets/` to the binary, and `assets/` is live
-    /// shared state that every running build reads (#1983).
-    #[test]
-    fn etch_clear_cycle_matches() {
-        const SIM: &str = include_str!("../../../../assets/shaders/etch_sim.wgsl");
-        const BG: &str = include_str!("../../../../assets/shaders/etch_bg.wgsl");
-
-        // Extract from the shake-seconds constant through the end of etch_clearing().
-        let extract = |src: &str, which: &str| -> String {
-            let start = src
-                .find("const ETCH_SHAKE_SECS")
-                .unwrap_or_else(|| panic!("{which}: ETCH_SHAKE_SECS not found"));
-            let body = src
-                .find("fn etch_clearing")
-                .unwrap_or_else(|| panic!("{which}: etch_clearing not found"));
-            let end = src[body..]
-                .find("\n}")
-                .unwrap_or_else(|| panic!("{which}: etch_clearing has no close"));
-            src[start..body + end + 2].split_whitespace().collect()
-        };
-
-        assert_eq!(
-            extract(SIM, "etch_sim.wgsl"),
-            extract(BG, "etch_bg.wgsl"),
-            "etch_clearing must be byte-identical in etch_sim.wgsl and etch_bg.wgsl"
         );
     }
 
@@ -4760,168 +4711,81 @@ fn cs_main() {
         );
     }
 
-    // #2984: Etch clears its board on a clock, `fract(t / clear_cycle)`, whose
-    // rate is 1 / clear_cycle — so moving the clear-cycle fader at a large
-    // uptime moved the phase by uptime x the change in 1 / clear_cycle, sweeping
-    // it through the shake window again and again. The defect is a COUNT of
-    // clears, not a picture drifting, which the generic rates probe cannot see:
-    // at t=300 it reads the nudge as smaller than motion (a clear switched off).
+    // #2984: a PERIOD rate (seconds per cycle in, cycles completed out). A clock of
+    // the form `fract(t / period)` has rate 1 / period, so moving the period fader at
+    // a large uptime moved the phase by uptime x the change in 1 / period, sweeping
+    // it through a "fire" window again and again. The defect is a COUNT of firings,
+    // not a picture drifting, which the generic rates probe cannot see.
     //
-    // So this compiles the REAL etch_clearing (extracted from etch_bg.wgsl the
-    // way etch_clear_cycle_matches pins it) and counts clear onsets during a
-    // 3 s drag of the fader from 12 s to 24 s at a 300 s clock, fed two ways:
-    // the old input, t / clear_cycle, and the engine's RateState integral of
-    // 1 / clear_cycle — exactly what the shader now receives in slot 8.
-    //
-    // Run: cargo test -p fosfora-app -- --ignored --nocapture etch_fader_drag
+    // No shipped effect declares a period rate any more, so this runs on an inline
+    // fixture through the same `layout` / `RateState` the engine uses. It counts onsets
+    // of a 0.6 s window (`fract(cycles) * period < 0.6`, the shape of a former
+    // shipped effect) during a 3 s drag of the period from 12 s to 24 s at a 300 s clock, fed
+    // two ways: the old input, t / period, and the engine's integral of 1 / period.
     #[test]
-    #[ignore = "requires a GPU/software adapter"]
-    fn etch_fader_drag_does_not_fire_spurious_clears() {
-        use crate::effect::rates::{RateState, layout};
-        use crate::params::{ParamStore, ParamValue};
-        use wgpu::util::DeviceExt;
+    fn period_rate_fader_drag_does_not_fire_spurious_cycles() {
+        use crate::effect::rates::{RateDef, RateState, layout};
+        use crate::params::{ParamDef, ParamStore, ParamValue};
 
-        const BG: &str = include_str!("../../../../assets/shaders/etch_bg.wgsl");
-        let start = BG.find("const ETCH_SHAKE_SECS").expect("ETCH_SHAKE_SECS");
-        let body = BG.find("fn etch_clearing").expect("etch_clearing");
-        let end = body + BG[body..].find("\n}").expect("close") + 2;
-        let clearing_src = &BG[start..end];
-
-        // The drag: 3 s at 60 fps, 12 s -> 24 s, starting at a 300 s clock.
+        const WINDOW_SECS: f32 = 0.6;
         const FRAMES: usize = 180;
         const DT: f32 = 1.0 / 60.0;
         const T0: f32 = 300.0;
         let cycle_at = |i: usize| 12.0 + 12.0 * i as f32 / (FRAMES - 1) as f32;
+        let firing = |period: f32, cycles: f32| -> bool {
+            period <= 0.0 || cycles.fract() * period < WINDOW_SECS
+        };
+        // Onsets: frames where the window opens. One window is a few consecutive
+        // frames and counts once.
+        let onsets = |flags: &[bool]| {
+            flags.windows(2).filter(|w| !w[0] && w[1]).count() + usize::from(flags[0])
+        };
 
-        let etch = shipped_effects_for_test()
-            .into_iter()
-            .find(|e| e.name == "Etch")
-            .expect("etch.pfx");
-        let slots = layout(&etch.inputs, &etch.rates).expect("rates layout");
-        let clear = slots
+        let inputs = [ParamDef::Float {
+            name: "period".into(),
+            default: 12.0,
+            min: 0.0,
+            max: 60.0,
+        }];
+        let rates = [RateDef::Spec {
+            param: "period".into(),
+            period: true,
+        }];
+        let slots = layout(&inputs, &rates).expect("rates layout");
+        let period = slots
             .iter()
-            .find(|s| s.name == "clear_cycle")
-            .expect("clear_cycle rate");
-        assert!(clear.period, "clear_cycle must be declared a period");
+            .find(|s| s.name == "period")
+            .expect("period rate");
+        assert!(period.period, "period must be declared a period");
 
         // The engine's input: RateState, run from t=0 at 12 s, then the drag.
         let mut store = ParamStore::new();
-        store.load_from_defs(&etch.inputs);
-        store.set("clear_cycle", ParamValue::Float(12.0));
-        let mut rates = RateState::new(slots.clone());
+        store.load_from_defs(&inputs);
+        store.set("period", ParamValue::Float(12.0));
+        let mut state = RateState::new(slots.clone());
         for _ in 0..(T0 / DT) as usize {
             let mut p = store.pack_to_buffer();
-            rates.advance(&mut p, DT);
+            state.advance(&mut p, DT);
         }
-        let mut integrated = Vec::with_capacity(FRAMES * 2);
-        let mut legacy = Vec::with_capacity(FRAMES * 2);
+        let mut integrated = Vec::with_capacity(FRAMES);
+        let mut legacy = Vec::with_capacity(FRAMES);
         for i in 0..FRAMES {
             let c = cycle_at(i);
-            store.set("clear_cycle", ParamValue::Float(c));
+            store.set("period", ParamValue::Float(c));
             let mut p = store.pack_to_buffer();
-            rates.advance(&mut p, DT);
-            integrated.extend([c, p[clear.dst]]);
-            legacy.extend([c, (T0 + i as f32 * DT) / c]);
+            state.advance(&mut p, DT);
+            integrated.push(firing(c, p[period.dst]));
+            legacy.push(firing(c, (T0 + i as f32 * DT) / c));
         }
 
-        let _guard = gpu_guard();
-        let (device, queue) = test_gpu();
-        let shader = format!(
-            "{clearing_src}\n\
-             @group(0) @binding(0) var<storage, read> inp: array<vec2f>;\n\
-             @group(0) @binding(1) var<storage, read_write> out: array<f32>;\n\
-             @compute @workgroup_size(64)\n\
-             fn cs_main(@builtin(global_invocation_id) gid: vec3u) {{\n\
-                 let i = gid.x;\n\
-                 if i >= arrayLength(&inp) {{ return; }}\n\
-                 out[i] = select(0.0, 1.0, etch_clearing(inp[i].x, inp[i].y));\n\
-             }}"
-        );
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("etch-clearing-probe"),
-            source: wgpu::ShaderSource::Wgsl(shader.into()),
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("etch-clearing-probe"),
-            layout: None,
-            module: &module,
-            entry_point: Some("cs_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let run = |inputs: &[f32]| -> Vec<f32> {
-            let n = inputs.len() / 2;
-            let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(inputs),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            let bytes = (n * 4) as u64;
-            let obuf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let stage = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: bytes,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ibuf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: obuf.as_entire_binding(),
-                    },
-                ],
-            });
-            let mut enc = device.create_command_encoder(&Default::default());
-            {
-                let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bg, &[]);
-                pass.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
-            }
-            enc.copy_buffer_to_buffer(&obuf, 0, &stage, 0, bytes);
-            queue.submit([enc.finish()]);
-            stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .unwrap();
-            bytemuck::cast_slice::<u8, f32>(&stage.slice(..).get_mapped_range()).to_vec()
-        };
-        // Clear ONSETS: frames where clearing starts. One shake is a few
-        // consecutive frames and counts once.
-        let onsets = |flags: &[f32]| {
-            flags
-                .windows(2)
-                .filter(|w| w[0] < 0.5 && w[1] > 0.5)
-                .count()
-                + usize::from(flags[0] > 0.5)
-        };
-        let old = onsets(&run(&legacy));
-        let new = onsets(&run(&integrated));
-        eprintln!(
-            "etch: 3 s fader drag 12 s -> 24 s at a {T0} s clock: clears with t / cycle {old}, \
-             with the integral {new}"
-        );
+        let old = onsets(&legacy);
+        let new = onsets(&integrated);
         // A 3 s drag through periods of 12-24 s spans at most a quarter of a
-        // cycle, so at most one clear is legitimate.
+        // cycle, so at most one firing is legitimate.
         assert!(
             new <= 1,
-            "the integrated clear clock fired {new} clears during a 3 s drag — the \
-             fader is sweeping the phase again"
+            "the integrated clock fired {new} times during a 3 s drag (t / period: {old}) \
+             — the fader is sweeping the phase again"
         );
         assert!(
             old > 3,
