@@ -13,8 +13,10 @@
 //!
 //! ffmpeg 9.0.2 has a bug with `-ss` plus `-stream_loop`: each wrap steps the packet
 //! timestamps back by `start_secs`, so `-fps_mode cfr` drops frames after the first
-//! wrap. For that one combination [`stream_args`] adds `-vf setpts=N/FRAME_RATE/TB`,
-//! which restamps frames by count and makes the wrap seamless.
+//! wrap. For that one combination [`stream_args`] adds `-vf setpts=N/(<source_fps>*TB)`,
+//! which restamps frames by count and makes the wrap seamless. It needs
+//! [`StreamSpec::source_fps`]; without it the filter is skipped and a looping stream
+//! opened with a seek may drop frames after a wrap on ffmpeg 9.x.
 //!
 //! [`spawn_pipe`] also hands back a kill closure, so another thread can cut a stream
 //! short while the worker is blocked reading it; the read then returns EOF at once.
@@ -35,8 +37,9 @@ use std::process::{Child, ChildStdout, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::stream_decoder::FrameSource;
 use super::toolchain::VideoToolchain;
 
 /// Bytes of ffmpeg stderr kept for error messages (the tail is what explains a failure).
@@ -48,9 +51,8 @@ const STDERR_EXCERPT_LINES: usize = 5;
 /// Decoder threads. The show shares the machine with the renderer, so keep this small.
 const DECODE_THREADS: u32 = 2;
 
-/// Restamps frames by count. Needed only for `-ss` with `-stream_loop`, whose looped
-/// timestamps go backwards at every wrap (see the module docs).
-const RESTAMP_FILTER: &str = "setpts=N/FRAME_RATE/TB";
+/// Max time to wait for a killed ffmpeg to exit before leaving it to the OS.
+const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What to stream and how.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,7 +63,8 @@ pub struct StreamSpec {
     pub looping: bool,
     /// Constant output frame rate.
     pub fps: f64,
-    /// Output frame size in pixels. ffmpeg scales to exactly this.
+    /// Output frame size in pixels. This must be the displayed size (after rotation and
+    /// pixel-aspect correction): `-s` scales to exactly this and does not keep aspect.
     pub width: u32,
     pub height: u32,
     /// Opt in to VideoToolbox hardware decode (`-hwaccel videotoolbox`). Off by default:
@@ -70,6 +73,10 @@ pub struct StreamSpec {
     /// ffmpeg older than 5.1 has no `-fps_mode`; it needs `-vsync cfr`. [`spawn_stream`]
     /// sets this from the toolchain version; leave it `false` otherwise.
     pub legacy_vsync: bool,
+    /// The clip's constant frame rate, from ffprobe. Used only to restamp a looping
+    /// stream opened with a seek (see the module docs); `None` when the clip has no
+    /// constant rate, which skips the restamp.
+    pub source_fps: Option<f64>,
 }
 
 impl StreamSpec {
@@ -82,6 +89,7 @@ impl StreamSpec {
             height,
             hwaccel: false,
             legacy_vsync: false,
+            source_fps: None,
         }
     }
 
@@ -99,6 +107,9 @@ impl StreamSpec {
         }
         if !self.start_secs.is_finite() || self.start_secs < 0.0 {
             return Err("Stream has an invalid start time".into());
+        }
+        if self.source_fps.is_some_and(|f| !f.is_finite() || f <= 0.0) {
+            return Err("Stream has an invalid source frame rate".into());
         }
         if self.frame_bytes().is_none() {
             return Err("Stream has invalid frame dimensions".into());
@@ -128,11 +139,17 @@ pub fn needs_legacy_vsync(version_line: Option<&str>) -> bool {
     }
 }
 
+/// Restamps frames by count at the source rate. Needed only for `-ss` with
+/// `-stream_loop`, whose looped timestamps go backwards at every wrap (module docs).
+fn restamp_filter(source_fps: f64) -> String {
+    format!("setpts=N/({source_fps}*TB)")
+}
+
 /// Arguments for a streaming ffmpeg run that writes raw RGBA frames to stdout.
 ///
 /// `-ss` goes before `-i` (fast input seek) and only when `start_secs > 0`. The path is a
-/// single argument, so spaces and non-ASCII are safe; pass an absolute path, since ffmpeg
-/// reads a relative `name:thing` as a protocol.
+/// single argument, so spaces and non-ASCII are safe. A relative path gets a `./` prefix,
+/// since ffmpeg would read `name: thing.mp4` as a protocol.
 pub fn stream_args(path: &Path, spec: &StreamSpec) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::with_capacity(32);
     let mut push = |items: &[&str]| args.extend(items.iter().map(OsString::from));
@@ -149,11 +166,18 @@ pub fn stream_args(path: &Path, spec: &StreamSpec) -> Vec<OsString> {
         push(&["-ss", &format!("{:.3}", spec.start_secs)]);
     }
     args.push("-i".into());
-    args.push(path.as_os_str().to_owned());
+    if path.is_relative() {
+        args.push(Path::new(".").join(path).into_os_string());
+    } else {
+        args.push(path.as_os_str().to_owned());
+    }
     let mut push = |items: &[&str]| args.extend(items.iter().map(OsString::from));
     push(&["-map", "0:v:0", "-an", "-sn"]);
-    if spec.looping && spec.start_secs > 0.0 {
-        push(&["-vf", RESTAMP_FILTER]);
+    if let Some(fps) = spec
+        .source_fps
+        .filter(|_| spec.looping && spec.start_secs > 0.0)
+    {
+        push(&["-vf", &restamp_filter(fps)]);
     }
     if spec.legacy_vsync {
         push(&["-vsync", "cfr"]);
@@ -243,20 +267,13 @@ pub fn spawn_stream(path: &Path, spec: &StreamSpec) -> Result<FfmpegStream, Stri
     })
 }
 
-/// A frame pipe plus a way to cut it short from another thread. This is the shape the
-/// stream decoder worker takes (`reader` and `kill` map one to one onto its source type).
-pub struct StreamPipe {
-    /// Blocking reader over the child's stdout. Dropping it kills and reaps the child.
-    pub reader: Box<dyn Read + Send>,
-    /// Kills the child at once. A read blocked on `reader` then returns EOF promptly.
-    pub kill: Box<dyn FnOnce() + Send>,
-}
-
-/// [`spawn_stream`], split into the boxed reader and kill closure.
-pub fn spawn_pipe(path: &Path, spec: &StreamSpec) -> Result<StreamPipe, String> {
+/// [`spawn_stream`], split into the boxed reader and kill closure the stream decoder
+/// takes. `kill` stops the child at once, from any thread, and is safe to call again or
+/// after the child has exited.
+pub fn spawn_pipe(path: &Path, spec: &StreamSpec) -> Result<FrameSource, String> {
     let stream = spawn_stream(path, spec)?;
     let kill = stream.killer();
-    Ok(StreamPipe {
+    Ok(FrameSource {
         reader: Box::new(stream),
         kill: Box::new(kill),
     })
@@ -267,7 +284,7 @@ pub fn spawn_pipe(path: &Path, spec: &StreamSpec) -> Result<StreamPipe, String> 
 pub fn stream_producer(
     path: PathBuf,
     base: StreamSpec,
-) -> impl FnMut(f64, bool) -> Result<StreamPipe, String> {
+) -> impl FnMut(f64, bool) -> Result<FrameSource, String> {
     move |start_secs, looping| {
         let spec = StreamSpec {
             start_secs,
@@ -375,15 +392,30 @@ impl Read for FfmpegStream {
 
 impl Drop for FfmpegStream {
     fn drop(&mut self) {
-        // Killing closes both pipes, which ends the drain thread.
         self.killed.store(true, Ordering::SeqCst);
-        {
-            let mut child = lock_child(&self.child);
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        if let Some(handle) = self.stderr_thread.take() {
-            let _ = handle.join();
+        // Kill under the lock, but wait outside it: a slow teardown (VideoToolbox) must
+        // not hold up a kill hook running on another thread.
+        let _ = lock_child(&self.child).kill();
+        let deadline = Instant::now() + REAP_TIMEOUT;
+        let reaped = loop {
+            match lock_child(&self.child).try_wait() {
+                Ok(Some(_)) | Err(_) => break true,
+                Ok(None) if Instant::now() >= deadline => break false,
+                Ok(None) => {}
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        if reaped {
+            // Killing closed both pipes, which ends the drain thread.
+            if let Some(handle) = self.stderr_thread.take() {
+                let _ = handle.join();
+            }
+        } else {
+            // The drain thread ends when ffmpeg finally exits; do not wait for it.
+            log::warn!(
+                "ffmpeg pid {} did not exit within {REAP_TIMEOUT:?} of a kill",
+                self.pid
+            );
         }
     }
 }
@@ -433,27 +465,41 @@ mod tests {
     }
 
     #[test]
-    fn restamp_filter_only_for_seek_plus_loop() {
-        for (start_secs, looping, want) in [
-            (0.0, false, false),
-            (3.0, false, false),
-            (0.0, true, false),
-            (3.0, true, true),
+    fn restamp_filter_only_for_seek_plus_loop_with_a_known_rate() {
+        for (start_secs, looping, source_fps, want) in [
+            (0.0, false, Some(24.0), None),
+            (3.0, false, Some(24.0), None),
+            (0.0, true, Some(24.0), None),
+            (3.0, true, Some(24.0), Some("setpts=N/(24*TB)")),
+            (3.0, true, Some(29.97), Some("setpts=N/(29.97*TB)")),
+            // No constant rate known: skip the filter rather than emit a NaN timestamp.
+            (3.0, true, None, None),
         ] {
             let args = strs(&stream_args(
                 Path::new("a.mp4"),
                 &StreamSpec {
                     start_secs,
                     looping,
+                    source_fps,
                     ..spec()
                 },
             ));
-            assert_eq!(
-                has_pair(&args, "-vf", RESTAMP_FILTER),
-                want,
-                "start {start_secs} looping {looping}"
-            );
+            match want {
+                Some(filter) => assert!(has_pair(&args, "-vf", filter), "{args:?}"),
+                None => assert!(!args.contains(&"-vf".to_string()), "{args:?}"),
+            }
         }
+    }
+
+    #[test]
+    fn relative_paths_are_not_read_as_protocols() {
+        let args = strs(&stream_args(Path::new("take2: night.mp4"), &spec()));
+        let at = pos(&args, "-i").unwrap();
+        assert_eq!(args[at + 1], "./take2: night.mp4");
+        // Absolute paths are left alone.
+        let args = strs(&stream_args(Path::new("/clips/take2: night.mp4"), &spec()));
+        let at = pos(&args, "-i").unwrap();
+        assert_eq!(args[at + 1], "/clips/take2: night.mp4");
     }
 
     #[test]
@@ -555,6 +601,10 @@ mod tests {
                 start_secs: f64::INFINITY,
                 ..spec()
             },
+            StreamSpec {
+                source_fps: Some(0.0),
+                ..spec()
+            },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
@@ -590,8 +640,6 @@ mod tests {
     // --- integration tests: need a real ffmpeg, skipped when there is none ---
 
     use std::process::Command;
-    use std::time::{Duration, Instant};
-
     const W: u32 = 32;
     const H: u32 = 24;
 
@@ -851,7 +899,7 @@ mod tests {
         kill_b();
 
         // Through the boxed pipe, after the stream has failed.
-        let StreamPipe { mut reader, kill } =
+        let FrameSource { mut reader, kill } =
             spawn_pipe(&dir.path().join("nope.mp4"), &StreamSpec::new(10.0, W, H)).unwrap();
         assert!(reader.read(&mut [0u8; 8]).is_err());
         kill();
@@ -878,6 +926,7 @@ mod tests {
         let spec = StreamSpec {
             start_secs: 0.5,
             looping: true,
+            source_fps: Some(10.0),
             ..StreamSpec::new(10.0, W, H)
         };
         let mut stream = spawn_stream(&clip, &spec).unwrap();
@@ -894,6 +943,7 @@ mod tests {
         let spec = StreamSpec {
             start_secs: 0.5,
             looping: true,
+            source_fps: Some(10.0),
             ..StreamSpec::new(20.0, W, H)
         };
         let mut stream = spawn_stream(&clip, &spec).unwrap();
