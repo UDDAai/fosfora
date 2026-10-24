@@ -228,29 +228,6 @@ fn request_path(request: &str) -> Option<&str> {
     Some(path.split('?').next().unwrap_or(path))
 }
 
-/// Keep a browser-supplied filename as a single path segment.
-fn safe_upload_name(raw: &str) -> Option<String> {
-    let name = raw.split(['/', '\\']).next_back()?.trim();
-    if name.is_empty() || name == "." || name == ".." {
-        return None;
-    }
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() || cleaned.starts_with('.') {
-        None
-    } else {
-        Some(cleaned)
-    }
-}
-
 fn handle_media_upload(stream: &mut TcpStream, first: &[u8], inbound_tx: &Sender<WsInMessage>) {
     let header_end = first.windows(4).position(|w| w == b"\r\n\r\n");
     let Some(header_end) = header_end else {
@@ -559,21 +536,6 @@ mod tests {
         assert!(!is_control_document("/health"));
         assert!(!is_control_document("/api/media"));
         assert!(!is_control_document("/ws"));
-    }
-
-    #[test]
-    fn upload_names_stay_a_single_segment() {
-        assert_eq!(safe_upload_name("clip.mp4").as_deref(), Some("clip.mp4"));
-        assert_eq!(
-            safe_upload_name("../../etc/passwd").as_deref(),
-            Some("passwd")
-        );
-        assert_eq!(
-            safe_upload_name("ice loop.png").as_deref(),
-            Some("ice_loop.png")
-        );
-        assert!(safe_upload_name("..").is_none());
-        assert!(safe_upload_name(".hidden").is_none());
     }
 
     #[test]

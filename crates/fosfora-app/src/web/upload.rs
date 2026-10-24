@@ -162,7 +162,7 @@ pub fn receive_raw<R: Read>(
     let partial = incoming.join(format!("raw-{}", library::incoming_token()));
     let mut file = std::fs::File::create(&partial).map_err(|e| e.to_string())?;
     let mut left = content_length;
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     while left > 0 {
         let want = (left as usize).min(buf.len());
         match reader.read(&mut buf[..want]) {

@@ -41,6 +41,7 @@ impl VideoMeta {
     /// RAM for the probed frame count. Every frame is held as RGBA8 (4 bytes/px),
     /// whatever the source pixel format. Admission reserves [`decode_allowance`],
     /// which is larger than this when the decoder's slack still fits.
+    #[cfg(test)]
     pub fn decoded_bytes(&self) -> u64 {
         self.frame_count()
             .saturating_mul(u64::from(self.width))
@@ -231,7 +232,7 @@ fn read_rgba_frames<R: Read>(
                     ));
                 }
                 Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(format!("ffmpeg frame-read failed: {e}")),
             }
         }
@@ -324,7 +325,7 @@ pub fn decode_all_frames(
                             diagnostic.push_str(&String::from_utf8_lossy(&chunk[..keep]));
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }

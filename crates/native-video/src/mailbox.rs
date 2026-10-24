@@ -113,9 +113,11 @@ mod tests {
         let latest = mailbox.latest().unwrap();
         assert_eq!(latest.stamp.serial, 49);
         assert_eq!(Arc::strong_count(&latest), 2);
+        let weak = Arc::downgrade(&latest);
         drop(latest);
+        // Not `latest()` again: that hands out a fresh clone, which is itself an owner.
         assert_eq!(
-            Arc::strong_count(&mailbox.latest().unwrap()),
+            weak.strong_count(),
             1,
             "the mailbox is the only owner once readers drop the frame"
         );
