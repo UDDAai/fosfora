@@ -2,6 +2,7 @@ pub mod decoder;
 pub mod jobs;
 pub mod library;
 pub mod stream_clock;
+pub mod stream_decoder;
 pub mod stream_ffmpeg;
 pub mod toolchain;
 pub mod types;
