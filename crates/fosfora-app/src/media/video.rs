@@ -53,7 +53,7 @@ impl VideoMeta {
 ///
 /// ffprobe can under-count variable-frame-rate video, so the decoder accepts
 /// `estimated + estimated/4 + 8` frames and never more than
-/// [`super::library::MAX_CLIP_RAM`]. `ram_bytes` is that unclamped slack.
+/// [`super::library::max_clip_ram`]. `ram_bytes` is that unclamped slack.
 /// Admission reserves it, and refuses the clip when it is over the cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DecodeAllowance {
@@ -78,7 +78,7 @@ pub(crate) fn decode_allowance(
         .map_err(|_| "Video has too many frames to pre-decode".to_string())?;
     let slack_frames = estimated.saturating_add(estimated / 4).saturating_add(8);
     let memory_frames =
-        usize::try_from(super::library::MAX_CLIP_RAM / frame_bytes).unwrap_or(usize::MAX);
+        usize::try_from(super::library::max_clip_ram() / frame_bytes).unwrap_or(usize::MAX);
     Ok(DecodeAllowance {
         frame_cap: slack_frames.min(memory_frames),
         ram_bytes: (slack_frames as u64).saturating_mul(frame_bytes),
