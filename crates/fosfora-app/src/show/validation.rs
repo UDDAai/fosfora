@@ -161,8 +161,11 @@ pub fn validate_show(
     ValidationReport { issues }
 }
 
-/// Conservative decoded-frame peak when transitioning between any two
-/// different presets, including manual choices outside the scheduled track.
+/// Sum of the two largest values in `presets`.
+///
+/// Show startup passes decoded-size estimates for the scheduled scene track
+/// only. This function does not inspect manual or unsaved presets. Those are
+/// checked against the live decode budget when the operator loads them.
 pub fn max_concurrent_preset_bytes(presets: &[u64]) -> u64 {
     let mut largest = 0u64;
     let mut second = 0u64;

@@ -151,6 +151,64 @@ fn parse_frame_rate(rate: &str) -> Option<f64> {
     (fps.is_finite() && fps > 0.0).then_some(fps)
 }
 
+/// Read whole RGBA frames from `reader`.
+///
+/// End of stream on a frame boundary is success, including zero frames.
+/// A short final frame, a read error, or more frames than `frame_cap` is an
+/// error, and no frames are returned. `read` returning
+/// [`std::io::ErrorKind::Interrupted`] is retried.
+fn read_rgba_frames<R: Read>(
+    reader: &mut R,
+    width: u32,
+    height: u32,
+    delay_ms: u32,
+    frame_cap: usize,
+    estimated_frames: usize,
+) -> Result<(Vec<DecodedFrame>, Vec<u32>), String> {
+    let frame_size = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|&n| n > 0)
+        .ok_or("Video has invalid decoded frame dimensions")?;
+    if frame_cap == 0 {
+        return Err("Even one decoded video frame exceeds the clip memory budget".into());
+    }
+    let mut frames = Vec::with_capacity(estimated_frames.min(frame_cap));
+    let mut delays_ms = Vec::with_capacity(estimated_frames.min(frame_cap));
+    let mut buf = vec![0u8; frame_size];
+    loop {
+        let mut filled = 0usize;
+        while filled < frame_size {
+            match reader.read(&mut buf[filled..]) {
+                Ok(0) if filled == 0 => return Ok((frames, delays_ms)),
+                Ok(0) => {
+                    return Err(format!(
+                        "ffmpeg stopped halfway through frame {} ({} of {} bytes)",
+                        frames.len() + 1,
+                        filled,
+                        frame_size
+                    ));
+                }
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("ffmpeg frame-read failed: {e}")),
+            }
+        }
+        if frames.len() >= frame_cap {
+            return Err(format!(
+                "Video decoded more than {frame_cap} frames (ffprobe estimated {estimated_frames}); \
+                 use a shorter clip or lower resolution"
+            ));
+        }
+        frames.push(DecodedFrame {
+            data: buf.clone(),
+            width,
+            height,
+        });
+        delays_ms.push(delay_ms);
+    }
+}
+
 /// Pre-decode all video frames via a single ffmpeg run.
 /// Returns (frames, delays_ms) ready for `MediaSource::Animated`.
 pub fn decode_all_frames(
@@ -235,74 +293,57 @@ pub fn decode_all_frames(
     });
 
     let mut stdout = child.stdout.take().ok_or("ffmpeg: no stdout pipe")?;
-    let mut frames = Vec::with_capacity(est_frames.min(frame_cap));
-    let mut delays_ms = Vec::with_capacity(est_frames.min(frame_cap));
-    let mut buf = vec![0u8; frame_size];
-    let mut failure: Option<String> = None;
-
-    'decode: loop {
-        let mut filled = 0;
-        while filled < frame_size {
-            match stdout.read(&mut buf[filled..]) {
-                Ok(0) if filled == 0 => break 'decode,
-                Ok(0) => {
-                    failure = Some(format!(
-                        "ffmpeg stopped halfway through frame {} ({} of {} bytes)",
-                        frames.len() + 1,
-                        filled,
-                        frame_size
-                    ));
-                    break 'decode;
-                }
-                Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    failure = Some(format!("ffmpeg frame-read failed: {e}"));
-                    break 'decode;
-                }
-            }
-        }
-        if frames.len() >= frame_cap {
-            failure = Some(format!(
-                "Video decoded more than {frame_cap} frames (ffprobe estimated {est_frames}); \
-                 use a shorter clip or lower resolution"
-            ));
-            break;
-        }
-        frames.push(DecodedFrame {
-            data: buf.clone(),
-            width: meta.width,
-            height: meta.height,
-        });
-        delays_ms.push(delay_ms);
-    }
-
+    let read_result = read_rgba_frames(
+        &mut stdout,
+        meta.width,
+        meta.height,
+        delay_ms,
+        frame_cap,
+        est_frames,
+    );
     drop(stdout);
-    if failure.is_some() {
+    if read_result.is_err() {
         let _ = child.kill();
     }
-    let status = child.wait().map_err(|e| format!("ffmpeg process wait failed: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("ffmpeg process wait failed: {e}"))?;
     let diagnostic = stderr_reader.join().unwrap_or_default();
     let detail = diagnostic.trim();
-    if let Some(failure) = failure {
-        return Err(format!(
-            "{}: {failure}{}",
-            path.display(),
-            if detail.is_empty() { String::new() } else { format!("; ffmpeg: {detail}") }
-        ));
-    }
+    let (frames, delays_ms) = match read_result {
+        Ok(decoded) => decoded,
+        Err(failure) => {
+            return Err(format!(
+                "{}: {failure}{}",
+                path.display(),
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!("; ffmpeg: {detail}")
+                }
+            ));
+        }
+    };
     if !status.success() {
         return Err(format!(
             "ffmpeg failed to decode {} ({status}){}",
             path.display(),
-            if detail.is_empty() { String::new() } else { format!(": {detail}") }
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ));
     }
     if frames.is_empty() {
         return Err(format!(
             "ffmpeg decoded zero frames from {}{}",
             path.display(),
-            if detail.is_empty() { String::new() } else { format!(": {detail}") }
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ));
     }
 
@@ -388,5 +429,99 @@ mod tests {
         assert!(parse_video_metadata(&image)
             .unwrap_err()
             .contains("No video stream"));
+    }
+
+    #[test]
+    fn accepts_frame_aligned_output_even_when_reads_are_short() {
+        struct OneByte<R>(R);
+        impl<R: Read> Read for OneByte<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if buf.is_empty() {
+                    return Ok(0);
+                }
+                let mut one = [0u8; 1];
+                let n = self.0.read(&mut one)?;
+                if n == 0 {
+                    return Ok(0);
+                }
+                buf[0] = one[0];
+                Ok(1)
+            }
+        }
+        let mut reader = OneByte(std::io::Cursor::new(vec![1, 2, 3, 4, 5, 6, 7, 8]));
+        let (frames, delays) = read_rgba_frames(&mut reader, 1, 1, 40, 4, 2).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, vec![1, 2, 3, 4]);
+        assert_eq!(frames[1].data, vec![5, 6, 7, 8]);
+        assert_eq!(delays, vec![40, 40]);
+    }
+
+    fn expect_read_err<R: Read>(reader: &mut R, frame_cap: usize, estimated: usize) -> String {
+        match read_rgba_frames(reader, 1, 1, 40, frame_cap, estimated) {
+            Err(err) => err,
+            Ok(_) => panic!("expected the frame reader to fail"),
+        }
+    }
+
+    #[test]
+    fn rejects_a_partial_final_frame() {
+        let mut reader = std::io::Cursor::new(vec![1u8, 2, 3, 4, 5, 6]);
+        let err = expect_read_err(&mut reader, 4, 2);
+        assert!(err.contains("halfway"), "{err}");
+        assert!(err.contains("2 of 4"), "{err}");
+    }
+
+    #[test]
+    fn rejects_frames_past_the_cap_and_a_hard_read_error() {
+        let mut reader = std::io::Cursor::new(vec![0u8; 8]);
+        let err = expect_read_err(&mut reader, 1, 2);
+        assert!(err.contains("more than 1"), "{err}");
+
+        struct Boom;
+        impl Read for Boom {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+        }
+        let err = expect_read_err(&mut Boom, 4, 1);
+        assert!(err.contains("frame-read failed"), "{err}");
+    }
+
+    #[test]
+    fn empty_stream_is_not_a_partial_frame_and_interrupt_is_retried() {
+        let mut reader = std::io::Cursor::new(Vec::<u8>::new());
+        let (frames, _) = read_rgba_frames(&mut reader, 1, 1, 40, 4, 1).unwrap();
+        assert!(frames.is_empty());
+
+        struct InterruptOnce {
+            data: Vec<u8>,
+            pos: usize,
+            interrupted: bool,
+        }
+        impl Read for InterruptOnce {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "again",
+                    ));
+                }
+                if self.pos >= self.data.len() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.data[self.pos];
+                self.pos += 1;
+                Ok(1)
+            }
+        }
+        let mut reader = InterruptOnce {
+            data: vec![9, 8, 7, 6],
+            pos: 0,
+            interrupted: false,
+        };
+        let (frames, _) = read_rgba_frames(&mut reader, 1, 1, 40, 4, 1).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, vec![9, 8, 7, 6]);
     }
 }
