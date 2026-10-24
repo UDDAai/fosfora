@@ -223,7 +223,7 @@ fn extract_from_zip(archive_path: &std::path::Path, target_path: &std::path::Pat
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let file_name = entry.name().rsplit('/').next().unwrap_or("").to_string();
+        let file_name = entry.name()?.rsplit('/').next().unwrap_or("").to_string();
 
         if file_name == ORT_LIB_FILENAME && entry.size() > 1024 {
             let mut out = std::fs::File::create(target_path)?;
