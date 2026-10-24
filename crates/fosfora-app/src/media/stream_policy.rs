@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 use super::library::format_bytes;
+use super::stream_decoder::POOL_BUFFERS;
 
 /// Env var that picks the [`StreamPolicy`]: `off`, `auto` or `on`, case-insensitive.
 pub const STREAM_ENV: &str = "FOSFORA_VIDEO_STREAM";
@@ -21,12 +22,10 @@ pub const STREAM_ENV: &str = "FOSFORA_VIDEO_STREAM";
 /// Shorter clips keep the all-frames path, which scrubs instantly.
 pub const AUTO_STREAM_MIN_SECS: f64 = 20.0;
 
-/// Frame buffers a streamed clip holds. Matches `POOL_BUFFERS` in `stream_decoder`
-/// (not on main yet); keep the two equal.
-pub const STREAM_POOL_BUFFERS: u64 = 6;
-
 /// Estimate of ffmpeg's own working set (decoder references, scaler, pipes) at 1080p.
-/// Other sizes scale by pixel count. A measured guess, not a limit.
+/// Other sizes scale by pixel count. T3 measured about 75-101 MB peak RSS per streamed
+/// clip at 720p (test process plus ffmpeg), so 100 MiB at 1080p is a reasonable upper
+/// estimate, not a limit.
 pub const FFMPEG_WORKING_SET_1080P: u64 = 100 * 1024 * 1024;
 
 const PIXELS_1080P: u64 = 1920 * 1080;
@@ -95,7 +94,7 @@ pub fn should_stream(
 /// Independent of duration.
 pub fn stream_reserve_bytes(width: u32, height: u32) -> u64 {
     let pixels = u64::from(width) * u64::from(height);
-    let pool = pixels.saturating_mul(4).saturating_mul(STREAM_POOL_BUFFERS);
+    let pool = pixels.saturating_mul(4).saturating_mul(POOL_BUFFERS as u64);
     let ffmpeg =
         u128::from(FFMPEG_WORKING_SET_1080P) * u128::from(pixels) / u128::from(PIXELS_1080P);
     pool.saturating_add(u64::try_from(ffmpeg).unwrap_or(u64::MAX))
@@ -181,7 +180,10 @@ mod tests {
         let a = stream_reserve_bytes(1920, 1080);
         let b = stream_reserve_bytes(1920, 1080);
         assert_eq!(a, b);
-        assert_eq!(a, 6 * 1920 * 1080 * 4 + FFMPEG_WORKING_SET_1080P);
+        assert_eq!(
+            a,
+            POOL_BUFFERS as u64 * 1920 * 1080 * 4 + FFMPEG_WORKING_SET_1080P
+        );
     }
 
     #[test]
