@@ -124,6 +124,28 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::LoadEffect { index })
         }
+        "clear_layer_effect" => {
+            let index = v.get("index")?.as_u64()? as usize;
+            Some(WsInMessage::ClearLayerEffect { index })
+        }
+        "save_preset" => {
+            let name = v.get("name")?.as_str()?.to_string();
+            Some(WsInMessage::SavePreset { name })
+        }
+        "rename_preset" => {
+            let from = v.get("from")?.as_str()?.to_string();
+            let to = v.get("to")?.as_str()?.to_string();
+            Some(WsInMessage::RenamePreset { from, to })
+        }
+        "delete_preset" => {
+            let name = v.get("name")?.as_str()?.to_string();
+            Some(WsInMessage::DeletePreset { name })
+        }
+        "rename_palette" => {
+            let from = v.get("from")?.as_str()?.to_string();
+            let to = v.get("to")?.as_str()?.to_string();
+            Some(WsInMessage::RenamePalette { from, to })
+        }
         "select_layer" => {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::SelectLayer { index })
@@ -163,6 +185,11 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
         "remove_library_item" => {
             let id = v.get("id")?.as_str()?.to_string();
             Some(WsInMessage::RemoveLibraryItem { id })
+        }
+        "rename_library_item" => {
+            let id = v.get("id")?.as_str()?.to_string();
+            let name = v.get("name")?.as_str()?.to_string();
+            Some(WsInMessage::RenameLibraryItem { id, name })
         }
         "save_scene" => Some(WsInMessage::SaveScene),
         "save_scene_as" => {

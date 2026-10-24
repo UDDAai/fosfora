@@ -740,7 +740,8 @@ fn preview_data_url(frame: &crate::media::types::DecodedFrame) -> Option<String>
         return None;
     }
     let tw: u32 = 96;
-    let th: u32 = ((u64::from(frame.height) * u64::from(tw)) / u64::from(frame.width)).clamp(24, 54) as u32;
+    let th: u32 =
+        ((u64::from(frame.height) * u64::from(tw)) / u64::from(frame.width)).clamp(24, 54) as u32;
     let mut rgb = Vec::with_capacity((tw * th * 3) as usize);
     for y in 0..th {
         let sy = ((u64::from(y) * u64::from(frame.height)) / u64::from(th))
@@ -814,7 +815,8 @@ mod placement_tests {
 
     #[test]
     fn custom_width_zooms_without_changing_aspect() {
-        let u = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.0, 0.0, false);
+        let u =
+            compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.0, 0.0, false);
         assert!((u.scale[0] - 1.3).abs() < 1e-4);
         assert!((u.scale[1] - 1.3).abs() < 1e-4);
         assert!(u.offset[0] < 0.0 && u.offset[1] < 0.0);
@@ -822,8 +824,10 @@ mod placement_tests {
 
     #[test]
     fn position_shifts_which_part_of_a_zoom_stays_visible() {
-        let centered = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.0, 0.0, false);
-        let shifted = compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.4, 0.0, false);
+        let centered =
+            compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.0, 0.0, false);
+        let shifted =
+            compute_media_uniforms(1280, 720, 1920, 1080, MediaFit::Width, 1.3, 0.4, 0.0, false);
         assert!(shifted.offset[0] > centered.offset[0]);
         assert!((shifted.scale[0] - centered.scale[0]).abs() < 1e-4);
     }
@@ -831,7 +835,9 @@ mod placement_tests {
     #[test]
     fn a_decoded_frame_becomes_a_jpeg_preview() {
         let frame = crate::media::types::DecodedFrame {
-            data: vec![10, 40, 200, 255, 220, 30, 20, 255, 10, 40, 200, 255, 220, 30, 20, 255],
+            data: vec![
+                10, 40, 200, 255, 220, 30, 20, 255, 10, 40, 200, 255, 220, 30, 20, 255,
+            ],
             width: 2,
             height: 2,
         };
@@ -842,7 +848,8 @@ mod placement_tests {
 
     #[test]
     fn omitted_mode_stays_letterboxed() {
-        let fit = compute_media_uniforms(720, 1280, 1920, 1080, MediaFit::Fit, 1.0, 0.0, 0.0, false);
+        let fit =
+            compute_media_uniforms(720, 1280, 1920, 1080, MediaFit::Fit, 1.0, 0.0, 0.0, false);
         assert!(fit.scale[0] < 1.0);
         assert!((fit.scale[1] - 1.0).abs() < 1e-4);
     }

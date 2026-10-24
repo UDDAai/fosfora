@@ -222,6 +222,9 @@ mod tests {
         clock.start(t0);
         clock.reset();
         assert_eq!(clock.transport(), ClockTransport::Idle);
-        assert_eq!(clock.elapsed_at(t0 + Duration::from_secs(99)), Duration::ZERO);
+        assert_eq!(
+            clock.elapsed_at(t0 + Duration::from_secs(99)),
+            Duration::ZERO
+        );
     }
 }

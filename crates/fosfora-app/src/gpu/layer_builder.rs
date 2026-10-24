@@ -156,16 +156,25 @@ pub(crate) fn load_effect_into_layer(
                 ctx.placeholder,
                 ctx.audio_textures,
             );
-            layer.content = LayerContent::Effect(Box::new(EffectLayer {
-                pass_executor,
-                uniform_buffer,
-                uniforms: ShaderUniforms::zeroed(),
-                effect_index: None,
-                shader_sources: vec![],
-                shader_error: None,
-                pending_rebuild: false,
-                rates: Default::default(),
-            }));
+            let postprocess = layer.postprocess.clone();
+            let previous = std::mem::replace(
+                &mut layer.content,
+                LayerContent::Effect(Box::new(EffectLayer {
+                    pass_executor,
+                    uniform_buffer,
+                    uniforms: ShaderUniforms::zeroed(),
+                    effect_index: None,
+                    shader_sources: vec![],
+                    shader_error: None,
+                    pending_rebuild: false,
+                    rates: Default::default(),
+                })),
+            );
+            if let LayerContent::Media(media) = previous {
+                // Keep the decoded clip. Remove effect puts it back on screen.
+                layer.suspended_media =
+                    Some(crate::gpu::layer::SuspendedMedia { media, postprocess });
+            }
         }
     }
 

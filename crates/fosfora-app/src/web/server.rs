@@ -353,9 +353,9 @@ fn serve_library_get(stream: &mut TcpStream, path: &str) {
             Some(file) => match std::fs::read(file) {
                 Ok(bytes) => {
                     let header = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                            bytes.len()
-                        );
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
                     let _ = stream.write_all(header.as_bytes());
                     let _ = stream.write_all(&bytes);
                     let _ = stream.flush();
@@ -443,6 +443,7 @@ fn is_control_document(path: &str) -> bool {
         "/" | "/index.html"
             | "/control"
             | "/layers"
+            | "/effects"
             | "/look"
             | "/picture"
             | "/library"
@@ -545,6 +546,7 @@ mod tests {
         for path in [
             "/",
             "/layers",
+            "/effects",
             "/look",
             "/picture",
             "/library",

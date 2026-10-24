@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { DragEvent, PointerEvent, ReactNode } from 'react'
-import { GripVertical, Info, Trash2 } from 'lucide-react'
+import { GripVertical, Info, Pause, Play, Square, Star, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -29,6 +30,58 @@ import { HeldSlider } from '@/held-slider'
 import { useFosfora } from '@/fosfora/client'
 import { BLENDS, clock } from '@/fosfora/types'
 import type { LayerState, LibraryItem } from '@/fosfora/types'
+
+const STARS_KEY = 'fosfora-stars'
+
+function readStars() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STARS_KEY) || '[]')
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : []
+  } catch {
+    return [] as string[]
+  }
+}
+
+function useStars() {
+  const [stars, setStars] = useState<string[]>(readStars)
+  function toggle(key: string) {
+    setStars((current) => {
+      const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
+      localStorage.setItem(STARS_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+  return { stars, toggle }
+}
+
+function starKeyForLayer(layer: LayerState) {
+  if (layer.effect_name) return `effect:${layer.effect_name}`
+  if (layer.media_name) return `media:${layer.media_name}`
+  return `layer:${layer.name}`
+}
+
+function StarMark({ on, label, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={on ? `Unstar ${label}` : `Star ${label}`}
+      title={on ? `Unstar ${label}` : `Star ${label}`}
+      className={`inline-flex size-7 shrink-0 items-center justify-center rounded-md ${on ? 'text-amber-400' : 'text-muted-foreground hover:text-foreground'}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        onToggle()
+      }}
+    >
+      <Star className={`size-4 ${on ? 'fill-current' : ''}`} />
+    </button>
+  )
+}
+
+function swatchCss(rgba: number[]) {
+  const [r = 0, g = 0, b = 0, a = 1] = rgba
+  return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`
+}
 
 function activeLayer(layers: LayerState[], index: number) {
   return layers[index]
@@ -69,8 +122,9 @@ function readMediaDrag(event: DragEvent) {
   return text.startsWith(MEDIA_PREFIX) ? text.slice(MEDIA_PREFIX.length) : ''
 }
 
-function fileUris(event: DragEvent) {
-  return event.dataTransfer
+function fileUris(data: DataTransfer | null) {
+  if (!data) return []
+  return data
     .getData('text/uri-list')
     .split(/\s+/)
     .map((line) => {
@@ -86,10 +140,24 @@ function fileUris(event: DragEvent) {
     .filter((path) => path.startsWith('/'))
 }
 
-function isFinderDrop(event: DragEvent) {
-  const types = [...event.dataTransfer.types]
+function isFinderDrop(data: DataTransfer | null) {
+  if (!data) return false
+  const types = [...data.types]
   if (types.includes(MEDIA_MIME)) return false
   return types.includes('Files') || types.includes('text/uri-list')
+}
+
+function readFinderPathsNow() {
+  try {
+    const xhr = new XMLHttpRequest()
+    xhr.open('GET', '/api/media/finder-drag', false)
+    xhr.send()
+    if (xhr.status !== 200) return []
+    const parsed = JSON.parse(xhr.responseText) as unknown
+    return Array.isArray(parsed) ? parsed.filter((path) => typeof path === 'string') : []
+  } catch {
+    return []
+  }
 }
 
 function writeMediaDrag(event: DragEvent, id: string) {
@@ -117,7 +185,9 @@ function neighborShift(index: number, drag: LayerDrag | null) {
 
 export function LayersPanel() {
   const { state, send } = useFosfora()
+  const { stars, toggle } = useStars()
   const layers = state?.layers ?? []
+  const [presetName, setPresetName] = useState('')
   const cards = useRef<Array<HTMLDivElement | null>>([])
   const dragRef = useRef<LayerDrag | null>(null)
   const [drag, setDrag] = useState<LayerDrag | null>(null)
@@ -204,7 +274,7 @@ export function LayersPanel() {
           <span className="text-sm font-medium">Layers</span>
           <SectionInfo
             label="About layers"
-            text="Click a layer to choose what Look and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. This works from a second window on this same page. Solo shows only the selected layer and is not saved."
+            text="Click a layer to choose what Effects and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. This works from a second window on this same page. Solo shows only the selected layer and is not saved. The star remembers a layer or its effect on this computer."
           />
         </div>
         <Button
@@ -217,6 +287,32 @@ export function LayersPanel() {
           {state?.solo_layer != null ? 'Exit solo' : 'Solo selected'}
         </Button>
       </div>
+      <div className="flex items-center gap-2">
+        <Input
+          value={presetName}
+          placeholder="Name this composition"
+          aria-label="Preset name"
+          onChange={(event) => setPresetName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && presetName.trim()) {
+              send({ type: 'save_preset', name: presetName.trim() })
+              setPresetName('')
+            }
+          }}
+        />
+        <Button
+          disabled={!presetName.trim()}
+          onClick={() => {
+            send({ type: 'save_preset', name: presetName.trim() })
+            setPresetName('')
+          }}
+        >
+          Save as preset
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Save scene in the header writes the open scene under its current name. This stores a new named copy of these layers.
+      </p>
       <div
         className={`rounded-xl border border-dashed px-3 py-2 text-center text-xs ${dropAt === 'new' ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground'}`}
         onDragEnter={(event) => takeMedia(event, 'new')}
@@ -283,6 +379,23 @@ export function LayersPanel() {
                     {dropAt === index ? <span className="text-xs text-muted-foreground">Replace</span> : null}
                   </div>
                 </div>
+                {layer.effect_name && !layer.locked ? (
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      send({ type: 'clear_layer_effect', index })
+                    }}
+                  >
+                    Remove effect
+                  </button>
+                ) : null}
+                <StarMark
+                  on={stars.includes(starKeyForLayer(layer))}
+                  label={layer.effect_name || layer.media_name || layer.name}
+                  onToggle={() => toggle(starKeyForLayer(layer))}
+                />
                 <button
                   type="button"
                   aria-label={`Remove ${layer.name}`}
@@ -299,6 +412,7 @@ export function LayersPanel() {
                 <Switch
                   checked={layer.enabled}
                   disabled={layer.locked}
+                  className="data-unchecked:!bg-red-600 data-checked:!bg-green-600"
                   onClick={(event) => event.stopPropagation()}
                   onCheckedChange={(checked) =>
                     send({ type: 'set_layer_enabled', layer: index, value: checked })
@@ -368,11 +482,17 @@ export function LayersPanel() {
             </ContextMenuSub>
             <ContextMenuSeparator />
             <ContextMenuItem
+              disabled={!layer.effect_name || layer.locked}
+              onSelect={() => send({ type: 'clear_layer_effect', index })}
+            >
+              Remove effect
+            </ContextMenuItem>
+            <ContextMenuItem
               variant="destructive"
               disabled={removeLocked}
               onSelect={() => send({ type: 'remove_layer', index })}
             >
-              Remove
+              Remove layer
             </ContextMenuItem>
           </ContextMenuContent>
           </ContextMenu>
@@ -383,13 +503,18 @@ export function LayersPanel() {
   )
 }
 
-export function LookPanel() {
+export function EffectsPanel() {
   const { state, send } = useFosfora()
+  const { stars, toggle } = useStars()
   const layer = state ? activeLayer(state.layers, state.active_layer) : undefined
   const [query, setQuery] = useState('')
-  const effects = (state?.effects ?? []).filter((effect) =>
-    effect.name.toLowerCase().includes(query.trim().toLowerCase()),
-  )
+  const effects = (state?.effects ?? [])
+    .filter((effect) => effect.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((left, right) => {
+      const leftStar = stars.includes(`effect:${left.name}`) ? 0 : 1
+      const rightStar = stars.includes(`effect:${right.name}`) ? 0 : 1
+      return leftStar - rightStar
+    })
 
   return (
     <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
@@ -399,7 +524,7 @@ export function LookPanel() {
             Effects
             <SectionInfo
               label="About effects"
-              text="Loads onto the layer you selected on Layers. The highlighted name is the effect already on that layer. Choosing one replaces the look on that layer and leaves the other layers as they are."
+              text="Loads onto the layer you selected on Layers. The highlighted name is the effect already on that layer. Choosing one replaces the look on that layer and leaves the other layers as they are. Star an effect to keep it at the top of this list."
             />
           </CardTitle>
           <CardDescription>Loads onto {layer?.name ?? 'the selected layer'}.</CardDescription>
@@ -409,14 +534,20 @@ export function LookPanel() {
           <ScrollArea className="h-[28rem]">
             <div className="flex flex-col gap-1 pr-3">
               {effects.map((effect) => (
-                <Button
-                  key={effect.index}
-                  variant={layer?.effect_name === effect.name ? 'secondary' : 'ghost'}
-                  className="justify-start"
-                  onClick={() => send({ type: 'load_effect', index: effect.index })}
-                >
-                  {effect.name}
-                </Button>
+                <div key={effect.index} className="flex items-center gap-1">
+                  <Button
+                    variant={layer?.effect_name === effect.name ? 'secondary' : 'ghost'}
+                    className="min-w-0 flex-1 justify-start"
+                    onClick={() => send({ type: 'load_effect', index: effect.index })}
+                  >
+                    <span className="truncate">{effect.name}</span>
+                  </Button>
+                  <StarMark
+                    on={stars.includes(`effect:${effect.name}`)}
+                    label={effect.name}
+                    onToggle={() => toggle(`effect:${effect.name}`)}
+                  />
+                </div>
               ))}
             </div>
           </ScrollArea>
@@ -648,20 +779,32 @@ function Field({ label, value, children }: { label: string; value: string; child
   )
 }
 
+type LibraryKind = 'all' | 'image' | 'video'
+
 export function LibraryPanel() {
   const { state, send } = useFosfora()
   const [query, setQuery] = useState('')
+  const [kindFilter, setKindFilter] = useState<LibraryKind>('all')
   const [picked, setPicked] = useState<string[]>([])
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [nameMenu, setNameMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  const renameOnce = useRef(false)
   const [note, setNote] = useState('')
   const [finderOver, setFinderOver] = useState(false)
-  const finderPaths = useRef<Promise<string[]> | null>(null)
+  const heldPaths = useRef<string[]>([])
+  const sendRef = useRef(send)
+  sendRef.current = send
+  const uploadRef = useRef<(files: FileList | null) => Promise<void>>(async () => {})
   const items = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return (state?.library ?? [])
-      .filter((item) => !needle || item.name.toLowerCase().includes(needle))
+      .filter((item) => {
+        if (kindFilter !== 'all' && item.kind !== kindFilter) return false
+        return !needle || item.name.toLowerCase().includes(needle)
+      })
       .slice()
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [query, state?.library])
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
+  }, [kindFilter, query, state?.library])
 
   async function upload(files: FileList | null) {
     if (!files?.length) return
@@ -689,69 +832,135 @@ export function LibraryPanel() {
     await Promise.all([worker(), worker()])
     send({ type: 'rescan_library' })
   }
+  uploadRef.current = upload
 
-  function armFinder(event: DragEvent<HTMLElement>) {
-    if (!isFinderDrop(event)) return
-    event.preventDefault()
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-    finderPaths.current = fetch('/api/media/finder-drag')
-      .then((response) => (response.ok ? response.json() : []))
-      .then((paths) => (Array.isArray(paths) ? paths.filter((path) => typeof path === 'string') : []))
-      .catch(() => [])
-    setFinderOver(true)
-  }
-
-  function moveFinder(event: DragEvent) {
-    if (!isFinderDrop(event)) return
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'link'
-    setFinderOver(true)
-  }
-
-  function leaveFinder(event: DragEvent<HTMLElement>) {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-    setFinderOver(false)
-  }
-
-  async function dropFinder(event: DragEvent) {
-    if (!isFinderDrop(event)) return
-    event.preventDefault()
-    setFinderOver(false)
-    const pending = finderPaths.current
-    finderPaths.current = null
-    const fromPasteboard = pending ? await pending : []
-    const paths = [...new Set([...fileUris(event), ...fromPasteboard])]
-    if (paths.length === 0) {
-      setNote('The Finder location was not available, so nothing was added and nothing was copied.')
-      return
+  useEffect(() => {
+    if (!nameMenu) return
+    function close() {
+      setNameMenu(null)
     }
-    send({ type: 'link_library_files', paths })
-    setNote('Registering the original file. It is not copied.')
-  }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') close()
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [nameMenu])
+
+  useEffect(() => {
+    let reading = false
+    function remember(paths: string[]) {
+      if (paths.length > 0) heldPaths.current = paths
+    }
+    function pull() {
+      if (reading) return
+      reading = true
+      fetch('/api/media/finder-drag')
+        .then((response) => (response.ok ? response.json() : []))
+        .then((paths) => {
+          remember(Array.isArray(paths) ? paths.filter((path) => typeof path === 'string') : [])
+        })
+        .catch(() => [])
+        .finally(() => {
+          reading = false
+        })
+    }
+    function over(event: globalThis.DragEvent) {
+      if (!isFinderDrop(event.dataTransfer)) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      setFinderOver(true)
+      pull()
+    }
+    function enter(event: globalThis.DragEvent) {
+      if (!isFinderDrop(event.dataTransfer)) return
+      if (event.relatedTarget == null) heldPaths.current = []
+      over(event)
+    }
+    function leave(event: globalThis.DragEvent) {
+      if (event.relatedTarget == null) setFinderOver(false)
+    }
+    function drop(event: globalThis.DragEvent) {
+      if (!isFinderDrop(event.dataTransfer)) return
+      event.preventDefault()
+      setFinderOver(false)
+      const paths = [
+        ...new Set([...fileUris(event.dataTransfer), ...heldPaths.current, ...readFinderPathsNow()]),
+      ]
+      heldPaths.current = []
+      if (paths.length > 0) {
+        sendRef.current({ type: 'link_library_files', paths })
+        setNote(
+          paths.length === 1
+            ? 'Adding that file to the library. It stays in Finder and is not copied.'
+            : `Adding ${paths.length} items to the library. They stay in Finder and are not copied.`,
+        )
+        return
+      }
+      // The browser drop includes the file bytes and usually not the Finder
+      // path. NSDragPboard is often already cleared by the time this runs.
+      const files = event.dataTransfer?.files
+      if (files && files.length > 0) {
+        setNote(
+          files.length === 1
+            ? 'Finder did not share the file location, so this drop is being copied into the library.'
+            : `Finder did not share the file locations, so ${files.length} files are being copied into the library.`,
+        )
+        void uploadRef.current(files)
+        return
+      }
+      setNote('The Finder location was not available, so nothing was added and nothing was copied.')
+    }
+    window.addEventListener('dragenter', enter)
+    window.addEventListener('dragover', over)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragenter', enter)
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', drop)
+    }
+  }, [])
 
   return (
-    <Card
-      className={finderOver ? 'ring-2 ring-primary' : undefined}
-      onDragEnter={armFinder}
-      onDragOver={moveFinder}
-      onDragLeave={leaveFinder}
-      onDrop={(event) => void dropFinder(event)}
-    >
+    <Card className={`relative min-h-full ${finderOver ? 'ring-2 ring-primary' : ''}`}>
+      {finderOver ? (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-primary/15 text-sm font-medium">
+          Drop to add to the library.
+        </div>
+      ) : null}
       <CardHeader>
         <CardTitle className="flex items-center gap-1.5">
           Library
           <SectionInfo
             label="About the library"
-            text="Drag a file here from Finder to register it where it already is. Nothing is copied. Drop a library item on the Layers page to replace a layer, or on the dashed row to add one. The trash icon removes it from this list. A file a scene still uses is kept. Upload is separate: that button does copy the file into the show."
+            text="Drag a file or folder from Finder onto this page. When Finder shares the location, the file stays where it is and nothing is copied. When it does not, the drop is copied into the library, the same as Upload. Filter the table to images or videos. Names stay in alphabetical order. Right-click a row to rename the file; scenes that use it follow the new name. Drop a library item on the Layers page to replace a layer, or on the dashed row to add one. The trash icon hides it from this list and leaves the original file where it is. A file a scene still uses stays in the list."
           />
         </CardTitle>
         <CardDescription>
-          Drop a Finder file to register its original path. Upload copies into the show.
+          Images and videos, A to Z. Right-click a row to rename it. A Finder drop stays put when the location is shared, and is copied when it is not. Upload copies into the show.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex flex-wrap gap-2">
           <Input className="max-w-xs" value={query} placeholder="Search media" onChange={(event) => setQuery(event.target.value)} />
+          <div className="flex gap-1" role="group" aria-label="Show images or videos">
+            {(
+              [
+                ['all', 'All'],
+                ['image', 'Images'],
+                ['video', 'Videos'],
+              ] as const
+            ).map(([id, label]) => (
+              <Button key={id} size="sm" variant={kindFilter === id ? 'secondary' : 'outline'} onClick={() => setKindFilter(id)}>
+                {label}
+              </Button>
+            ))}
+          </div>
           <Button variant="outline" asChild>
             <label>
               Upload
@@ -788,76 +997,164 @@ export function LibraryPanel() {
         {(state?.library_warnings ?? []).map((warning) => (
           <p key={warning} className="text-sm text-destructive">{warning}</p>
         ))}
-        <ScrollArea className="h-[32rem]">
-          <div className="space-y-1 pr-3">
-            {items.map((item) => {
-              const on = picked.includes(item.id)
-              const meta = libraryMeta(item)
-              return (
-                <div
-                  key={item.id}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-muted ${on ? 'bg-muted' : ''}`}
-                >
-                  <button
-                    type="button"
-                    draggable
-                    className="flex min-w-0 flex-1 cursor-grab items-center gap-3 text-left active:cursor-grabbing"
+        <div className="max-h-[32rem] overflow-auto rounded-lg ring-1 ring-foreground/10">
+          <table className="w-full border-collapse text-left text-xs">
+            <thead className="sticky top-0 z-10 bg-card text-muted-foreground">
+              <tr className="border-b border-foreground/10">
+                <th className="w-12 px-2 py-1.5 font-medium" />
+                <th className="px-2 py-1.5 font-medium" aria-sort="ascending">
+                  Name
+                </th>
+                <th className="w-16 px-2 py-1.5 font-medium">Kind</th>
+                <th className="px-2 py-1.5 font-medium">Details</th>
+                <th className="w-8 px-2 py-1.5 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {items.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-2 py-6 text-center text-muted-foreground">
+                    {kindFilter === 'image' ? 'No images' : kindFilter === 'video' ? 'No videos' : 'No media'}
+                    {query.trim() ? ' match that search' : ''}.
+                  </td>
+                </tr>
+              ) : null}
+              {items.map((item) => {
+                const on = picked.includes(item.id)
+                const editing = renaming === item.id
+                const kindLabel = item.kind === 'image' ? 'Image' : item.kind === 'video' ? 'Video' : item.kind || 'File'
+                const detail = [
+                  item.location === 'linked' ? item.path : '',
+                  item.scenes && item.scenes.length > 0 ? `In ${item.scenes.join(', ')}` : '',
+                  item.status && item.status !== 'ok' ? item.detail || item.status : '',
+                ]
+                  .filter(Boolean)
+                  .join('\n')
+                function commitName(value: string) {
+                  if (renameOnce.current) return
+                  renameOnce.current = true
+                  const next = value.trim()
+                  setRenaming(null)
+                  if (next && next !== item.name) send({ type: 'rename_library_item', id: item.id, name: next })
+                  queueMicrotask(() => {
+                    renameOnce.current = false
+                  })
+                }
+                return (
+                  <tr
+                    key={item.id}
+                    draggable={!editing}
+                    onContextMenu={(event) => {
+                      event.preventDefault()
+                      setNameMenu({ id: item.id, x: event.clientX, y: event.clientY })
+                    }}
+                    title={detail || undefined}
+                    className={`border-b border-foreground/10 ${editing ? '' : 'cursor-grab active:cursor-grabbing'} ${on ? 'bg-primary/15' : 'hover:bg-muted/60'}`}
                     onDragStart={(event) => writeMediaDrag(event, item.id)}
-                    onClick={() =>
+                    onClick={() => {
+                      if (editing) return
                       setPicked((current) =>
                         current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id],
                       )
-                    }
+                    }}
                   >
-                    {item.thumb ? (
-                      <img
-                        src={`/api/media/thumb/${encodeURIComponent(item.thumb)}`}
-                        alt=""
-                        draggable={false}
-                        className="h-10 w-16 shrink-0 rounded-md bg-muted object-cover"
-                      />
-                    ) : (
-                      <span className="h-10 w-16 shrink-0 rounded-md bg-muted" />
-                    )}
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{item.name}</span>
-                      <span className="block truncate text-xs text-muted-foreground">{meta}</span>
-                      {item.location === 'linked' && item.path ? (
-                        <span className="block truncate text-xs text-muted-foreground">{item.path}</span>
-                      ) : null}
+                    <td className="px-2 py-1">
+                      {item.thumb ? (
+                        <img
+                          src={`/api/media/thumb/${encodeURIComponent(item.thumb)}`}
+                          alt=""
+                          draggable={false}
+                          className="h-6 w-10 rounded-sm bg-muted object-cover"
+                        />
+                      ) : (
+                        <span className="block h-6 w-10 rounded-sm bg-muted" />
+                      )}
+                    </td>
+                    <td className="max-w-48 px-2 py-1">
+                      {editing ? (
+                        <input
+                          autoFocus
+                          defaultValue={item.name}
+                          aria-label={`Rename ${item.name}`}
+                          className="w-full min-w-0 rounded-sm bg-background px-1 py-0.5 text-xs outline-none ring-1 ring-ring"
+                          onClick={(event) => event.stopPropagation()}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onFocus={(event) => {
+                            const value = event.currentTarget.value
+                            const dot = value.lastIndexOf('.')
+                            event.currentTarget.setSelectionRange(0, dot > 0 ? dot : value.length)
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault()
+                              commitName(event.currentTarget.value)
+                            } else if (event.key === 'Escape') {
+                              renameOnce.current = true
+                              setRenaming(null)
+                              queueMicrotask(() => {
+                                renameOnce.current = false
+                              })
+                            }
+                          }}
+                          onBlur={(event) => commitName(event.currentTarget.value)}
+                        />
+                      ) : (
+                        <span className="block truncate font-medium">{item.name}</span>
+                      )}
                       {item.status && item.status !== 'ok' ? (
-                        <span className="block truncate text-xs text-destructive">
-                          {item.detail || item.status}
-                        </span>
+                        <span className="block truncate text-destructive">{item.detail || item.status}</span>
                       ) : null}
-                      {item.scenes && item.scenes.length > 0 ? (
-                        <span className="block truncate text-xs text-muted-foreground">In {item.scenes.join(', ')}</span>
-                      ) : null}
-                    </span>
-                    <Badge variant={item.status && item.status !== 'ok' ? 'destructive' : 'outline'}>
-                      {item.location === 'linked' ? 'linked' : item.kind || 'file'}
-                    </Badge>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Remove ${item.name}`}
-                    title={
-                      item.scenes && item.scenes.length > 0
-                        ? `Used by ${item.scenes.join(', ')}`
-                        : item.location === 'linked'
-                          ? `Remove ${item.name} from the library. The file stays where it is.`
-                          : `Remove ${item.name} from the show media folder`
-                    }
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => send({ type: 'remove_library_item', id: item.id })}
-                  >
-                    <Trash2 className="size-4" />
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-        </ScrollArea>
+                    </td>
+                    <td className="px-2 py-1 text-muted-foreground">
+                      <Badge variant={item.status && item.status !== 'ok' ? 'destructive' : 'outline'}>{kindLabel}</Badge>
+                    </td>
+                    <td className="max-w-40 truncate px-2 py-1 text-muted-foreground">{libraryMeta(item)}</td>
+                    <td className="px-2 py-1 text-right">
+                      <button
+                        type="button"
+                        aria-label={`Remove ${item.name}`}
+                        title={
+                          item.scenes && item.scenes.length > 0
+                            ? `Used by ${item.scenes.join(', ')}`
+                            : `Hide ${item.name} from the library. The file stays where it is.`
+                        }
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          send({ type: 'remove_library_item', id: item.id })
+                        }}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {nameMenu
+          ? createPortal(
+              <div
+                className="fixed z-50 min-w-40 rounded-lg bg-popover p-1 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10"
+                style={{ left: nameMenu.x, top: nameMenu.y }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  className="flex w-full rounded-md px-1.5 py-1 text-left hover:bg-accent"
+                  onClick={() => {
+                    renameOnce.current = false
+                    setRenaming(nameMenu.id)
+                    setNameMenu(null)
+                  }}
+                >
+                  Rename
+                </button>
+              </div>,
+              document.body,
+            )
+          : null}
       </CardContent>
     </Card>
   )
@@ -867,6 +1164,7 @@ export function ShowPanel() {
   const { state, send } = useFosfora()
   const show = state?.show
   const grade = Math.round((show?.grade_strength ?? 0.75) * 100)
+  const [pendingRemove, setPendingRemove] = useState<string | null>(null)
 
   function showAction(action: string, extra?: Record<string, unknown>) {
     send({ type: 'show', action, ...extra })
@@ -880,7 +1178,7 @@ export function ShowPanel() {
             {show?.loaded ? clock(show.elapsed_ms) : 'No show'}
             <SectionInfo
               label="About the show"
-              text="The show clock moves scenes and palettes on its own after Start. Prev and next step the scene or palette by hand. Blackout cuts the output. Palette auto lets the schedule choose colours again."
+              text="The show clock moves scenes and palettes on its own after Start. Each cue is an absolute time in show.json. A scene is a saved preset: the Scenes list is every saved look, and the clock is the schedule of those looks. Prev and next step the scene or palette by hand. Blackout cuts the output. Palette auto lets the schedule choose colours again. Right-click a palette to rename it. Right-click a scene, or use its trash icon, to remove it. Built-in scenes stay."
             />
           </CardTitle>
           <CardDescription>{show?.validation || 'Open a show pack in Fosfora.'}</CardDescription>
@@ -888,23 +1186,51 @@ export function ShowPanel() {
         <CardContent className="space-y-4">
           <div className="flex justify-between text-sm">
             <span>{show?.scene || 'Scene'}</span>
-            <span className="text-muted-foreground">{show?.next_scene ? `next ${show.next_scene}` : ''}</span>
+            <span className="text-muted-foreground">
+              {show?.next_scene
+                ? `next ${show.next_scene}${show.next_scene_secs != null ? ` at ${clock(show.next_scene_secs * 1000)}` : ''}`
+                : ''}
+            </span>
           </div>
           <div className="flex justify-between text-sm">
             <span>{show?.palette || 'Palette'}</span>
             <Badge variant="secondary">{show?.palette_manual ? 'Manual' : 'Auto'}</Badge>
           </div>
           <div className="flex flex-wrap gap-2">
-            {(show?.palettes ?? []).map((id) => (
-              <Button
-                key={id}
-                size="sm"
-                variant={show?.palette === id ? 'default' : 'outline'}
-                onClick={() => showAction('select_palette', { id })}
-              >
-                {id}
-              </Button>
-            ))}
+            {(show?.palettes ?? []).map((id) => {
+              const strip = show?.palette_colors?.find((entry) => entry.id === id)
+              return (
+                <ContextMenu key={id}>
+                  <ContextMenuTrigger asChild>
+                    <div className="flex w-40 flex-col gap-1">
+                      <div className="flex h-1.5 overflow-hidden rounded-full bg-muted">
+                        {(strip?.colors ?? []).map((rgba, swatch) => (
+                          <span key={swatch} className="h-full flex-1" style={{ background: swatchCss(rgba) }} />
+                        ))}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant={show?.palette === id ? 'default' : 'outline'}
+                        onClick={() => showAction('select_palette', { id })}
+                      >
+                        <span className="truncate">{id}</span>
+                      </Button>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem
+                      onSelect={() => {
+                        const next = window.prompt('Rename palette', id)
+                        if (!next || next.trim() === id) return
+                        send({ type: 'rename_palette', from: id, to: next.trim() })
+                      }}
+                    >
+                      Rename
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
+              )
+            })}
           </div>
           <Field label="Palette strength" value={`${grade}%`}>
             <HeldSlider
@@ -919,11 +1245,35 @@ export function ShowPanel() {
             <Button variant="outline" onClick={() => showAction('next_visual')}>Scene next</Button>
             <Button variant="outline" onClick={() => showAction('prev_palette')}>Palette prev</Button>
             <Button variant="outline" onClick={() => showAction('next_palette')}>Palette next</Button>
-            <Button variant="outline" onClick={() => showAction('start')}>Start</Button>
-            <Button variant="outline" onClick={() => showAction('pause')}>Pause</Button>
-            <Button variant="outline" onClick={() => showAction('resume')}>Resume</Button>
-            <Button variant="outline" onClick={() => showAction('stop_auto')}>Stop auto</Button>
-            <Button variant="outline" onClick={() => showAction('reset')}>Reset</Button>
+            <Button
+              className={show?.transport !== 'running' && show?.transport !== 'paused' ? '!bg-green-700 !text-white hover:!bg-green-600' : ''}
+              variant={show?.transport !== 'running' && show?.transport !== 'paused' ? 'default' : 'outline'}
+              onClick={() => showAction('start')}
+            >
+              <Play />
+              Start
+            </Button>
+            <Button
+              className={show?.transport === 'running' ? '!bg-amber-600 !text-white hover:!bg-amber-500' : ''}
+              variant={show?.transport === 'running' ? 'default' : 'outline'}
+              onClick={() => showAction('pause')}
+            >
+              <Pause />
+              Pause
+            </Button>
+            <Button
+              className={show?.transport === 'paused' ? '!bg-green-700 !text-white hover:!bg-green-600' : ''}
+              variant={show?.transport === 'paused' ? 'default' : 'outline'}
+              onClick={() => showAction('resume')}
+            >
+              <Play />
+              Resume
+            </Button>
+            <Button className="!bg-red-700 !text-white hover:!bg-red-600" onClick={() => showAction('stop_auto')}>
+              <Square />
+              Stop
+            </Button>
+            <Button variant="outline" onClick={() => showAction('reset')}>Back to start</Button>
             <Button variant={show?.blackout ? 'destructive' : 'outline'} onClick={() => showAction('toggle_blackout')}>
               {show?.blackout ? 'Blackout on' : 'Blackout off'}
             </Button>
@@ -935,38 +1285,94 @@ export function ShowPanel() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-1.5">
-            Presets
+            Scenes
             <SectionInfo
-              label="About presets"
-              text="The highlighted name is the scene Fosfora has applied. A scene stays unmarked while it is still loading. In Perform, switching scenes waits until you save, discard, or cancel."
+              label="About scenes"
+              text="A scene and a preset are the same saved look. The highlighted name is the one Fosfora has applied. Right-click a name to rename or remove it, or use the trash icon. Built-in scenes stay. Removing a scene takes it off the show clock if it was scheduled. The picture stays as it is. In Perform, switching scenes waits until you save, discard, or cancel."
             />
           </CardTitle>
-          <CardDescription>Loading a scene in Perform waits if the current scene is unsaved.</CardDescription>
+          <CardDescription>Right-click a scene to rename or remove it. Built-in scenes stay.</CardDescription>
         </CardHeader>
         <CardContent>
-          <ScrollArea className="h-[28rem]">
+          <div className="max-h-[28rem] overflow-auto">
             <div className="flex flex-col gap-1 pr-3">
               {(state?.presets ?? []).map((preset) => {
                 const applied = state?.applied_preset === preset.name
                 const loading = state?.loading_preset === preset.name
                 const waiting =
                   state?.requested_preset === preset.name && !applied && !loading
+                const confirming = pendingRemove === preset.name
                 return (
-                  <Button
-                    key={preset.index}
-                    variant={applied ? 'secondary' : 'ghost'}
-                    className="justify-start"
-                    onClick={() => send({ type: 'load_preset', index: preset.index })}
-                  >
-                    {preset.name}
-                    {loading ? ' · loading' : ''}
-                    {waiting ? ' · queued' : ''}
-                    {preset.builtin ? <Badge variant="outline">Built-in</Badge> : null}
-                  </Button>
+                  <div key={preset.index} className="flex flex-col gap-1">
+                    <ContextMenu modal={false}>
+                      <ContextMenuTrigger asChild>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant={applied ? 'secondary' : 'ghost'}
+                            className="min-w-0 flex-1 justify-start"
+                            onClick={() => send({ type: 'load_preset', index: preset.index })}
+                          >
+                            <span className="truncate">
+                              {preset.name}
+                              {loading ? ' · loading' : ''}
+                              {waiting ? ' · queued' : ''}
+                            </span>
+                            {preset.builtin ? <Badge variant="outline">Built-in</Badge> : null}
+                          </Button>
+                          {preset.builtin ? null : confirming ? (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={() => {
+                                  send({ type: 'delete_preset', name: preset.name })
+                                  setPendingRemove(null)
+                                }}
+                              >
+                                Remove
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => setPendingRemove(null)}>
+                                Cancel
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Remove ${preset.name}`}
+                              title="Remove this scene. The picture stays."
+                              onClick={() => setPendingRemove(preset.name)}
+                            >
+                              <Trash2 />
+                            </Button>
+                          )}
+                        </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent collisionPadding={8}>
+                        <ContextMenuItem
+                          disabled={preset.builtin}
+                          onSelect={() => {
+                            const next = window.prompt('Rename scene', preset.name)
+                            if (!next || next.trim() === preset.name) return
+                            send({ type: 'rename_preset', from: preset.name, to: next.trim() })
+                          }}
+                        >
+                          Rename
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          variant="destructive"
+                          disabled={preset.builtin}
+                          onSelect={() => setPendingRemove(preset.name)}
+                        >
+                          {preset.builtin ? 'Built-in scenes stay' : 'Remove'}
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  </div>
                 )
               })}
             </div>
-          </ScrollArea>
+          </div>
         </CardContent>
       </Card>
     </div>

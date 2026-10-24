@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use futures_core::Stream;
 
-use crate::media::library::{self, UploadReport, MAX_UPLOAD_BYTES};
+use crate::media::library::{self, MAX_UPLOAD_BYTES, UploadReport};
 
 pub fn peer_is_loopback(peer: SocketAddr) -> bool {
     peer.ip().is_loopback()

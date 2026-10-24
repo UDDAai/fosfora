@@ -179,6 +179,21 @@ impl WebSystem {
                 WsInMessage::LoadEffect { index } => {
                     result.effect_loads.push(index);
                 }
+                WsInMessage::ClearLayerEffect { index } => {
+                    result.clear_effects.push(index);
+                }
+                WsInMessage::SavePreset { name } => {
+                    result.save_preset_name = Some(name);
+                }
+                WsInMessage::RenamePreset { from, to } => {
+                    result.rename_preset = Some((from, to));
+                }
+                WsInMessage::DeletePreset { name } => {
+                    result.delete_preset = Some(name);
+                }
+                WsInMessage::RenamePalette { from, to } => {
+                    result.rename_palette = Some((from, to));
+                }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
@@ -217,6 +232,9 @@ impl WebSystem {
                 }
                 WsInMessage::RemoveLibraryItem { id } => {
                     result.remove_library.push(id);
+                }
+                WsInMessage::RenameLibraryItem { id, name } => {
+                    result.rename_library.push((id, name));
                 }
                 WsInMessage::AddLibraryMedia { ids } => {
                     result.add_library.push(ids);
@@ -335,6 +353,21 @@ impl WebSystem {
                 WsInMessage::LoadEffect { index } => {
                     result.effect_loads.push(index);
                 }
+                WsInMessage::ClearLayerEffect { index } => {
+                    result.clear_effects.push(index);
+                }
+                WsInMessage::SavePreset { name } => {
+                    result.save_preset_name = Some(name);
+                }
+                WsInMessage::RenamePreset { from, to } => {
+                    result.rename_preset = Some((from, to));
+                }
+                WsInMessage::DeletePreset { name } => {
+                    result.delete_preset = Some(name);
+                }
+                WsInMessage::RenamePalette { from, to } => {
+                    result.rename_palette = Some((from, to));
+                }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
@@ -373,6 +406,9 @@ impl WebSystem {
                 }
                 WsInMessage::RemoveLibraryItem { id } => {
                     result.remove_library.push(id);
+                }
+                WsInMessage::RenameLibraryItem { id, name } => {
+                    result.rename_library.push((id, name));
                 }
                 WsInMessage::AddLibraryMedia { ids } => {
                     result.add_library.push(ids);

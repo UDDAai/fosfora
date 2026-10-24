@@ -140,7 +140,11 @@ pub fn hsl_to_rgba(hsla: [f32; 4]) -> [f32; 4] {
     if s < 1e-6 {
         return [l, l, l, a];
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let hue2rgb = |p: f32, q: f32, mut t: f32| {
         if t < 0.0 {

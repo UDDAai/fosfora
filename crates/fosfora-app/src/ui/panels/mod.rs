@@ -278,12 +278,8 @@ pub fn draw_panels(
                 // `App` (which owns the show controller + layers) inline.
                 // main.rs drains it after `draw_panels` returns.
                 if show.is_some() {
-                    let action = crate::app::App::draw_show_ui(
-                        show,
-                        palette_panel_state,
-                        blackout,
-                        ui,
-                    );
+                    let action =
+                        crate::app::App::draw_show_ui(show, palette_panel_state, blackout, ui);
                     if !action.is_none() {
                         ui.ctx().data_mut(|d| {
                             d.insert_temp(egui::Id::new("show_ui_action"), action);

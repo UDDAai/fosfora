@@ -1193,12 +1193,43 @@ impl App {
             let mut removes = web_result.layer_removes;
             removes.sort_unstable_by(|left, right| right.cmp(left));
             removes.dedup();
+            for index in web_result.clear_effects {
+                if self.clear_layer_effect(index) {
+                    web_stack_changed = true;
+                }
+            }
+            if let Some(name) = web_result.save_preset_name.clone() {
+                self.save_preset(&name);
+                view_changed = true;
+            }
+            if let Some((from, to)) = web_result.rename_preset.clone() {
+                if let Err(err) = self.rename_preset(&from, &to) {
+                    self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
+            if let Some(name) = web_result.delete_preset.clone() {
+                if let Err(err) = self.delete_preset(&name) {
+                    self.load_error = Some(err.clone());
+                    self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
+            if let Some((from, to)) = web_result.rename_palette.clone() {
+                if let Err(err) = self.rename_palette(&from, &to) {
+                    self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
             for index in removes {
-                if self.layer_stack.layers.get(index).is_some_and(|layer| layer.pinned) {
-                    self.status_error = Some((
-                        "That layer is pinned and was not removed".into(),
-                        now,
-                    ));
+                if self
+                    .layer_stack
+                    .layers
+                    .get(index)
+                    .is_some_and(|layer| layer.pinned)
+                {
+                    self.status_error =
+                        Some(("That layer is pinned and was not removed".into(), now));
                     view_changed = true;
                     continue;
                 }
@@ -1270,13 +1301,21 @@ impl App {
                 }
             }
             for paths in web_result.link_library_files.clone() {
-                let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+                let paths: Vec<std::path::PathBuf> =
+                    paths.into_iter().map(std::path::PathBuf::from).collect();
                 if let Some(library) = &mut self.media_library {
                     match library.link_paths(&paths) {
-                        Ok(message) => self.status_error = Some((message, now)),
-                        Err(err) => self.status_error = Some((err, now)),
+                        Ok(message) => {
+                            self.load_error = None;
+                            self.status_error = Some((message, now));
+                        }
+                        Err(err) => {
+                            self.load_error = Some(err.clone());
+                            self.status_error = Some((err, now));
+                        }
                     }
                 }
+                view_changed = true;
             }
             for id in &web_result.remove_library {
                 if let Some(library) = &mut self.media_library {
@@ -1285,6 +1324,10 @@ impl App {
                         Err(err) => self.status_error = Some((err, now)),
                     }
                 }
+            }
+            for (id, name) in web_result.rename_library.clone() {
+                self.rename_library_item(&id, &name, now);
+                view_changed = true;
             }
             if let Some(mode) = web_result.workspace_mode.clone() {
                 self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&mode);
@@ -1357,8 +1400,7 @@ impl App {
                 if pack_scene && self.hold_or_save_before_manual_switch() {
                     self.pending_scene_change = Some(PendingSceneChange::Preset(preset_idx));
                     self.status_error = Some((
-                        "Unsaved changes. Save, discard, or cancel before switching scenes."
-                            .into(),
+                        "Unsaved changes. Save, discard, or cancel before switching scenes.".into(),
                         Instant::now(),
                     ));
                     view_changed = true;
@@ -1585,6 +1627,10 @@ impl App {
                 m.advance(dt);
                 m.upload_frame(&self.gpu.queue);
                 m.write_placement(&self.gpu.queue);
+            } else if let Some(parked) = layer.suspended_media.as_mut() {
+                // Keep the hidden clip in time so Remove effect shows the
+                // frame the show has reached, not the frame the effect replaced.
+                parked.media.advance(dt);
             }
         }
 
@@ -1609,6 +1655,11 @@ impl App {
                             if m.is_live() {
                                 m.set_live_frame(frame.data.clone());
                                 m.upload_frame(&self.gpu.queue);
+                            }
+                        } else if let Some(parked) = layer.suspended_media.as_mut() {
+                            if parked.media.is_live() {
+                                parked.media.set_live_frame(frame.data.clone());
+                                parked.media.upload_frame(&self.gpu.queue);
                             }
                         }
                     }
@@ -1758,6 +1809,11 @@ impl App {
                     let LayerContent::Effect(ref mut e) = layer.content else {
                         continue;
                     };
+                    // A compile started before Remove effect must not paint the
+                    // shader back onto the emptied layer.
+                    if e.effect_index.is_none() || e.pending_rebuild {
+                        continue;
+                    }
                     match result {
                         Ok(pipeline) => {
                             match e.pass_executor.swap_pass_pipeline(
@@ -1798,6 +1854,9 @@ impl App {
                     let LayerContent::Effect(ref mut e) = layer.content else {
                         continue;
                     };
+                    if e.effect_index.is_none() || e.pending_rebuild {
+                        continue;
+                    }
                     match result {
                         Ok(pipeline) => {
                             if let Some(ref mut ps) = e.pass_executor.particle_system {
@@ -2229,6 +2288,100 @@ impl App {
         let _ = is_media;
     }
 
+    /// Drop the effect on one layer. The layer stays, with its opacity, blend,
+    /// and place in the stack. A clip the effect replaced comes back. Media
+    /// layers that were never an effect have nothing to remove.
+    pub fn clear_layer_effect(&mut self, layer_idx: usize) -> bool {
+        let Some(layer) = self.layer_stack.layers.get(layer_idx) else {
+            return false;
+        };
+        if layer.locked || layer.effect_index().is_none() {
+            return false;
+        }
+        let removed_effect = layer
+            .effect_index()
+            .and_then(|idx| self.effect_loader.effects.get(idx))
+            .map(|effect| effect.name.clone());
+        let parked = self.layer_stack.layers[layer_idx].suspended_media.take();
+        if let Some(parked) = parked {
+            let media_name = parked.media.file_name.clone();
+            let layer = &mut self.layer_stack.layers[layer_idx];
+            layer.content = LayerContent::Media(parked.media);
+            layer.param_store = ParamStore::new();
+            layer.postprocess = parked.postprocess;
+            log::info!("Layer {layer_idx}: removed effect, restored '{media_name}'");
+        } else if !self.replace_layer_with_default(layer_idx) {
+            return false;
+        }
+        let _ = self.binding_bus.clear_preset_bindings_for_layer(layer_idx);
+        if layer_idx == self.layer_stack.active_layer {
+            self.effect_loader.current_effect = None;
+            self.post_process.enabled = self.layer_stack.layers[layer_idx].postprocess.enabled;
+        }
+        self.close_shader_editor_if_unused(removed_effect.as_deref());
+        true
+    }
+
+    /// Swap one layer for an empty default shader, keeping its stack slot.
+    fn replace_layer_with_default(&mut self, layer_idx: usize) -> bool {
+        let fresh = {
+            let ctx = crate::gpu::layer_builder::LayerBuildCtx {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                pipeline_cache: self.gpu.pipeline_cache.as_ref(),
+                width: self.gpu.surface_config.width,
+                height: self.gpu.surface_config.height,
+                placeholder: &self.placeholder,
+                audio_textures: &self.audio_textures,
+                particle_quality: self.settings.particle_quality,
+                backdrop: Some((
+                    &self.compositor.backdrop.view,
+                    &self.compositor.backdrop.sampler,
+                )),
+            };
+            let Some(layer) = crate::gpu::layer_builder::new_default_layer(&ctx, String::new())
+            else {
+                return false;
+            };
+            layer
+        };
+        let mut old = std::mem::replace(&mut self.layer_stack.layers[layer_idx], fresh);
+        let slot = &mut self.layer_stack.layers[layer_idx];
+        slot.name = std::mem::take(&mut old.name);
+        slot.custom_name = old.custom_name.take();
+        slot.blend_mode = old.blend_mode;
+        slot.opacity = old.opacity;
+        slot.displace_amount = old.displace_amount;
+        slot.enabled = old.enabled;
+        slot.locked = old.locked;
+        slot.pinned = old.pinned;
+        slot.postprocess = old.postprocess.clone();
+        slot.chain = old.chain.take();
+        true
+    }
+
+    /// The shader editor draws on the output. Close it once nothing on the
+    /// stack is still running that effect, so the removed look leaves the screen.
+    fn close_shader_editor_if_unused(&mut self, effect_name: Option<&str>) {
+        let Some(effect_name) = effect_name else {
+            return;
+        };
+        if self.shader_editor.effect_name != effect_name {
+            return;
+        }
+        let still_used = self.layer_stack.layers.iter().any(|layer| {
+            layer
+                .effect_index()
+                .and_then(|idx| self.effect_loader.effects.get(idx))
+                .is_some_and(|effect| effect.name == effect_name)
+        });
+        // A failed load opens this editor on the output. Close it when the
+        // effect is gone, unless the operator has unsaved edits in the buffer.
+        if !still_used && !self.shader_editor.is_dirty() {
+            self.shader_editor.open = false;
+        }
+    }
+
     /// Add a new empty layer with the default shader.
     pub fn add_layer(&mut self) {
         let num = self.layer_stack.layers.len();
@@ -2293,6 +2446,46 @@ impl App {
         self.submit_media(crate::media::jobs::MediaTarget::Add, vec![path]);
     }
 
+    fn rename_library_item(&mut self, id: &str, name: &str, now: Instant) {
+        let renamed = {
+            let Some(library) = &mut self.media_library else {
+                return;
+            };
+            library.rename_item(id, name)
+        };
+        let renamed = match renamed {
+            Ok(renamed) => renamed,
+            Err(err) => {
+                self.load_error = Some(err.clone());
+                self.status_error = Some((err, now));
+                return;
+            }
+        };
+        for layer in &mut self.layer_stack.layers {
+            let Some(media) = layer.as_media_mut() else {
+                continue;
+            };
+            if renamed
+                .previous_paths
+                .iter()
+                .any(|old| old == &media.file_path)
+            {
+                media.file_path = renamed.new_file.clone();
+                media.file_name = renamed.new_name.clone();
+            }
+        }
+        for (_, preset) in &mut self.preset_store.presets {
+            for layer in &mut preset.layers {
+                rewrite_stored_media(&mut layer.media_path, &renamed.replacements);
+                rewrite_stored_media(&mut layer.particle_video_path, &renamed.replacements);
+                rewrite_stored_media(&mut layer.particle_image_path, &renamed.replacements);
+                rewrite_stored_media(&mut layer.obstacle_image_path, &renamed.replacements);
+            }
+        }
+        self.load_error = None;
+        self.status_error = Some((format!("Renamed to {}", renamed.new_name), now));
+    }
+
     /// Add library clips in order. If any clip cannot fit, none are decoded.
     pub fn add_library_media(&mut self, ids: &[String]) {
         match self.library_paths(ids) {
@@ -2325,20 +2518,33 @@ impl App {
         };
         let previous = layer.as_media().map(|media| media.file_path.clone());
         self.submit_media(
-            crate::media::jobs::MediaTarget::Replace { layer: index, previous },
+            crate::media::jobs::MediaTarget::Replace {
+                layer: index,
+                previous,
+            },
             vec![path],
         );
     }
 
-    fn submit_media(&mut self, target: crate::media::jobs::MediaTarget, paths: Vec<std::path::PathBuf>) {
+    fn submit_media(
+        &mut self,
+        target: crate::media::jobs::MediaTarget,
+        paths: Vec<std::path::PathBuf>,
+    ) {
         let max = crate::bindings::catalog::MAX_LAYERS;
         let free_slots = match target {
-            crate::media::jobs::MediaTarget::Add => max.saturating_sub(self.layer_stack.layers.len()),
+            crate::media::jobs::MediaTarget::Add => {
+                max.saturating_sub(self.layer_stack.layers.len())
+            }
             crate::media::jobs::MediaTarget::Replace { .. } => paths.len(),
         };
         let names: Vec<String> = paths
             .iter()
-            .filter_map(|path| path.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
             .collect();
         match self
             .media_jobs
@@ -2372,8 +2578,10 @@ impl App {
                 MediaJobOutcome::Ready(sources) => match result.target {
                     MediaTarget::Add => {
                         for (path, source) in sources {
-                            if self.layer_stack.layers.len() >= crate::bindings::catalog::MAX_LAYERS {
-                                self.status_error = Some(("No free layer slot is left".into(), now));
+                            if self.layer_stack.layers.len() >= crate::bindings::catalog::MAX_LAYERS
+                            {
+                                self.status_error =
+                                    Some(("No free layer slot is left".into(), now));
                                 break;
                             }
                             self.install_media_layer(path, source);
@@ -2423,7 +2631,7 @@ impl App {
             .layer_stack
             .layers
             .iter()
-            .filter_map(|layer| layer.as_media())
+            .flat_map(|layer| layer.resident_media())
             .map(|media| {
                 let (w, h) = media.source.dimensions();
                 u64::from(w) * u64::from(h) * 4
@@ -2437,7 +2645,11 @@ impl App {
 
     /// GPU half of adding a clip: runs on the render thread with frames
     /// that are already decoded.
-    fn install_media_layer(&mut self, path: std::path::PathBuf, source: crate::media::decoder::MediaSource) {
+    fn install_media_layer(
+        &mut self,
+        path: std::path::PathBuf,
+        source: crate::media::decoder::MediaSource,
+    ) {
         let hdr_format = GpuContext::hdr_format();
         let media_layer = MediaLayer::new(
             &self.gpu.device,
@@ -2486,7 +2698,14 @@ impl App {
         let blend_mode = previous.blend_mode;
         let enabled = previous.enabled;
         let placement = previous.as_media().map(|media| {
-            (media.fit, media.width_scale, media.pos_x, media.pos_y, media.transport.speed, media.transport.looping)
+            (
+                media.fit,
+                media.width_scale,
+                media.pos_x,
+                media.pos_y,
+                media.transport.speed,
+                media.transport.looping,
+            )
         });
         let mut layer = Layer::new_media(file_name.clone(), media_layer);
         layer.custom_name = Some(file_name);
@@ -2538,7 +2757,7 @@ impl App {
         self.layer_stack
             .layers
             .iter()
-            .filter_map(|layer| layer.as_media())
+            .flat_map(|layer| layer.resident_media())
             .map(decoded_media_layer_bytes)
             .sum()
     }
@@ -2606,7 +2825,7 @@ impl App {
             .layer_stack
             .layers
             .iter()
-            .any(|l| l.as_media().map_or(false, |m| m.is_live()));
+            .any(|layer| layer.resident_media().any(|media| media.is_live()));
         let obstacle_uses_cam = self.layer_stack.layers.iter().any(|l| {
             l.as_effect()
                 .and_then(|e| e.pass_executor.particle_system.as_ref())
@@ -2673,6 +2892,8 @@ impl App {
                 );
                 let file_name = media_layer.file_name.clone();
                 let layer = &mut self.layer_stack.layers[layer_idx];
+                // A new clip replaces whatever Remove effect would have restored.
+                layer.suspended_media = None;
                 layer.content = LayerContent::Media(Box::new(media_layer));
                 layer.param_store = ParamStore::new();
                 log::info!("Layer {}: loaded media '{}'", layer_idx, file_name);
@@ -2717,7 +2938,10 @@ impl App {
             return false;
         }
         if self.layer_stack.layers[from].pinned {
-            self.status_error = Some(("That layer is pinned and was not moved".into(), Instant::now()));
+            self.status_error = Some((
+                "That layer is pinned and was not moved".into(),
+                Instant::now(),
+            ));
             return false;
         }
         self.layer_stack.move_layer(from, to);
@@ -3105,6 +3329,251 @@ impl App {
         }
     }
 
+    pub fn rename_preset(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let from = scene_name(from)?;
+        let to = scene_name(to)?;
+        if from == to {
+            return Ok(());
+        }
+        if self
+            .preset_store
+            .presets
+            .iter()
+            .take(self.preset_store.builtin_count)
+            .any(|(name, _)| name == &from)
+        {
+            return Err(format!("{from} is a built-in scene"));
+        }
+        if self
+            .preset_store
+            .presets
+            .iter()
+            .any(|(name, _)| name == &to)
+        {
+            return Err(format!("A scene named {to} already exists"));
+        }
+        let pack_root = self.show.as_ref().map(|show| show.pack_root.clone());
+        if let Some(root) = pack_root {
+            let preset_from = root.join("presets").join(format!("{from}.json"));
+            if preset_from.is_file() {
+                let preset_to = root.join("presets").join(format!("{to}.json"));
+                let bindings_from = root.join("palette-bindings").join(format!("{from}.json"));
+                let bindings_to = root.join("palette-bindings").join(format!("{to}.json"));
+                let audio_from = root
+                    .join("audio-bindings")
+                    .join(format!("{from}.bindings.json"));
+                let audio_to = root
+                    .join("audio-bindings")
+                    .join(format!("{to}.bindings.json"));
+                if preset_to.exists()
+                    || (bindings_from.is_file() && bindings_to.exists())
+                    || (audio_from.is_file() && audio_to.exists())
+                {
+                    return Err(format!("A scene named {to} already exists"));
+                }
+                std::fs::rename(&preset_from, &preset_to).map_err(|err| err.to_string())?;
+                rename_if_present(&bindings_from, &bindings_to)?;
+                if let Ok(text) = std::fs::read_to_string(&bindings_to) {
+                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        value["preset"] = serde_json::Value::String(to.clone());
+                        let _ = std::fs::write(
+                            &bindings_to,
+                            serde_json::to_string_pretty(&value).unwrap_or(text),
+                        );
+                    }
+                }
+                rename_if_present(&audio_from, &audio_to)?;
+                if let Some(show) = self.show.as_mut() {
+                    for cue in &mut show.definition.scene_track {
+                        if cue.preset_id == from {
+                            cue.preset_id = to.clone();
+                        }
+                    }
+                    if let Some(set) = show.bindings.remove(&from) {
+                        let mut set = set;
+                        set.preset = to.clone();
+                        show.bindings.insert(to.clone(), set);
+                    }
+                    if let Some(id) = show.preset_ids.iter_mut().find(|id| id.as_str() == from) {
+                        *id = to.clone();
+                    }
+                    if show.scene.active_preset_id.as_deref() == Some(from.as_str()) {
+                        show.scene.active_preset_id = Some(to.clone());
+                    }
+                    write_show_file(&root, &show.definition)?;
+                }
+                if self.applied_scene_id.as_deref() == Some(from.as_str()) {
+                    self.applied_scene_id = Some(to.clone());
+                }
+                if let Some(slot) = self
+                    .preset_store
+                    .presets
+                    .iter_mut()
+                    .find(|(name, _)| name == &from)
+                {
+                    slot.0 = to;
+                }
+                return Ok(());
+            }
+        }
+        let user_from =
+            crate::preset::store::PresetStore::presets_dir().join(format!("{from}.json"));
+        if user_from.is_file() {
+            let user_to =
+                crate::preset::store::PresetStore::presets_dir().join(format!("{to}.json"));
+            if user_to.exists() {
+                return Err(format!("A scene named {to} already exists"));
+            }
+            std::fs::rename(&user_from, &user_to).map_err(|err| err.to_string())?;
+            if let Some(slot) = self
+                .preset_store
+                .presets
+                .iter_mut()
+                .find(|(name, _)| name == &from)
+            {
+                slot.0 = to;
+            }
+            return Ok(());
+        }
+        Err(format!("{from} is not a scene file"))
+    }
+
+    pub fn delete_preset(&mut self, name: &str) -> Result<(), String> {
+        let name = scene_name(name)?;
+        if self
+            .preset_store
+            .presets
+            .iter()
+            .take(self.preset_store.builtin_count)
+            .any(|(existing, _)| existing == &name)
+        {
+            return Err(format!("{name} is a built-in scene"));
+        }
+
+        let mut removed_file = false;
+        if let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) {
+            let preset_path = root.join("presets").join(format!("{name}.json"));
+            if preset_path.is_file() {
+                std::fs::remove_file(&preset_path).map_err(|err| err.to_string())?;
+                let _ = std::fs::remove_file(
+                    root.join("palette-bindings").join(format!("{name}.json")),
+                );
+                let _ = std::fs::remove_file(
+                    root.join("audio-bindings")
+                        .join(format!("{name}.bindings.json")),
+                );
+                removed_file = true;
+            }
+        }
+        let user_path =
+            crate::preset::store::PresetStore::presets_dir().join(format!("{name}.json"));
+        if user_path.is_file() {
+            std::fs::remove_file(&user_path).map_err(|err| err.to_string())?;
+            removed_file = true;
+        }
+        let in_list = self
+            .preset_store
+            .presets
+            .iter()
+            .any(|(existing, _)| existing == &name);
+        if !removed_file && !in_list {
+            return Err(format!("{name} is not a scene file"));
+        }
+        if let Some(index) = self
+            .preset_store
+            .presets
+            .iter()
+            .position(|(existing, _)| existing == &name)
+        {
+            self.preset_store.presets.remove(index);
+            match self.preset_store.current_preset {
+                Some(current) if current == index => self.preset_store.current_preset = None,
+                Some(current) if current > index => {
+                    self.preset_store.current_preset = Some(current - 1);
+                }
+                _ => {}
+            }
+        }
+        if let Some(show) = self.show.as_mut() {
+            let on_clock = show
+                .definition
+                .scene_track
+                .iter()
+                .any(|cue| cue.preset_id == name);
+            if on_clock {
+                show.definition
+                    .scene_track
+                    .retain(|cue| cue.preset_id != name);
+                let elapsed = show.clock.elapsed().as_secs().min(u64::from(u32::MAX)) as u32;
+                show.scene.last_processed_scheduled_index =
+                    crate::show::scheduler::SceneScheduler::scheduled_index(
+                        &show.definition.scene_track,
+                        elapsed,
+                    );
+                write_show_file(&show.pack_root, &show.definition)?;
+            }
+            show.bindings.remove(&name);
+            show.preset_ids.retain(|id| id != &name);
+            if show.scene.active_preset_id.as_deref() == Some(name.as_str()) {
+                show.scene.active_preset_id = None;
+            }
+        }
+        if self.applied_scene_id.as_deref() == Some(name.as_str()) {
+            self.applied_scene_id = None;
+            self.scene_dirty = false;
+            self.scene_dirty_at = None;
+        }
+        if self.requested_preset.as_deref() == Some(name.as_str()) {
+            self.requested_preset = self.applied_scene_id.clone();
+        }
+        Ok(())
+    }
+
+    pub fn rename_palette(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let from = scene_name(from)?;
+        let to = scene_name(to)?;
+        if from == to {
+            return Ok(());
+        }
+        let Some(show) = self.show.as_mut() else {
+            return Err("No show pack is open".into());
+        };
+        if show.palettes.contains_key(&to) {
+            return Err(format!("A palette named {to} already exists"));
+        }
+        let Some(mut palette) = show.palettes.remove(&from) else {
+            return Err(format!("{from} is not a palette"));
+        };
+        let root = show.pack_root.clone();
+        let from_path = root.join("palettes").join(format!("{from}.json"));
+        let to_path = root.join("palettes").join(format!("{to}.json"));
+        if to_path.exists() {
+            show.palettes.insert(from.clone(), palette);
+            return Err(format!("A palette named {to} already exists"));
+        }
+        palette.id = to.clone();
+        palette.name = to.clone();
+        if from_path.is_file() {
+            if let Err(err) = std::fs::rename(&from_path, &to_path) {
+                show.palettes.insert(from, palette);
+                return Err(err.to_string());
+            }
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&palette) {
+            let _ = std::fs::write(&to_path, json);
+        }
+        for cue in &mut show.definition.palette_track {
+            if cue.palette_id == from {
+                cue.palette_id = to.clone();
+            }
+        }
+        if show.palette.active_palette_id.as_deref() == Some(from.as_str()) {
+            show.palette.active_palette_id = Some(to.clone());
+        }
+        show.palettes.insert(to, palette);
+        write_show_file(&root, &show.definition)
+    }
+
     /// True when a manual scene change must not run yet.
     ///
     /// Prepare saves first and blocks the switch when that save fails.
@@ -3330,7 +3799,11 @@ impl App {
             self.status_error = Some((format!("Save failed: {message}"), Instant::now()));
             return Err(message);
         }
-        if let Some(set) = self.show.as_ref().and_then(|show| show.bindings.get(id).cloned()) {
+        if let Some(set) = self
+            .show
+            .as_ref()
+            .and_then(|show| show.bindings.get(id).cloned())
+        {
             if let Err(err) = crate::palette::bindings::save_set(&pack_root, &set) {
                 self.status_error = Some((
                     format!("Scene saved, but the palette binding was not: {err}"),
@@ -4338,8 +4811,8 @@ impl App {
         blackout: bool,
         ui: &mut egui::Ui,
     ) -> ShowUiAction {
-        use crate::ui::panels::palette_panel::{draw_palette_panel, PalettePanelAction};
-        use crate::ui::panels::show_panel::{draw_show_panel, ShowPanelAction};
+        use crate::ui::panels::palette_panel::{PalettePanelAction, draw_palette_panel};
+        use crate::ui::panels::show_panel::{ShowPanelAction, draw_show_panel};
         let Some(show) = show else {
             return ShowUiAction::none();
         };
@@ -4472,9 +4945,7 @@ impl App {
                                 .entry(path.clone())
                                 .or_insert_with(|| crate::media::library::plan_clip(&path));
                             if let Some(problem) = plan.problem.as_ref() {
-                                media_problems.push(format!(
-                                    "{preset_id} / {stored}: {problem}"
-                                ));
+                                media_problems.push(format!("{preset_id} / {stored}: {problem}"));
                             }
                             plan.ram_bytes
                         } else {
@@ -5803,6 +6274,37 @@ fn changes_touch_effect(
             .particles
             .as_ref()
             .is_some_and(|pd| touches(&pd.compute_shader))
+}
+
+fn rewrite_stored_media(field: &mut Option<String>, replacements: &[(String, String)]) {
+    let Some(path) = field.as_mut() else {
+        return;
+    };
+    if let Some((_, next)) = replacements.iter().find(|(from, _)| from == path) {
+        *path = next.clone();
+    }
+}
+
+fn scene_name(id: &str) -> Result<String, String> {
+    crate::show::scene_file::scene_file_stem(id).map_err(|err| err.to_string())
+}
+
+fn rename_if_present(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    if !from.is_file() {
+        return Ok(());
+    }
+    if to.exists() {
+        return Err(format!("{} already exists", to.display()));
+    }
+    std::fs::rename(from, to).map_err(|err| err.to_string())
+}
+
+fn write_show_file(
+    root: &std::path::Path,
+    definition: &crate::show::definition::ShowDefinition,
+) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(definition).map_err(|err| err.to_string())?;
+    std::fs::write(root.join("show.json"), json).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

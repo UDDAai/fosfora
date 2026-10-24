@@ -1,8 +1,8 @@
 pub mod clock;
-pub mod scene_file;
 pub mod controller;
 pub mod definition;
 pub mod pack;
+pub mod scene_file;
 pub mod scheduler;
 pub mod validation;
 
@@ -34,24 +34,19 @@ pub fn timeline_event_for_cue(
 ) -> TimelineEvent {
     match kind {
         TransitionKind::Cut => TimelineEvent::LoadCue { cue_index: to_cue },
-        TransitionKind::Dissolve | TransitionKind::ParamMorph => {
-            TimelineEvent::BeginTransition {
-                from_cue: to_cue.saturating_sub(1),
-                to_cue,
-                transition_type: TransitionType::Dissolve,
-                duration: duration_ms as f32 / 1000.0,
-            }
-        }
+        TransitionKind::Dissolve | TransitionKind::ParamMorph => TimelineEvent::BeginTransition {
+            from_cue: to_cue.saturating_sub(1),
+            to_cue,
+            transition_type: TransitionType::Dissolve,
+            duration: duration_ms as f32 / 1000.0,
+        },
     }
 }
 
 /// Build a one-cue scene timeline entry per show-pack preset so the native
 /// engine can execute show transitions (incl. the dissolve snapshot path)
 /// without duplicating renderer logic in the show layer.
-pub fn build_timeline_cues(
-    preset_ids: &[String],
-    default_transition_secs: f32,
-) -> Vec<SceneCue> {
+pub fn build_timeline_cues(preset_ids: &[String], default_transition_secs: f32) -> Vec<SceneCue> {
     preset_ids
         .iter()
         .map(|id| SceneCue {
@@ -72,14 +67,7 @@ mod tests {
 
     #[test]
     fn parse_show_path() {
-        let args = vec![
-            "fosfora".into(),
-            "--show".into(),
-            "/tmp/show.json".into(),
-        ];
-        assert_eq!(
-            parse_show_arg(&args),
-            Some(PathBuf::from("/tmp/show.json"))
-        );
+        let args = vec!["fosfora".into(), "--show".into(), "/tmp/show.json".into()];
+        assert_eq!(parse_show_arg(&args), Some(PathBuf::from("/tmp/show.json")));
     }
 }

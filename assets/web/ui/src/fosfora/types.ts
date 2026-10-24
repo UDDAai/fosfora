@@ -61,6 +61,8 @@ export type ShowSnapshot = {
   next_scene_secs?: number | null
   palette_manual: boolean
   palettes: string[]
+  palette_colors?: { id: string; colors: number[][] }[]
+  transport?: 'idle' | 'running' | 'paused' | string
   blackout: boolean
   validation: string
   grade_enabled: boolean

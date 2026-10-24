@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::types::Palette;
 use crate::params::ParamValue;
-use crate::show::definition::{scheduled_index, PaletteCue};
+use crate::show::definition::{PaletteCue, scheduled_index};
 
 #[derive(Debug, Clone, Default)]
 pub struct PaletteScheduler {
@@ -26,8 +26,7 @@ impl PaletteScheduler {
 
     pub fn sync_index(&mut self, cues: &[PaletteCue], elapsed: Duration) {
         let secs = elapsed.as_secs().min(u64::from(u32::MAX)) as u32;
-        self.last_processed_scheduled_index =
-            scheduled_index(cues.iter().map(|c| c.at_secs), secs);
+        self.last_processed_scheduled_index = scheduled_index(cues.iter().map(|c| c.at_secs), secs);
         self.manual = false;
         if let Some(i) = self.last_processed_scheduled_index {
             self.active_palette_id = cues.get(i).map(|c| c.palette_id.clone());
@@ -255,9 +254,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("a".into(), pal("a", 0.0));
         map.insert("b".into(), pal("b", 1.0));
-        let colors = sched
-            .tick(&cues, &map, Duration::from_secs(3500))
-            .unwrap();
+        let colors = sched.tick(&cues, &map, Duration::from_secs(3500)).unwrap();
         assert_eq!(sched.last_processed_scheduled_index, Some(1));
         assert!(colors.contains_key("color-1"));
     }

@@ -5,11 +5,9 @@ use std::time::{Duration, Instant};
 use super::clock::{ClockTransport, ShowClock};
 use super::definition::ShowDefinition;
 use super::scheduler::{SceneScheduler, ScheduledSceneAction};
-use super::validation::{
-    hibernation_acceptance, validate_show, MediaEstimate, ValidationReport,
-};
+use super::validation::{MediaEstimate, ValidationReport, hibernation_acceptance, validate_show};
 use crate::palette::bindings::PaletteBindingSet;
-use crate::palette::controller::{palette_colors_at, PaletteScheduler};
+use crate::palette::controller::{PaletteScheduler, palette_colors_at};
 use crate::palette::types::Palette;
 use crate::params::ParamValue;
 
@@ -19,14 +17,18 @@ pub enum ShowCommand {
     Pause,
     Resume,
     Reset,
-    Seek { secs: u32 },
+    Seek {
+        secs: u32,
+    },
     StopAuto,
     NextVisual,
     PrevVisual,
     NextPalette,
     PrevPalette,
     /// Pick a palette by id. Holds until the next scheduled cue or PaletteAuto.
-    SelectPalette { id: String },
+    SelectPalette {
+        id: String,
+    },
     /// Drop the manual hold and restore the colour scheduled at the clock.
     PaletteAuto,
     ToggleBlackout,
@@ -256,11 +258,10 @@ impl ShowController {
         if let Some(scene) = self.scene.tick(&self.definition.scene_track, secs) {
             out.push(ShowVisualEvent::Scene(scene));
         }
-        if let Some(colors) = self.palette.tick(
-            &self.definition.palette_track,
-            &self.palettes,
-            elapsed,
-        ) {
+        if let Some(colors) =
+            self.palette
+                .tick(&self.definition.palette_track, &self.palettes, elapsed)
+        {
             out.push(ShowVisualEvent::Palette(colors));
         }
         out
@@ -278,7 +279,8 @@ impl ShowController {
     }
 
     fn palette_at(&mut self, elapsed: Duration) -> Option<HashMap<String, ParamValue>> {
-        self.palette.sync_index(&self.definition.palette_track, elapsed);
+        self.palette
+            .sync_index(&self.definition.palette_track, elapsed);
         palette_colors_at(&self.definition.palette_track, &self.palettes, elapsed)
     }
 
@@ -307,7 +309,12 @@ impl ShowController {
     }
 
     fn manual_palette(&mut self, delta: i32) -> Vec<ShowVisualEvent> {
-        let ids: Vec<String> = self.definition.palette_track.iter().map(|c| c.palette_id.clone()).collect();
+        let ids: Vec<String> = self
+            .definition
+            .palette_track
+            .iter()
+            .map(|c| c.palette_id.clone())
+            .collect();
         if ids.is_empty() {
             return Vec::new();
         }
@@ -352,6 +359,13 @@ impl ShowController {
                 ids.sort();
                 ids
             },
+            palette_colors: palette_strips(&self.palettes),
+            transport: match self.clock.transport() {
+                ClockTransport::Running => "running",
+                ClockTransport::Paused => "paused",
+                ClockTransport::Idle => "idle",
+            }
+            .to_string(),
             blackout,
             validation: self.last_report.summary(),
             grade_enabled: false,
@@ -359,6 +373,28 @@ impl ShowController {
             notice: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PaletteStrip {
+    pub id: String,
+    pub colors: Vec<[f32; 4]>,
+}
+
+fn palette_strips(palettes: &HashMap<String, Palette>) -> Vec<PaletteStrip> {
+    let mut ids: Vec<String> = palettes.keys().cloned().collect();
+    ids.sort();
+    ids.into_iter()
+        .filter_map(|id| {
+            let palette = palettes.get(&id)?;
+            let mut swatches = palette.swatches.clone();
+            swatches.sort_by(|left, right| left.slot.cmp(&right.slot));
+            Some(PaletteStrip {
+                id,
+                colors: swatches.into_iter().map(|swatch| swatch.rgba).collect(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -375,6 +411,10 @@ pub struct ShowSnapshot {
     pub next_palette_secs: Option<u32>,
     pub palette_manual: bool,
     pub palettes: Vec<String>,
+    /// One strip per palette, slots in name order, rgba 0–1.
+    pub palette_colors: Vec<PaletteStrip>,
+    /// `idle`, `running`, or `paused`.
+    pub transport: String,
     pub blackout: bool,
     pub validation: String,
     pub grade_enabled: bool,
@@ -400,6 +440,8 @@ impl ShowSnapshot {
             next_palette_secs: None,
             palette_manual: false,
             palettes: Vec::new(),
+            palette_colors: Vec::new(),
+            transport: "idle".into(),
             blackout,
             validation: "NO SHOW".into(),
             grade_enabled: false,
@@ -511,13 +553,19 @@ mod tests {
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("earth"));
         // Scene edge fires; palette untouched.
         let scene_events = c.tick(t0 + Duration::from_secs(1200));
-        assert!(scene_events
-            .iter()
-            .any(|e| matches!(e, ShowVisualEvent::Scene(s) if s.preset_id == "B")));
+        assert!(
+            scene_events
+                .iter()
+                .any(|e| matches!(e, ShowVisualEvent::Scene(s) if s.preset_id == "B"))
+        );
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("earth"));
         // Palette edge fires; scene untouched.
         let pal_events = c.tick(t0 + Duration::from_secs(3500));
-        assert!(pal_events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
+        assert!(
+            pal_events
+                .iter()
+                .any(|e| matches!(e, ShowVisualEvent::Palette(_)))
+        );
         assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
     }
@@ -529,7 +577,10 @@ mod tests {
         let mut c = controller();
         let t0 = Instant::now();
         c.handle(t0, ShowCommand::Start);
-        let events = c.handle(t0 + Duration::from_secs(10), ShowCommand::Seek { secs: 3522 });
+        let events = c.handle(
+            t0 + Duration::from_secs(10),
+            ShowCommand::Seek { secs: 3522 },
+        );
         let scene = events.iter().find_map(|e| match e {
             ShowVisualEvent::Scene(s) => Some(s),
             _ => None,
@@ -580,14 +631,25 @@ mod tests {
         c.handle(t0, ShowCommand::Start);
         c.handle(t0 + Duration::from_secs(60), ShowCommand::NextVisual);
         assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
-        assert_eq!(c.clock.elapsed_at(t0 + Duration::from_secs(60)), Duration::from_secs(60));
+        assert_eq!(
+            c.clock.elapsed_at(t0 + Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
         assert_eq!(c.scene.last_processed_scheduled_index, Some(0));
         assert_eq!(c.palette.last_processed_scheduled_index, Some(0));
         // The 1200s scene edge is a no-op (already showing B) …
-        assert!(c.tick(t0 + Duration::from_secs(1200)).iter().all(|e| matches!(e, ShowVisualEvent::Palette(_))));
+        assert!(
+            c.tick(t0 + Duration::from_secs(1200))
+                .iter()
+                .all(|e| matches!(e, ShowVisualEvent::Palette(_)))
+        );
         // … and the palette edge still fires on schedule.
         let pal_events = c.tick(t0 + Duration::from_secs(3500));
-        assert!(pal_events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
+        assert!(
+            pal_events
+                .iter()
+                .any(|e| matches!(e, ShowVisualEvent::Palette(_)))
+        );
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
     }
 
@@ -604,7 +666,10 @@ mod tests {
         assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
         assert!(c.handle(t0, ShowCommand::NextVisual).is_empty());
         assert_eq!(c.scene.active_preset_id.as_deref(), Some("B"));
-        assert_ne!(c.scene.active_preset_id.as_deref(), Some("builtin-not-a-scene"));
+        assert_ne!(
+            c.scene.active_preset_id.as_deref(),
+            Some("builtin-not-a-scene")
+        );
         c.handle(t0, ShowCommand::PrevVisual);
         assert_eq!(c.scene.active_preset_id.as_deref(), Some("A"));
         assert_eq!(c.clock.elapsed_at(t0), clock);
@@ -621,7 +686,11 @@ mod tests {
         // Automation resumes: the 3500s edge still fires on schedule.
         let events = c.tick(t0 + Duration::from_secs(3500));
         assert_eq!(c.palette.last_processed_scheduled_index, Some(1));
-        assert!(events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ShowVisualEvent::Palette(_)))
+        );
     }
 
     #[test]
@@ -639,14 +708,19 @@ mod tests {
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
         let held = c.tick(t0 + Duration::from_secs(90));
         assert!(
-            held.iter().all(|e| !matches!(e, ShowVisualEvent::Palette(_))),
+            held.iter()
+                .all(|e| !matches!(e, ShowVisualEvent::Palette(_))),
             "a manual palette must not be replaced on the next ticks"
         );
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("deep-blue"));
         let events = c.handle(t0 + Duration::from_secs(91), ShowCommand::PaletteAuto);
         assert!(!c.palette.manual);
         assert_eq!(c.palette.active_palette_id.as_deref(), Some("earth"));
-        assert!(events.iter().any(|e| matches!(e, ShowVisualEvent::Palette(_))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ShowVisualEvent::Palette(_)))
+        );
     }
 
     #[test]
