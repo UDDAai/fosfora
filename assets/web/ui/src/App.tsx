@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Clapperboard, Image, Layers, Library, PanelLeft, SlidersHorizontal } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Toaster } from '@/components/ui/sonner'
 import { Separator } from '@/components/ui/separator'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { FosforaProvider, useFosfora } from '@/fosfora/client'
@@ -42,6 +44,20 @@ function Shell() {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('fosfora-nav') === 'icons')
   const [navWidth, setNavWidth] = useState(readNavWidth)
   const mode = state?.workspace_mode === 'perform' ? 'perform' : 'prepare'
+
+  // Engine errors pop up for 5 s. A message already on screen does not pop
+  // again on the next state tick; it can once the engine has dropped it.
+  const shownErrors = useRef(new Set<string>())
+  const errorMessages = state?.error_messages
+  useEffect(() => {
+    const now = new Set(errorMessages ?? [])
+    for (const message of now) {
+      if (!shownErrors.current.has(message)) {
+        toast.error(message, { id: message, duration: 5000, closeButton: true })
+      }
+    }
+    shownErrors.current = now
+  }, [errorMessages])
 
   useEffect(() => {
     const path = window.location.pathname.replace(/\/+$/, '') || '/'
@@ -205,9 +221,6 @@ function Shell() {
             <Button size="sm" variant="ghost" onClick={() => send({ type: 'resolve_pending', action: 'cancel' })}>Cancel</Button>
           </div>
         ) : null}
-        {state?.load_error ? (
-          <div className="border-b px-4 py-2 text-sm text-destructive">Error: {state.load_error}</div>
-        ) : null}
         {linkError ? <div className="border-b px-4 py-2 text-sm text-destructive">{linkError}</div> : null}
         {(state?.command_drops ?? 0) > 0 ? (
           <div className="border-b px-4 py-2 text-sm text-destructive">
@@ -250,6 +263,7 @@ export default function App() {
     <TooltipProvider>
       <FosforaProvider>
         <Shell />
+        <Toaster position="top-center" />
       </FosforaProvider>
     </TooltipProvider>
   )
