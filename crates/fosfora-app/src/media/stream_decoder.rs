@@ -58,8 +58,12 @@ pub const POOL_BUFFERS: usize = 6;
 pub struct FrameSource {
     /// Blocking reader of the frames.
     pub reader: Box<dyn Read + Send>,
-    /// Makes a blocked `reader.read` return (kill the ffmpeg child). Called once when
-    /// the stream is abandoned (seek or Drop); keep it quick and non-blocking.
+    /// Makes a blocked `reader.read` return (kill the ffmpeg child). Called once, from
+    /// the worker or reader thread, whenever the stream is finished with: a seek, Drop,
+    /// worker exit, and also after a natural End or an Error. So it must be idempotent
+    /// in effect, quick, safe after the child has already exited, must not share a lock
+    /// that the reader holds across `read()`, and must not panic (a panic is caught and
+    /// logged).
     pub kill: Box<dyn FnOnce() + Send>,
 }
 
@@ -298,8 +302,15 @@ impl Drop for Session {
     fn drop(&mut self) {
         let prev = std::mem::replace(&mut *lock(&self.kill), KillSlot::Abandoned);
         if let KillSlot::Armed(kill) = prev {
-            kill();
+            run_kill(kill);
         }
+    }
+}
+
+/// Run a kill hook; a panic in it is logged, not propagated.
+fn run_kill(kill: Box<dyn FnOnce() + Send>) {
+    if catch_unwind(AssertUnwindSafe(kill)).is_err() {
+        log::error!("Stream decoder: kill hook panicked");
     }
 }
 
@@ -517,7 +528,7 @@ impl Reader {
             let mut slot = lock(&self.kill);
             if matches!(*slot, KillSlot::Abandoned) {
                 drop(slot);
-                kill();
+                run_kill(kill);
                 return;
             }
             *slot = KillSlot::Armed(kill);
@@ -847,8 +858,10 @@ mod tests {
         dec.seek(1, 1.0);
         dec.seek(2, 2.0);
         dec.seek(3, 3.0);
-        // Let the worker abandon the readers of seeks 1 and 2 before the gate opens.
-        std::thread::sleep(Duration::from_millis(200));
+        // Let the worker take all three seeks and abandon the readers of 1 and 2
+        // before the gate opens.
+        wait_for("the worker to take the seeks", || dec.cmd_tx.is_empty());
+        std::thread::sleep(Duration::from_millis(50));
         gate_tx.send(()).unwrap();
 
         let f = next_frame(&dec);
@@ -970,8 +983,8 @@ mod tests {
         let t = Instant::now();
         drop(dec);
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
-        // The kill hook ran synchronously inside Drop.
-        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        // The kill hook is what unblocked the reader; it runs from the worker's exit.
+        wait_for("the kill hook", || fired.load(Ordering::SeqCst) == 1);
     }
 
     #[test]
