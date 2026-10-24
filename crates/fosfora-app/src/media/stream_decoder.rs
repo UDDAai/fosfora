@@ -7,34 +7,42 @@
 //! queue of [`QUEUE_DEPTH`] frames. A full queue blocks the worker, so a paused clip
 //! costs no CPU, and RAM is [`StreamDecoder::resident_bytes`] whatever the clip length.
 //!
-//! The stream comes from a producer closure `(start_secs, looping) -> reader`. It is
-//! called once at spawn and again after every seek with the new start; the old reader
-//! is dropped first (for ffmpeg that kills the child). A looping stream is the
-//! producer's job: it should never reach EOF. [`StreamDecoder::set_looping`] only
-//! changes the flag handed to the next producer call.
+//! The stream comes from a producer closure `(start_secs, looping) -> FrameSource`. A
+//! [`FrameSource`] is a reader plus a `kill` hook. The producer is called once at spawn
+//! and again after every seek with the new start, always on the reader thread, so a
+//! slow spawn never delays a seek or Drop. A looping stream is the producer's job: it
+//! should never reach EOF, and EOF while looping is an error. EOF before the first
+//! frame of an epoch is an error too. [`StreamDecoder::set_looping`] only changes the
+//! flag handed to the next producer call.
 //!
 //! Frames come back to the pool when the [`PooledBuffer`] inside them is dropped, so no
 //! path (seek, shutdown, a frame the consumer discards) can leak a buffer.
 //!
 //! Commands (seek, looping, shutdown) interrupt a send blocked on a full queue. Seeks
 //! already waiting when the worker looks collapse into the latest one; a seek that
-//! arrives while an earlier one is being served gets its own producer call. A seek
+//! arrives while an earlier one is being served gets its own reader. A reader that
+//! has not yet started its producer call when it is abandoned never makes it. A seek
 //! also drains the queue, so no frame of an older epoch arrives after the first frame
 //! of the new one. After [`StreamMsg::End`] or [`StreamMsg::Error`] the worker idles
 //! until a seek restarts it.
 //!
-//! Blocking reads: the reader lives on its own thread, so the worker never waits on a
-//! read. A seek or shutdown abandons the reader thread; it drops the reader (and so
-//! kills an ffmpeg child) as soon as its current read returns. The producer itself runs
-//! on the worker and must return promptly (spawning a child is fine).
+//! Blocking reads: the reader and the producer live on their own thread, so the worker
+//! never waits on either. A seek or shutdown abandons that thread and, at once and
+//! synchronously, calls the source's `kill` hook (for ffmpeg: kill the child), which
+//! makes a blocked pipe read return so the thread exits through the abort path. The
+//! hook runs on the worker thread and must be quick and must not block. If the
+//! abandoned thread is still inside the producer, the hook runs as soon as the
+//! producer returns. A producer panic becomes an error message. The source must block
+//! on reads (`WouldBlock` is retried after a short sleep).
 //!
 //! Not yet wired into the app.
 #![allow(dead_code)]
 
 use std::io::{self, Read};
 use std::ops::Deref;
-use std::sync::Arc;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -46,8 +54,15 @@ pub const QUEUE_DEPTH: usize = 3;
 /// worker's hands and a couple for the consumer.
 pub const POOL_BUFFERS: usize = 6;
 
-/// A byte stream of tightly packed RGBA8 frames.
-pub type FrameSource = Box<dyn Read + Send>;
+/// A byte stream of tightly packed RGBA8 frames and the way to stop it.
+pub struct FrameSource {
+    /// Blocking reader of the frames.
+    pub reader: Box<dyn Read + Send>,
+    /// Makes a blocked `reader.read` return (kill the ffmpeg child). Called once when
+    /// the stream is abandoned (seek or Drop); keep it quick and non-blocking.
+    pub kill: Box<dyn FnOnce() + Send>,
+}
+
 /// Opens the stream for `(start_secs, looping)`.
 pub type Producer = Box<dyn FnMut(f64, bool) -> Result<FrameSource, String> + Send>;
 
@@ -184,10 +199,11 @@ impl StreamDecoder {
             out_rx: out_rx.clone(),
             pool: pool.clone(),
             frame_bytes,
-            producer: Box::new(producer),
+            producer: Arc::new(Mutex::new(Box::new(producer))),
             epoch,
             start_secs,
             looping,
+            stream_looping: looping,
             index: 0,
             session: None,
             pending_seek: None,
@@ -254,17 +270,42 @@ impl Drop for StreamDecoder {
     /// listen for the shutdown command, and reads run on a separate thread.
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(Command::Shutdown);
-        if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.thread.take()
+            && handle.join().is_err()
+        {
+            log::error!("Stream decoder worker panicked");
         }
     }
 }
 
-/// The reader thread of the current epoch. Dropping it abandons the thread.
+/// Where the reader thread's kill hook is: it exists only once the producer returned.
+enum KillSlot {
+    Pending,
+    Armed(Box<dyn FnOnce() + Send>),
+    Abandoned,
+}
+
+/// The reader thread of the current epoch. Dropping it abandons the thread and kills
+/// its source.
 struct Session {
     rx: Receiver<ReadMsg>,
     /// Never sent on; dropping it tells the reader to stop.
     _abort: Sender<()>,
+    kill: Arc<Mutex<KillSlot>>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let prev = std::mem::replace(&mut *lock(&self.kill), KillSlot::Abandoned);
+        if let KillSlot::Armed(kill) = prev {
+            kill();
+        }
+    }
+}
+
+/// Lock that survives poisoning (the data is plain state, never left half-updated).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct Worker {
@@ -273,10 +314,12 @@ struct Worker {
     out_rx: Receiver<StreamMsg>,
     pool: Arc<Pool>,
     frame_bytes: usize,
-    producer: Producer,
+    producer: Arc<Mutex<Producer>>,
     epoch: u64,
     start_secs: f64,
     looping: bool,
+    /// The `looping` flag the current stream was opened with.
+    stream_looping: bool,
     /// Index of the next frame of the current epoch.
     index: u64,
     session: Option<Session>,
@@ -343,28 +386,32 @@ impl Worker {
         self.open();
     }
 
-    /// Call the producer and start a reader thread on its stream.
+    /// Start a reader thread; it calls the producer, then reads the stream.
     fn open(&mut self) {
         self.index = 0;
-        let source = match (self.producer)(self.start_secs, self.looping) {
-            Ok(source) => source,
-            Err(message) => {
-                self.fail(message);
-                return;
-            }
-        };
+        self.stream_looping = self.looping;
         let (tx, rx) = bounded(1);
         let (abort_tx, abort_rx) = bounded(0);
-        let pool = self.pool.clone();
-        let frame_bytes = self.frame_bytes;
+        let kill = Arc::new(Mutex::new(KillSlot::Pending));
+        let reader = Reader {
+            producer: self.producer.clone(),
+            start_secs: self.start_secs,
+            looping: self.looping,
+            frame_bytes: self.frame_bytes,
+            pool: self.pool.clone(),
+            kill: kill.clone(),
+            tx,
+            abort_rx,
+        };
         let spawned = std::thread::Builder::new()
             .name("stream-reader".into())
-            .spawn(move || read_loop(source, frame_bytes, pool, tx, abort_rx));
+            .spawn(move || reader.run());
         match spawned {
             Ok(_) => {
                 self.session = Some(Session {
                     rx,
                     _abort: abort_tx,
+                    kill,
                 });
             }
             Err(e) => self.fail(format!("Failed to spawn stream reader thread: {e}")),
@@ -378,6 +425,12 @@ impl Worker {
                 let index = self.index;
                 self.index += 1;
                 self.deliver(StreamMsg::Frame(StreamFrame { epoch, index, data }));
+            }
+            Some(ReadMsg::Eof) if self.index == 0 => {
+                self.fail("stream ended before the first frame".to_string());
+            }
+            Some(ReadMsg::Eof) if self.stream_looping => {
+                self.fail("looping stream ended".to_string());
             }
             Some(ReadMsg::Eof) => {
                 self.session = None;
@@ -422,40 +475,87 @@ impl Worker {
     }
 }
 
-/// Reader thread: fill pool buffers from `source` until EOF, an error, or abandonment.
-/// Owns `source`, so it is dropped (killing an ffmpeg child) when this returns.
-fn read_loop(
-    mut source: FrameSource,
+/// Everything the reader thread of one epoch needs.
+struct Reader {
+    producer: Arc<Mutex<Producer>>,
+    start_secs: f64,
+    looping: bool,
     frame_bytes: usize,
     pool: Arc<Pool>,
+    kill: Arc<Mutex<KillSlot>>,
     tx: Sender<ReadMsg>,
     abort_rx: Receiver<()>,
-) {
-    debug_assert!(frame_bytes > 0);
-    loop {
-        // The abort channel never carries a message: it is ready when it disconnects.
-        let data = select! {
-            recv(pool.rx) -> data => match data {
-                Ok(data) => data,
-                Err(_) => return,
-            },
-            recv(abort_rx) -> _ => return,
+}
+
+impl Reader {
+    /// Call the producer, arm the kill hook, then fill pool buffers until EOF, an error
+    /// or abandonment. Owns the reader, so it is dropped when this returns.
+    fn run(self) {
+        let source = {
+            let mut producer = lock(&self.producer);
+            // Abandoned while waiting for an earlier producer call: skip ours.
+            if abandoned(&self.abort_rx) {
+                return;
+            }
+            let (start_secs, looping) = (self.start_secs, self.looping);
+            match catch_unwind(AssertUnwindSafe(|| (*producer)(start_secs, looping))) {
+                Ok(Ok(source)) => source,
+                Ok(Err(message)) => {
+                    let _ = self.tx.send(ReadMsg::Failed(message));
+                    return;
+                }
+                Err(_) => {
+                    let _ = self
+                        .tx
+                        .send(ReadMsg::Failed("producer panicked".to_string()));
+                    return;
+                }
+            }
         };
-        let mut buf = PooledBuffer {
-            data,
-            pool: pool.clone(),
-        };
-        let msg = match fill_frame(&mut source, buf.as_mut_slice(), &abort_rx) {
-            Ok(Fill::Frame) => ReadMsg::Frame(buf),
-            Ok(Fill::Eof) => ReadMsg::Eof,
-            Ok(Fill::Abandoned) => return,
-            Err(message) => ReadMsg::Failed(message),
-        };
-        let last = !matches!(msg, ReadMsg::Frame(_));
-        if tx.send(msg).is_err() || last {
-            return;
+        let FrameSource { reader, kill } = source;
+        {
+            let mut slot = lock(&self.kill);
+            if matches!(*slot, KillSlot::Abandoned) {
+                drop(slot);
+                kill();
+                return;
+            }
+            *slot = KillSlot::Armed(kill);
+        }
+        self.read_loop(reader);
+    }
+
+    fn read_loop(&self, mut reader: Box<dyn Read + Send>) {
+        debug_assert!(self.frame_bytes > 0);
+        loop {
+            // The abort channel never carries a message: it is ready when it disconnects.
+            let data = select! {
+                recv(self.pool.rx) -> data => match data {
+                    Ok(data) => data,
+                    Err(_) => return,
+                },
+                recv(self.abort_rx) -> _ => return,
+            };
+            let mut buf = PooledBuffer {
+                data,
+                pool: self.pool.clone(),
+            };
+            let msg = match fill_frame(&mut reader, buf.as_mut_slice(), &self.abort_rx) {
+                Ok(Fill::Frame) => ReadMsg::Frame(buf),
+                Ok(Fill::Eof) => ReadMsg::Eof,
+                Ok(Fill::Abandoned) => return,
+                Err(message) => ReadMsg::Failed(message),
+            };
+            let last = !matches!(msg, ReadMsg::Frame(_));
+            if self.tx.send(msg).is_err() || last {
+                return;
+            }
         }
     }
+}
+
+fn abandoned(abort_rx: &Receiver<()>) -> bool {
+    matches!(abort_rx.try_recv(), Err(TryRecvError::Disconnected))
 }
 
 enum Fill {
@@ -468,13 +568,13 @@ enum Fill {
 /// Read exactly `buf.len()` bytes. EOF before the first byte is a clean end; EOF later
 /// is a partial frame.
 fn fill_frame(
-    source: &mut FrameSource,
+    source: &mut Box<dyn Read + Send>,
     buf: &mut [u8],
     abort_rx: &Receiver<()>,
 ) -> Result<Fill, String> {
     let mut filled = 0;
     while filled < buf.len() {
-        if matches!(abort_rx.try_recv(), Err(TryRecvError::Disconnected)) {
+        if abandoned(abort_rx) {
             return Ok(Fill::Abandoned);
         }
         match source.read(&mut buf[filled..]) {
@@ -487,6 +587,9 @@ fn fill_frame(
             }
             Ok(n) => filled += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             Err(e) => return Err(format!("stream read error: {e}")),
         }
     }
@@ -497,7 +600,6 @@ fn fill_frame(
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
     use std::time::Instant;
 
@@ -549,7 +651,7 @@ mod tests {
         }
     }
 
-    /// A reader that blocks until the test drops (or sends on) its sender.
+    /// A reader that blocks until its kill hook fires (like an ffmpeg pipe and child).
     struct BlockingReader(Receiver<()>);
 
     impl Read for BlockingReader {
@@ -559,17 +661,50 @@ mod tests {
         }
     }
 
+    /// A blocking source; `fired` counts its kill hook running.
+    fn blocking(fired: &Arc<AtomicUsize>) -> FrameSource {
+        let (tx, rx) = bounded::<()>(0);
+        let fired = fired.clone();
+        FrameSource {
+            reader: Box::new(BlockingReader(rx)),
+            kill: Box::new(move || {
+                fired.fetch_add(1, Ordering::SeqCst);
+                drop(tx);
+            }),
+        }
+    }
+
+    /// Fails with `WouldBlock` twice before each read that delivers data.
+    struct WouldBlockStream(FakeStream, u32);
+
+    impl Read for WouldBlockStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.1 += 1;
+            if !self.1.is_multiple_of(3) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.0.read(buf)
+        }
+    }
+
     type Calls = Arc<Mutex<Vec<(f64, bool)>>>;
 
-    fn fake(start: f64, total: u64, partial: usize, started: &Arc<AtomicU64>) -> FrameSource {
-        Box::new(FakeStream {
+    fn fake_stream(start: f64, total: u64, partial: usize, started: &Arc<AtomicU64>) -> FakeStream {
+        FakeStream {
             start_tag: start as u8,
             total,
             partial,
             next: 0,
             pos: 0,
             started: started.clone(),
-        })
+        }
+    }
+
+    fn fake(start: f64, total: u64, partial: usize, started: &Arc<AtomicU64>) -> FrameSource {
+        FrameSource {
+            reader: Box::new(fake_stream(start, total, partial, started)),
+            kill: Box::new(|| {}),
+        }
     }
 
     /// Producer of `total` frames per call that records its arguments.
@@ -712,6 +847,8 @@ mod tests {
         dec.seek(1, 1.0);
         dec.seek(2, 2.0);
         dec.seek(3, 3.0);
+        // Let the worker abandon the readers of seeks 1 and 2 before the gate opens.
+        std::thread::sleep(Duration::from_millis(200));
         gate_tx.send(()).unwrap();
 
         let f = next_frame(&dec);
@@ -726,6 +863,9 @@ mod tests {
     fn set_looping_reaches_the_next_producer_call() {
         let calls = calls();
         let dec = spawn(5, &calls);
+        wait_for("the first producer call", || {
+            calls.lock().unwrap().len() == 1
+        });
         dec.set_looping(true);
         dec.seek(1, 4.0);
         loop {
@@ -816,13 +956,12 @@ mod tests {
 
     #[test]
     fn drop_while_the_reader_blocks_is_prompt() {
-        let (block_tx, block_rx) = bounded::<()>(0);
+        let fired = Arc::new(AtomicUsize::new(0));
         let calls = calls();
-        let rec = calls.clone();
-        let mut block_rx = Some(block_rx);
+        let (rec, f) = (calls.clone(), fired.clone());
         let dec = StreamDecoder::spawn(W, H, 0, 0.0, false, move |start, looping| {
             rec.lock().unwrap().push((start, looping));
-            Ok(Box::new(BlockingReader(block_rx.take().unwrap())) as FrameSource)
+            Ok(blocking(&f))
         })
         .unwrap();
         wait_for("the producer call", || calls.lock().unwrap().len() == 1);
@@ -831,25 +970,128 @@ mod tests {
         let t = Instant::now();
         drop(dec);
         assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
-        drop(block_tx); // let the abandoned reader thread finish
+        // The kill hook ran synchronously inside Drop.
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn seek_while_the_reader_blocks_is_not_stuck() {
-        let (block_tx, block_rx) = bounded::<()>(0);
-        let mut block_rx = Some(block_rx);
+    fn drop_while_the_producer_is_slow_is_prompt() {
         let started = Arc::new(AtomicU64::new(0));
-        let dec =
-            StreamDecoder::spawn(W, H, 0, 0.0, false, move |start, _| match block_rx.take() {
-                Some(rx) => Ok(Box::new(BlockingReader(rx)) as FrameSource),
-                None => Ok(fake(start, 4, 0, &started)),
+        let dec = StreamDecoder::spawn(W, H, 0, 0.0, false, move |start, _| {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(fake(start, 4, 0, &started))
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(50)); // producer is now sleeping
+        let t = Instant::now();
+        drop(dec);
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn many_seeks_over_blocked_readers_fire_every_kill_hook() {
+        const SEEKS: u64 = 20;
+        let fired = Arc::new(AtomicUsize::new(0));
+        let calls = calls();
+        let started = Arc::new(AtomicU64::new(0));
+        let (rec, f) = (calls.clone(), fired.clone());
+        let dec = StreamDecoder::spawn(W, H, 0, 0.0, false, move |start, looping| {
+            let n = {
+                let mut c = rec.lock().unwrap();
+                c.push((start, looping));
+                c.len() as u64
+            };
+            // Calls 1..=SEEKS block; the last one streams.
+            if n <= SEEKS {
+                Ok(blocking(&f))
+            } else {
+                Ok(fake(start, 1_000_000, 0, &started))
+            }
+        })
+        .unwrap();
+        for k in 1..=SEEKS {
+            wait_for("a producer call", || {
+                calls.lock().unwrap().len() as u64 == k
+            });
+            dec.seek(k, k as f64);
+        }
+        wait_for("the last kill hook", || {
+            fired.load(Ordering::SeqCst) == SEEKS as usize
+        });
+        // Frames flow from the final epoch, and buffers keep cycling past the pool size.
+        for i in 0..(4 * POOL_BUFFERS as u64) {
+            let f = next_frame(&dec);
+            assert_eq!((f.epoch, f.index), (SEEKS, i));
+        }
+        assert_eq!(dec.pool_allocations(), POOL_BUFFERS);
+        assert_eq!(calls.lock().unwrap().len() as u64, SEEKS + 1);
+        assert_eq!(fired.load(Ordering::SeqCst), SEEKS as usize);
+    }
+
+    #[test]
+    fn producer_panic_is_an_error_and_a_seek_recovers() {
+        let started = Arc::new(AtomicU64::new(0));
+        let mut n = 0;
+        let dec = StreamDecoder::spawn(W, H, 0, 0.0, false, move |start, _| {
+            n += 1;
+            assert!(n != 1, "test panic in producer");
+            Ok(fake(start, 3, 0, &started))
+        })
+        .unwrap();
+        match next(&dec) {
+            StreamMsg::Error { epoch: 0, message } => assert_eq!(message, "producer panicked"),
+            other => panic!("expected an error, got {other:?}"),
+        }
+        dec.seek(1, 0.0);
+        for i in 0..3u64 {
+            let f = next_frame(&dec);
+            assert_eq!((f.epoch, f.index), (1, i));
+        }
+        assert!(matches!(next(&dec), StreamMsg::End { epoch: 1 }));
+    }
+
+    #[test]
+    fn eof_before_the_first_frame_is_an_error() {
+        let dec = spawn(0, &calls());
+        match next(&dec) {
+            StreamMsg::Error { epoch: 0, message } => {
+                assert_eq!(message, "stream ended before the first frame");
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+        assert!(dec.recv_timeout(Duration::from_millis(100)).is_none());
+    }
+
+    #[test]
+    fn eof_while_looping_is_an_error() {
+        let started = Arc::new(AtomicU64::new(0));
+        let dec = StreamDecoder::spawn(W, H, 0, 0.0, true, move |start, _| {
+            Ok(fake(start, 3, 0, &started))
+        })
+        .unwrap();
+        for i in 0..3u64 {
+            assert_eq!(next_frame(&dec).index, i);
+        }
+        match next(&dec) {
+            StreamMsg::Error { epoch: 0, message } => assert!(message.contains("looping")),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn would_block_reads_are_retried() {
+        let started = Arc::new(AtomicU64::new(0));
+        let dec = StreamDecoder::spawn(W, H, 0, 0.0, false, move |start, _| {
+            Ok(FrameSource {
+                reader: Box::new(WouldBlockStream(fake_stream(start, 3, 0, &started), 0)),
+                kill: Box::new(|| {}),
             })
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        dec.seek(1, 3.0);
-        let f = next_frame(&dec);
-        assert_eq!((f.epoch, f.index), (1, 0));
-        drop(block_tx);
+        })
+        .unwrap();
+        for i in 0..3u64 {
+            assert_eq!(next_frame(&dec).index, i);
+        }
+        assert!(matches!(next(&dec), StreamMsg::End { epoch: 0 }));
     }
 
     #[test]
