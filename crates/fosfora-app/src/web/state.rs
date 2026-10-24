@@ -187,6 +187,7 @@ pub type LayerTuple<'a> = (&'a ParamStore, Option<usize>, BlendMode, f32, bool, 
 pub struct WebWorkspace<'a> {
     pub library: &'a [crate::media::library::LibraryItem],
     pub warnings: &'a [String],
+    pub show_pack_preset_ids: &'a [String],
     pub save_state: &'a str,
     pub save_detail: &'a str,
     pub mode: &'a str,
@@ -273,7 +274,8 @@ pub fn build_full_state(
         .map(|(i, (name, _))| PresetInfo {
             index: i,
             name: name.clone(),
-            builtin: preset_store.is_builtin(i),
+            builtin: preset_store.is_builtin(i)
+                && !workspace.show_pack_preset_ids.iter().any(|id| id == name),
         })
         .collect();
 
@@ -626,6 +628,48 @@ mod tests {
     }
 
     #[test]
+    fn full_state_prefers_show_pack_identity_over_builtin_name() {
+        use crate::effect::format::PostProcessDef;
+        use crate::preset::Preset;
+
+        let mut store = PresetStore::new();
+        store.presets.push((
+            "Crucible".into(),
+            Preset {
+                layers: vec![],
+                active_layer: 0,
+                postprocess: PostProcessDef::default(),
+                volumetric: None,
+                master_chain: None,
+            },
+        ));
+        store.builtin_count = 1;
+        let workspace = WebWorkspace {
+            library: &[],
+            warnings: &[],
+            show_pack_preset_ids: &["Crucible".to_string()],
+            save_state: "saved",
+            save_detail: "",
+            mode: "prepare",
+            solo_layer: None,
+            pending_switch: None,
+            save_blocked: false,
+            engine_commit: "test".into(),
+            engine_pid: 1,
+            engine_exe: "fosfora".into(),
+            show_path: "show".into(),
+            applied_preset: Some("Crucible".into()),
+            requested_preset: None,
+            loading_preset: None,
+            load_error: None,
+            command_drops: 0,
+        };
+        let json = build_full_state(&[], &[], 0, &[], &store, true, None, &workspace);
+        let state: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(state["presets"][0]["builtin"], false);
+    }
+
+    #[test]
     fn build_presets_changed_includes_builtin_field() {
         use crate::effect::format::PostProcessDef;
         use crate::preset::Preset;
@@ -674,6 +718,7 @@ mod tests {
         let workspace = WebWorkspace {
             library: &[],
             warnings: &[],
+            show_pack_preset_ids: &[],
             save_state: "saved",
             save_detail: "",
             mode: "prepare",
@@ -728,6 +773,7 @@ mod tests {
         let workspace = WebWorkspace {
             library: &[],
             warnings: &[],
+            show_pack_preset_ids: &[],
             save_state: "saved",
             save_detail: "",
             mode: "prepare",
