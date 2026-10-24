@@ -16,6 +16,11 @@
 //! wrap. For that one combination [`stream_args`] adds `-vf setpts=N/FRAME_RATE/TB`,
 //! which restamps frames by count and makes the wrap seamless.
 //!
+//! [`spawn_pipe`] also hands back a kill closure, so another thread can cut a stream
+//! short while the worker is blocked reading it; the read then returns EOF at once.
+//! If ffmpeg exits non-zero before or during the stream, the read returns an error with
+//! its exit status and stderr excerpt rather than a bare EOF.
+//!
 //! Dropping the stream kills and reaps the child, so abandoning a clip never leaves a
 //! decoder running or a zombie behind. The consumer thread (the reader) is expected to
 //! call [`spawn_stream`] again with a new start time to seek.
@@ -27,8 +32,10 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use super::toolchain::VideoToolchain;
 
@@ -176,7 +183,12 @@ type StderrTail = Arc<Mutex<Vec<u8>>>;
 /// stderr excerpt, so the reader needs no side channel for diagnostics. Dropping the
 /// stream kills and waits for the child.
 pub struct FfmpegStream {
-    child: Child,
+    /// Shared with the closure from [`FfmpegStream::killer`]; never held across a blocking
+    /// read, so a kill from another thread is not stuck behind the reader.
+    child: Arc<Mutex<Child>>,
+    pid: u32,
+    /// Set by a kill, so the resulting signal exit reads as end of stream, not an error.
+    killed: Arc<AtomicBool>,
     stdout: ChildStdout,
     stderr_tail: StderrTail,
     stderr_thread: Option<JoinHandle<()>>,
@@ -221,11 +233,32 @@ pub fn spawn_stream(path: &Path, spec: &StreamSpec) -> Result<FfmpegStream, Stri
         }
     };
     Ok(FfmpegStream {
-        child,
+        pid: child.id(),
+        child: Arc::new(Mutex::new(child)),
+        killed: Arc::default(),
         stdout,
         stderr_tail,
         stderr_thread,
         finished: false,
+    })
+}
+
+/// A frame pipe plus a way to cut it short from another thread. This is the shape the
+/// stream decoder worker takes (`reader` and `kill` map one to one onto its source type).
+pub struct StreamPipe {
+    /// Blocking reader over the child's stdout. Dropping it kills and reaps the child.
+    pub reader: Box<dyn Read + Send>,
+    /// Kills the child at once. A read blocked on `reader` then returns EOF promptly.
+    pub kill: Box<dyn FnOnce() + Send>,
+}
+
+/// [`spawn_stream`], split into the boxed reader and kill closure.
+pub fn spawn_pipe(path: &Path, spec: &StreamSpec) -> Result<StreamPipe, String> {
+    let stream = spawn_stream(path, spec)?;
+    let kill = stream.killer();
+    Ok(StreamPipe {
+        reader: Box::new(stream),
+        kill: Box::new(kill),
     })
 }
 
@@ -234,15 +267,19 @@ pub fn spawn_stream(path: &Path, spec: &StreamSpec) -> Result<FfmpegStream, Stri
 pub fn stream_producer(
     path: PathBuf,
     base: StreamSpec,
-) -> impl FnMut(f64, bool) -> Result<Box<dyn Read + Send>, String> {
+) -> impl FnMut(f64, bool) -> Result<StreamPipe, String> {
     move |start_secs, looping| {
         let spec = StreamSpec {
             start_secs,
             looping,
             ..base.clone()
         };
-        Ok(Box::new(spawn_stream(&path, &spec)?))
+        spawn_pipe(&path, &spec)
     }
+}
+
+fn lock_child(child: &Mutex<Child>) -> MutexGuard<'_, Child> {
+    child.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn drain_stderr(mut stderr: impl Read, tail: &Mutex<Vec<u8>>) {
@@ -265,7 +302,18 @@ fn drain_stderr(mut stderr: impl Read, tail: &Mutex<Vec<u8>>) {
 impl FfmpegStream {
     /// OS process id of the child.
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        self.pid
+    }
+
+    /// A closure that kills the child immediately, from any thread. A read blocked on
+    /// this stream then sees EOF (not an error). Safe after the child has exited.
+    pub fn killer(&self) -> impl FnOnce() + Send + 'static {
+        let child = Arc::clone(&self.child);
+        let killed = Arc::clone(&self.killed);
+        move || {
+            killed.store(true, Ordering::SeqCst);
+            let _ = lock_child(&child).kill();
+        }
     }
 
     /// The last few lines ffmpeg wrote to stderr (empty when it said nothing).
@@ -283,12 +331,18 @@ impl FfmpegStream {
     /// is a normal end of stream.
     fn on_eof(&mut self) -> std::io::Result<()> {
         self.finished = true;
-        let status = self.child.wait()?;
+        // Poll rather than `wait`, so the lock is free for a kill from another thread.
+        let status = loop {
+            if let Some(status) = lock_child(&self.child).try_wait()? {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
         // The pipe is closed, so the drain thread is finishing; join for the full tail.
         if let Some(handle) = self.stderr_thread.take() {
             let _ = handle.join();
         }
-        if status.success() {
+        if status.success() || self.killed.load(Ordering::SeqCst) {
             return Ok(());
         }
         Err(std::io::Error::other(exit_message(
@@ -322,8 +376,12 @@ impl Read for FfmpegStream {
 impl Drop for FfmpegStream {
     fn drop(&mut self) {
         // Killing closes both pipes, which ends the drain thread.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.killed.store(true, Ordering::SeqCst);
+        {
+            let mut child = lock_child(&self.child);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(handle) = self.stderr_thread.take() {
             let _ = handle.join();
         }
@@ -698,6 +756,67 @@ mod tests {
         let _ = pid;
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn kill_from_another_thread_unblocks_a_stalled_read() {
+        let Some(tool) = ffmpeg_or_skip("kill_from_another_thread_unblocks_a_stalled_read") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make_clip(tool, dir.path(), "clip.mp4");
+        let spec = StreamSpec {
+            looping: true,
+            ..StreamSpec::new(60.0, 1280, 720)
+        };
+        let fb = spec.frame_bytes().unwrap();
+        let mut stream = spawn_stream(&clip, &spec).unwrap();
+        let pid = stream.pid();
+        let kill = stream.killer();
+        let mut first = vec![0u8; fb];
+        stream.read_exact(&mut first).unwrap();
+
+        // Freeze ffmpeg: the reader below blocks once the pipe buffer is empty.
+        assert!(
+            Command::new("kill")
+                .args(["-STOP", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let reader = std::thread::spawn(move || {
+            let mut sink = vec![0u8; fb * 10];
+            let result = stream.read_exact(&mut sink);
+            (result, stream)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !reader.is_finished(),
+            "read should be blocked on the frozen child"
+        );
+
+        let started = Instant::now();
+        kill();
+        let (result, stream) = reader.join().unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(1),
+            "read unblocked after {took:?}"
+        );
+        // A kill ends the stream cleanly (EOF), not with an ffmpeg failure.
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        drop(stream);
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "ffmpeg pid {pid} still running");
+    }
+
     /// Open question from the streaming design: with `-ss T -stream_loop -1`, does the
     /// second pass restart at media time 0 or at T? Answer: 0, so frame `n` is media time
     /// `(T + n / fps) mod duration`, which is what `StreamClock` assumes.
@@ -758,7 +877,11 @@ mod tests {
         let clip = make_clip(tool, dir.path(), "clip with space.mp4");
         let mut produce = stream_producer(clip, StreamSpec::new(10.0, W, H));
         let mut all = Vec::new();
-        produce(0.5, false).unwrap().read_to_end(&mut all).unwrap();
+        produce(0.5, false)
+            .unwrap()
+            .reader
+            .read_to_end(&mut all)
+            .unwrap();
         assert_eq!(all.len(), 5 * (W * H * 4) as usize);
     }
 }
