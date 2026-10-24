@@ -396,7 +396,7 @@ mod tests {
         };
         match result.outcome {
             MediaJobOutcome::Refused(message) => {
-                assert!(message.contains("memory budget"), "{message}")
+                assert!(message.contains("memory budget"), "{message}");
             }
             MediaJobOutcome::Ready(_) => panic!("decoded past the budget"),
         }
