@@ -715,11 +715,12 @@ mod tests {
     use super::*;
 
     /// The WGSL mirror of `PostParams` is maintained by hand and uniform structs
-    /// need a 16-byte multiple. `grain_rate` took the struct from 32 to 48 with
-    /// three pad words; if that stops being true the shader's copy must follow.
+    /// need a 16-byte multiple. `grain_rate` took the struct from 32 to 48, and the
+    /// palette grade (strength plus four colour triples) took it to 96 with two pad
+    /// words; if that stops being true the shader's copy must follow.
     #[test]
-    fn post_params_stay_forty_eight_bytes() {
-        assert_eq!(std::mem::size_of::<PostParams>(), 48);
+    fn post_params_stay_ninety_six_bytes() {
+        assert_eq!(std::mem::size_of::<PostParams>(), 96);
     }
 
     const PROBE_DIM: u32 = 64;
