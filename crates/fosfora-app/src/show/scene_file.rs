@@ -126,6 +126,76 @@ pub fn scene_file_stem(id: &str) -> Result<String> {
     Ok(stem.to_string())
 }
 
+/// Name for a scene that does not exist yet. Letters, numbers, spaces, and hyphens.
+pub fn new_scene_name(name: &str) -> Result<String> {
+    let stem = scene_file_stem(name)?;
+    if stem.len() > 64
+        || !stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_')
+    {
+        bail!("Use letters, numbers, spaces, or hyphens");
+    }
+    Ok(stem)
+}
+
+/// True when `presets/<id>.json` already exists, ignoring ASCII case.
+pub fn scene_id_in_use(pack_root: &Path, id: &str) -> bool {
+    let Ok(stem) = scene_file_stem(id) else {
+        return true;
+    };
+    let Ok(entries) = fs::read_dir(pack_root.join("presets")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.extension().and_then(|ext| ext.to_str()) == Some("json")
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|existing| existing.eq_ignore_ascii_case(&stem))
+    })
+}
+
+/// Copy palette and audio maps from the scene this stack came from.
+/// The new scene keeps the same palette language and music modulation.
+pub fn copy_scene_sidecars(pack_root: &Path, source_id: &str, new_id: &str) -> Result<()> {
+    let source = scene_file_stem(source_id)?;
+    let dest = scene_file_stem(new_id)?;
+    if source.eq_ignore_ascii_case(&dest) {
+        return Ok(());
+    }
+
+    let palette_src = pack_root
+        .join("palette-bindings")
+        .join(format!("{source}.json"));
+    if palette_src.is_file() {
+        let raw = fs::read_to_string(&palette_src)
+            .with_context(|| format!("read {}", palette_src.display()))?;
+        let mut value: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("parse {}", palette_src.display()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("preset".into(), serde_json::Value::String(dest.clone()));
+        }
+        let dir = pack_root.join("palette-bindings");
+        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let json = serde_json::to_string_pretty(&value)?;
+        write_atomic(&dir.join(format!("{dest}.json")), &json)?;
+    }
+
+    let audio_src = pack_root
+        .join("audio-bindings")
+        .join(format!("{source}.bindings.json"));
+    if audio_src.is_file() {
+        let dir = pack_root.join("audio-bindings");
+        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let audio_dest = dir.join(format!("{dest}.bindings.json"));
+        fs::copy(&audio_src, &audio_dest)
+            .with_context(|| format!("copy {}", audio_src.display()))?;
+    }
+    Ok(())
+}
+
 /// Store a path relative to the show pack when the file lives inside it.
 pub fn portable_media_path(pack_root: &Path, stored: &str) -> String {
     let path = Path::new(stored);
@@ -242,10 +312,8 @@ mod tests {
     use super::*;
 
     fn temp_pack(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "fosfora_scene_{name}_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("fosfora_scene_{name}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("presets")).unwrap();
         fs::create_dir_all(root.join("assets/video")).unwrap();
@@ -383,11 +451,7 @@ mod tests {
             ("deep-sleep".into(), preset("assets/video/a.mp4", 1.0)),
             ("under-ice".into(), preset("assets/video/b.mp4", 0.2)),
         ];
-        upsert_named(
-            &mut presets,
-            "under-ice",
-            preset("assets/video/c.mp4", 0.7),
-        );
+        upsert_named(&mut presets, "under-ice", preset("assets/video/c.mp4", 0.7));
         assert_eq!(presets.len(), 2);
         assert_eq!(presets[0].0, "deep-sleep");
         assert_eq!(
@@ -396,6 +460,45 @@ mod tests {
         );
         assert!((presets[1].1.layers[0].opacity - 0.7).abs() < 0.001);
         assert!(scene_file_stem("../nope").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn new_scene_keeps_palette_and_audio_maps_from_the_source() {
+        let root = temp_pack("copy");
+        fs::create_dir_all(root.join("palette-bindings")).unwrap();
+        fs::create_dir_all(root.join("audio-bindings")).unwrap();
+        fs::write(
+            root.join("palette-bindings/thaw.json"),
+            r#"{"schema_version":1,"preset":"thaw","bindings":[{"slot":"color-3","layer":2,"parameter":"tint"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("audio-bindings/thaw.bindings.json"),
+            r#"{"version":1,"bindings":[]}"#,
+        )
+        .unwrap();
+        fs::write(root.join("presets/thaw.json"), "{}").unwrap();
+
+        assert!(scene_id_in_use(&root, "Thaw"));
+        assert!(!scene_id_in_use(&root, "glass-room"));
+        assert!(new_scene_name("glass-room").is_ok());
+        assert!(new_scene_name("bad/name").is_err());
+
+        copy_scene_sidecars(&root, "thaw", "glass-room").unwrap();
+        let palette: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join("palette-bindings/glass-room.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(palette["preset"], "glass-room");
+        assert_eq!(palette["bindings"][0]["parameter"], "tint");
+        assert!(root
+            .join("audio-bindings/glass-room.bindings.json")
+            .is_file());
+        assert_eq!(
+            fs::read_to_string(root.join("palette-bindings/thaw.json")).unwrap(),
+            r#"{"schema_version":1,"preset":"thaw","bindings":[{"slot":"color-3","layer":2,"parameter":"tint"}]}"#
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

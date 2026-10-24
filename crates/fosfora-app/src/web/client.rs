@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender};
-use tungstenite::WebSocket;
 use tungstenite::protocol::Message;
+use tungstenite::WebSocket;
 
 use super::types::{SourceFieldInfo, WsInMessage};
 use crate::midi::types::TriggerAction;
@@ -165,6 +165,13 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             Some(WsInMessage::RemoveLibraryItem { id })
         }
         "save_scene" => Some(WsInMessage::SaveScene),
+        "save_scene_as" => {
+            let name = v.get("name")?.as_str()?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            Some(WsInMessage::SaveSceneAs { name })
+        }
         "set_workspace_mode" => {
             let mode = v.get("mode")?.as_str()?.to_string();
             Some(WsInMessage::SetWorkspaceMode { mode })
@@ -380,6 +387,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_save_scene_as() {
+        let json = r#"{"type":"save_scene_as","name":" glass room "}"#;
+        match parse_client_message(json) {
+            Some(WsInMessage::SaveSceneAs { name }) => assert_eq!(name, "glass room"),
+            other => panic!("expected SaveSceneAs, got {:?}", other),
+        }
+        assert!(parse_client_message(r#"{"type":"save_scene_as","name":"  "}"#).is_none());
+    }
+
+    #[test]
     fn parse_select_layer() {
         let json = r#"{"type":"select_layer","index":2}"#;
         match parse_client_message(json) {
@@ -581,7 +598,9 @@ mod tests {
 
         let json_bo = r#"{"type":"show","action":"toggle_blackout"}"#;
         match parse_client_message(json_bo) {
-            Some(WsInMessage::ShowCommand(crate::show::controller::ShowCommand::ToggleBlackout)) => {}
+            Some(WsInMessage::ShowCommand(
+                crate::show::controller::ShowCommand::ToggleBlackout,
+            )) => {}
             other => panic!("expected ShowCommand::ToggleBlackout, got {:?}", other),
         }
     }

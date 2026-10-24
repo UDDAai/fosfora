@@ -1,9 +1,9 @@
 pub mod client;
 pub mod server;
-pub mod upload;
 #[allow(dead_code)]
 pub mod state;
 pub mod types;
+pub mod upload;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -234,10 +234,19 @@ impl WebSystem {
                 WsInMessage::SaveScene => {
                     result.save_scene = true;
                 }
+                WsInMessage::SaveSceneAs { name } => {
+                    result.save_scene_as = Some(name);
+                }
                 WsInMessage::SetWorkspaceMode { mode } => {
                     result.workspace_mode = Some(mode);
                 }
-                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                WsInMessage::SetMediaPlace {
+                    layer,
+                    fit,
+                    width,
+                    x,
+                    y,
+                } => {
                     result.media_place.push((layer, fit, width, x, y));
                 }
                 WsInMessage::SetGrade { strength, enabled } => {
@@ -381,10 +390,19 @@ impl WebSystem {
                 WsInMessage::SaveScene => {
                     result.save_scene = true;
                 }
+                WsInMessage::SaveSceneAs { name } => {
+                    result.save_scene_as = Some(name);
+                }
                 WsInMessage::SetWorkspaceMode { mode } => {
                     result.workspace_mode = Some(mode);
                 }
-                WsInMessage::SetMediaPlace { layer, fit, width, x, y } => {
+                WsInMessage::SetMediaPlace {
+                    layer,
+                    fit,
+                    width,
+                    x,
+                    y,
+                } => {
                     result.media_place.push((layer, fit, width, x, y));
                 }
                 WsInMessage::SetGrade { strength, enabled } => {

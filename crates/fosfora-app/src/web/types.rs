@@ -58,6 +58,8 @@ pub enum WsInMessage {
     },
     /// Write the current layer stack into the open show pack.
     SaveScene,
+    /// Write the current layer stack as a new show-pack scene.
+    SaveSceneAs { name: String },
     /// `prepare` autosaves. `perform` waits for an explicit save.
     SetWorkspaceMode { mode: String },
     /// Placement of a video or still. Width is a fraction of the canvas.
@@ -149,6 +151,7 @@ pub struct WebFrameResult {
     pub replace_library: Vec<(usize, String)>,
     pub media_transport: Vec<(usize, Option<f32>, Option<bool>)>,
     pub save_scene: bool,
+    pub save_scene_as: Option<String>,
     pub workspace_mode: Option<String>,
     pub touched_params: bool,
     pub media_place: Vec<(usize, String, f32, f32, f32)>,
@@ -184,6 +187,7 @@ impl WebFrameResult {
             replace_library: Vec::new(),
             media_transport: Vec::new(),
             save_scene: false,
+            save_scene_as: None,
             workspace_mode: None,
             touched_params: false,
             media_place: Vec::new(),

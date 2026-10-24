@@ -6,9 +6,9 @@ use winit::window::Window;
 
 use crate::audio::AudioSystem;
 use crate::bindings::bus::BindingBus;
-use crate::effect::EffectLoader;
 use crate::effect::format::PostProcessDef;
 use crate::effect::loader::assets_dir;
+use crate::effect::EffectLoader;
 use crate::gpu::audio_textures::{AudioTextures, WAVEFORM_PEEK};
 use crate::gpu::compositor::Compositor;
 use crate::gpu::layer::{EffectLayer, Layer, LayerContent, LayerInfo, LayerStack};
@@ -23,22 +23,22 @@ use crate::gpu::{GpuContext, ShaderPipeline, ShaderUniforms, UniformBuffer};
 use crate::media::MediaLayer;
 #[cfg(feature = "webcam")]
 use crate::media::WebcamBackend;
-use crate::midi::MidiSystem;
 use crate::midi::clock::MidiClock;
 use crate::midi::types::TriggerAction;
+use crate::midi::MidiSystem;
 use crate::osc::OscSystem;
 use crate::params::{ParamStore, ParamValue};
-use crate::preset::PresetStore;
 use crate::preset::loader::{MediaDecodeResult, PresetLoader};
 use crate::preset::store::LayerPreset;
-use crate::scene::SceneStore;
+use crate::preset::PresetStore;
 use crate::scene::timeline::{Timeline, TimelineEvent};
 use crate::scene::transition::TransitionRenderer;
 use crate::scene::types::AdvanceMode;
+use crate::scene::SceneStore;
 use crate::settings::SettingsConfig;
 use crate::shader::ShaderWatcher;
-use crate::ui::EguiOverlay;
 use crate::ui::panels::shader_editor::ShaderEditorState;
+use crate::ui::EguiOverlay;
 use crate::web::WebSystem;
 
 /// A manual scene change that is waiting for Save, Discard, or Cancel.
@@ -1236,7 +1236,12 @@ impl App {
                     }
                 }
             }
-            if web_result.rescan_library {
+            if web_result.rescan_library
+                || self
+                    .media_library
+                    .as_mut()
+                    .is_some_and(|lib| lib.poll_watch())
+            {
                 if let Some(library) = &mut self.media_library {
                     library.request_rescan();
                 }
@@ -1293,11 +1298,18 @@ impl App {
                 let _ = self.save_open_scene();
                 web_stack_changed = true;
             }
+            if let Some(name) = web_result.save_scene_as.clone() {
+                if let Err(err) = self.save_new_scene(&name) {
+                    self.save_state = crate::show::scene_file::SaveState::Failed(err.clone());
+                    self.status_error = Some((err, Instant::now()));
+                }
+                web_stack_changed = true;
+            }
             let edited = web_stack_changed
                 || had_layer_edits
                 || web_result.touched_params
                 || web_result.postprocess_enabled.is_some();
-            if edited && !web_result.save_scene {
+            if edited && !web_result.save_scene && web_result.save_scene_as.is_none() {
                 self.note_scene_edit(now);
             }
 
@@ -2501,7 +2513,10 @@ impl App {
     }
 
     fn library_paths(&self, ids: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
-        let library = self.media_library.as_ref().ok_or_else(|| "No media library is open".to_string())?;
+        let library = self
+            .media_library
+            .as_ref()
+            .ok_or_else(|| "No media library is open".to_string())?;
         let mut paths = Vec::with_capacity(ids.len());
         let mut missing = Vec::new();
         for id in ids {
@@ -3046,12 +3061,23 @@ impl App {
     }
 
     pub fn save_preset(&mut self, name: &str) {
-        if self
-            .show
-            .as_ref()
-            .is_some_and(|show| show.preset_ids.iter().any(|id| id == name))
-        {
-            let _ = self.save_scene_id(name);
+        if self.show.is_some() {
+            match crate::show::scene_file::new_scene_name(name) {
+                Ok(id) => {
+                    if let Some(existing) = self.canonical_pack_scene_id(&id) {
+                        let _ = self.save_scene_id(&existing);
+                    } else if let Err(err) = self.save_new_scene(&id) {
+                        self.save_state = crate::show::scene_file::SaveState::Failed(err.clone());
+                        self.status_error = Some((err, Instant::now()));
+                    }
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    self.save_state = crate::show::scene_file::SaveState::Failed(message.clone());
+                    self.status_error = Some((message, Instant::now()));
+                }
+            }
+            self.broadcast_web_state(Instant::now());
             return;
         }
         let Some(preset) = self.capture_current_preset() else {
@@ -3205,6 +3231,85 @@ impl App {
         self.save_scene_id(&id)
     }
 
+    /// Store the live layers, effects, and look as a new show-pack scene.
+    /// The show clock is left unchanged. The new scene becomes the open scene.
+    pub fn save_new_scene(&mut self, name: &str) -> Result<(), String> {
+        let id = crate::show::scene_file::new_scene_name(name).map_err(|err| err.to_string())?;
+        if self.show.is_none() {
+            return Err("No show pack is open".to_string());
+        }
+        if self.pack_scene_name_taken(&id) {
+            return Err(format!("A scene named {id} already exists"));
+        }
+        let source = self
+            .show
+            .as_ref()
+            .and_then(|show| show.scene.active_preset_id.clone());
+        let pack_root = self
+            .show
+            .as_ref()
+            .map(|show| show.pack_root.clone())
+            .ok_or_else(|| "No show pack is open".to_string())?;
+        self.save_scene_id(&id)?;
+        if let Some(show) = self.show.as_mut() {
+            if !show.preset_ids.iter().any(|existing| existing == &id) {
+                show.preset_ids.push(id.clone());
+                show.preset_ids.sort();
+            }
+            show.scene.manual_set_preset(id.clone());
+        }
+        if let Some(source_id) = source.as_deref() {
+            if let Err(err) =
+                crate::show::scene_file::copy_scene_sidecars(&pack_root, source_id, &id)
+            {
+                log::warn!("scene sidecars for '{id}': {err:#}");
+            }
+            self.adopt_copied_palette_binding(&id);
+        }
+        self.remember_workspace();
+        log::info!("Created scene '{id}'");
+        Ok(())
+    }
+
+    fn canonical_pack_scene_id(&self, name: &str) -> Option<String> {
+        self.show.as_ref().and_then(|show| {
+            show.preset_ids
+                .iter()
+                .find(|existing| existing.eq_ignore_ascii_case(name))
+                .cloned()
+        })
+    }
+
+    fn pack_scene_name_taken(&self, id: &str) -> bool {
+        self.canonical_pack_scene_id(id).is_some()
+            || self
+                .preset_store
+                .presets
+                .iter()
+                .any(|(existing, _)| existing.eq_ignore_ascii_case(id))
+            || self
+                .show
+                .as_ref()
+                .is_some_and(|show| crate::show::scene_file::scene_id_in_use(&show.pack_root, id))
+    }
+
+    fn adopt_copied_palette_binding(&mut self, id: &str) {
+        let Some(root) = self.show.as_ref().map(|show| show.pack_root.clone()) else {
+            return;
+        };
+        let path = root.join("palette-bindings").join(format!("{id}.json"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(set) = serde_json::from_str::<crate::palette::bindings::PaletteBindingSet>(&text)
+        else {
+            return;
+        };
+        if let Some(show) = self.show.as_mut() {
+            show.bindings.insert(id.to_string(), set);
+        }
+    }
+
     fn save_scene_id(&mut self, id: &str) -> Result<(), String> {
         let pack_root = self
             .show
@@ -3234,7 +3339,12 @@ impl App {
             }
         }
         crate::show::scene_file::upsert_named(&mut self.preset_store.presets, id, preset);
-        if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == id) {
+        if let Some(index) = self
+            .preset_store
+            .presets
+            .iter()
+            .position(|(name, _)| name == id)
+        {
             self.preset_store.current_preset = Some(index);
         }
         self.scene_dirty = false;
@@ -3277,20 +3387,21 @@ impl App {
         self.post_process.grade.enabled = workspace.grade_enabled;
         self.post_process.grade.strength = workspace.grade_strength;
         let known = |id: &str| self.preset_store.presets.iter().any(|(name, _)| name == id);
-        let scene = workspace
-            .scene
-            .filter(|id| known(id))
-            .or_else(|| {
-                self.show
-                    .as_ref()
-                    .and_then(|show| show.definition.scene_track.first())
-                    .map(|cue| cue.preset_id.clone())
-            });
+        let scene = workspace.scene.filter(|id| known(id)).or_else(|| {
+            self.show
+                .as_ref()
+                .and_then(|show| show.definition.scene_track.first())
+                .map(|cue| cue.preset_id.clone())
+        });
         if let Some(id) = scene {
             if let Some(show) = self.show.as_mut() {
                 show.scene.manual_set_preset(id.clone());
             }
-            if let Some(index) = self.preset_store.presets.iter().position(|(name, _)| name == &id)
+            if let Some(index) = self
+                .preset_store
+                .presets
+                .iter()
+                .position(|(name, _)| name == &id)
             {
                 self.load_preset(index);
             }
@@ -3330,7 +3441,9 @@ impl App {
     }
 
     fn autosave_if_due(&mut self, now: Instant) {
-        if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare || !self.scene_dirty {
+        if self.workspace_mode != crate::show::scene_file::WorkspaceMode::Prepare
+            || !self.scene_dirty
+        {
             return;
         }
         if matches!(
@@ -3426,10 +3539,10 @@ impl App {
         // content (music = motion/energy, never palette-owned color params),
         // versioned with the pack, and portable across machines. Falls back to
         // the config-dir sidecar when the pack ships none for this preset.
-        let pack_sidecar: Option<std::path::PathBuf> = self
-            .show
-            .as_ref()
-            .map(|show| show.pack_root.join(format!("audio-bindings/{preset_name}.bindings.json")));
+        let pack_sidecar: Option<std::path::PathBuf> = self.show.as_ref().map(|show| {
+            show.pack_root
+                .join(format!("audio-bindings/{preset_name}.bindings.json"))
+        });
         match pack_sidecar {
             Some(path) if path.is_file() => {
                 self.binding_bus.load_preset_bindings_from(&path);
@@ -4430,15 +4543,13 @@ impl App {
                         continue;
                     }
                     match &b.target {
-                        crate::bindings::types::BindingTarget::Param {
-                            layer,
-                            param,
-                            ..
-                        } => pack_audio_targets.push((
-                            format!("audio-bindings({preset_id})"),
-                            *layer,
-                            param.clone(),
-                        )),
+                        crate::bindings::types::BindingTarget::Param { layer, param, .. } => {
+                            pack_audio_targets.push((
+                                format!("audio-bindings({preset_id})"),
+                                *layer,
+                                param.clone(),
+                            ))
+                        }
                         crate::bindings::types::BindingTarget::LegacyParam { param, .. } => {
                             pack_audio_targets.push((
                                 format!("audio-bindings({preset_id})"),
@@ -4456,22 +4567,15 @@ impl App {
                     continue;
                 }
                 match &b.target {
-                    crate::bindings::types::BindingTarget::Param {
-                        layer,
-                        param,
-                        ..
-                    } => external.push((
-                        format!("binding-bus({})", b.source),
-                        *layer,
-                        param.clone(),
-                    )),
-                    crate::bindings::types::BindingTarget::LegacyParam {
-                        param, ..
-                    } => external.push((
-                        format!("binding-bus({})", b.source),
-                        self.layer_stack.active_layer,
-                        param.clone(),
-                    )),
+                    crate::bindings::types::BindingTarget::Param { layer, param, .. } => {
+                        external.push((format!("binding-bus({})", b.source), *layer, param.clone()))
+                    }
+                    crate::bindings::types::BindingTarget::LegacyParam { param, .. } => external
+                        .push((
+                            format!("binding-bus({})", b.source),
+                            self.layer_stack.active_layer,
+                            param.clone(),
+                        )),
                     _ => {}
                 }
             }
@@ -4642,27 +4746,22 @@ impl App {
                     // go through `TimelineEvent` so the render path captures
                     // the outgoing frame (see `dissolve_capture_pending`).
                     let from = self.timeline.current_cue_index();
-                    let tl_event = if action.kind
-                        == crate::show::definition::TransitionKind::Cut
-                    {
+                    let tl_event = if action.kind == crate::show::definition::TransitionKind::Cut {
                         // Align cursor then load directly: `go_to_cue` on a
                         // Cut cue already emits `LoadCue`, which
                         // `process_timeline_event` handles.
                         self.timeline.go_to_cue(idx)
                     } else {
                         let cue = &self.timeline.cues[idx];
-                        self.timeline.state = crate::scene::timeline::PlaybackState::Transitioning {
-                            from_cue: from.min(self.timeline.cues.len().saturating_sub(1)),
-                            to_cue: idx,
-                            progress: 0.0,
-                            transition_type: cue.transition,
-                            duration: action.duration_ms as f32 / 1000.0,
-                        };
-                        crate::show::timeline_event_for_cue(
-                            idx,
-                            action.kind,
-                            action.duration_ms,
-                        )
+                        self.timeline.state =
+                            crate::scene::timeline::PlaybackState::Transitioning {
+                                from_cue: from.min(self.timeline.cues.len().saturating_sub(1)),
+                                to_cue: idx,
+                                progress: 0.0,
+                                transition_type: cue.transition,
+                                duration: action.duration_ms as f32 / 1000.0,
+                            };
+                        crate::show::timeline_event_for_cue(idx, action.kind, action.duration_ms)
                     };
                     self.process_timeline_event(tl_event);
                 } else if let Some(preset_idx) = self
@@ -4682,15 +4781,15 @@ impl App {
         }
     }
 
-fn slot_rgb(
-    colors: &std::collections::HashMap<String, crate::params::ParamValue>,
-    slot: &str,
-) -> Option<[f32; 3]> {
-    match colors.get(slot) {
-        Some(crate::params::ParamValue::Color(c)) => Some([c[0], c[1], c[2]]),
-        _ => None,
+    fn slot_rgb(
+        colors: &std::collections::HashMap<String, crate::params::ParamValue>,
+        slot: &str,
+    ) -> Option<[f32; 3]> {
+        match colors.get(slot) {
+            Some(crate::params::ParamValue::Color(c)) => Some([c[0], c[1], c[2]]),
+            _ => None,
+        }
     }
-}
 
     /// Route an interpolated slot→color map through the active preset's
     /// `PaletteBindingSet` and write via `set_runtime` (never dirty).
@@ -4698,7 +4797,10 @@ fn slot_rgb(
     /// Fallback rule (MVP): when the active preset has no binding set, the
     /// first set in the pack applies — every Hibernation preset ships one,
     /// so this only fires for ad-hoc packs.
-    pub fn apply_palette_map(&mut self, colors: std::collections::HashMap<String, crate::params::ParamValue>) {
+    pub fn apply_palette_map(
+        &mut self,
+        colors: std::collections::HashMap<String, crate::params::ParamValue>,
+    ) {
         // Whole-frame grade roles. color-5 and color-6 stay on the per-effect
         // bindings (highlights and line work) and are not consumed here.
         if let Some(c) = Self::slot_rgb(&colors, "color-1") {
