@@ -115,7 +115,7 @@ pub fn rgba_to_hsl(rgba: [f32; 4]) -> [f32; 4] {
     let (r, g, b, a) = (rgba[0], rgba[1], rgba[2], rgba[3]);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
+    let l = max.midpoint(min);
     let d = max - min;
     if d < 1e-6 {
         return [0.0, 0.0, l, a];

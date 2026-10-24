@@ -68,7 +68,7 @@ pub fn import_adobe_url(url: &str, id: &str) -> Result<Palette, String> {
         })
         .collect::<Result<_, _>>()?;
 
-    if nums.len() < 3 || nums.len() % 3 != 0 {
+    if nums.len() < 3 || !nums.len().is_multiple_of(3) {
         return Err(format!(
             "rgbvalues must be groups of 3 floats (got {})",
             nums.len()

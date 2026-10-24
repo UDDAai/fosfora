@@ -244,7 +244,9 @@ impl ShaderWatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{Route, ShaderWatcher, route};
+    #[cfg(target_os = "linux")]
+    use super::ShaderWatcher;
+    use super::{Route, route};
     use std::path::Path;
 
     // Run: cargo test -p fosfora-app -- reading_a_watched_file_is_not_a_change

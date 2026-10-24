@@ -41,8 +41,6 @@ pub enum WsInMessage {
     RemoveLayer { index: usize },
     /// Save, discard, or cancel a Perform scene change that is waiting.
     ResolvePending { action: String },
-    /// Add a media layer from a file already written to disk.
-    AddMedia { path: PathBuf },
     /// Files landed in the show library. Rescan; do not create layers.
     RescanLibrary,
     /// Copy Application Support uploads into the show library. Originals stay.
@@ -157,7 +155,6 @@ pub struct WebFrameResult {
     pub layer_moves: Vec<(usize, usize)>,
     pub layer_removes: Vec<usize>,
     pub resolve_pending: Option<String>,
-    pub add_media: Vec<PathBuf>,
     pub rescan_library: bool,
     pub import_uploads: bool,
     pub reveal_media: bool,
@@ -199,7 +196,6 @@ impl WebFrameResult {
             layer_moves: Vec::new(),
             layer_removes: Vec::new(),
             resolve_pending: None,
-            add_media: Vec::new(),
             rescan_library: false,
             import_uploads: false,
             reveal_media: false,
