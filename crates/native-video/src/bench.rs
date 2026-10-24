@@ -4,7 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::session::{phys_footprint, NativeClip};
+use crate::session::{NativeClip, phys_footprint};
 use crate::{full_rgba_bytes, staging_ram_bytes};
 
 pub fn main() -> Result<(), String> {
@@ -22,7 +22,12 @@ pub fn main() -> Result<(), String> {
     let clip = NativeClip::open(&path)?;
     let after_open = phys_footprint();
     let staging = staging_ram_bytes(clip.width(), clip.height())?;
-    let full = full_rgba_bytes(clip.width(), clip.height(), clip.fps(), clip.duration_secs());
+    let full = full_rgba_bytes(
+        clip.width(),
+        clip.height(),
+        clip.fps(),
+        clip.duration_secs(),
+    );
     println!(
         "open: {}x{} {:.2}fps {:.2}s codec={} hw={} note={}",
         clip.width(),

@@ -37,8 +37,12 @@ unsafe extern "C" {
     fn nv_media_info_size() -> usize;
     fn nv_frame_info_size() -> usize;
     fn nv_phys_footprint() -> u64;
-    fn nv_probe(path: *const c_char, info: *mut NvMediaInfo, err: *mut c_char, err_len: usize)
-    -> c_int;
+    fn nv_probe(
+        path: *const c_char,
+        info: *mut NvMediaInfo,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> c_int;
     fn nv_open(
         path: *const c_char,
         info: *mut NvMediaInfo,
@@ -57,8 +61,12 @@ unsafe extern "C" {
         info: *mut NvFrameInfo,
     ) -> c_int;
     fn nv_last_error(player: *mut c_void, err: *mut c_char, err_len: usize);
-    fn nv_metal_sample(player: *mut c_void, rgba_out: *mut u8, err: *mut c_char, err_len: usize)
-    -> c_int;
+    fn nv_metal_sample(
+        player: *mut c_void,
+        rgba_out: *mut u8,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> c_int;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +96,8 @@ pub enum ProbeStatus {
 }
 
 fn c_path(path: &Path) -> Result<CString, String> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| "path contains an interior nul".to_string())
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "path contains an interior nul".to_string())
 }
 
 fn read_buf(buf: &[u8]) -> String {
@@ -128,14 +137,7 @@ pub fn probe(path: &Path) -> Result<ProbeStatus, String> {
     let mut err = [0u8; 512];
     // SAFETY: path is a C string, info and err are writable buffers of the
     // sizes the C side expects, and nv_probe does not retain them.
-    let code = unsafe {
-        nv_probe(
-            path.as_ptr(),
-            &mut info,
-            err.as_mut_ptr().cast(),
-            err.len(),
-        )
-    };
+    let code = unsafe { nv_probe(path.as_ptr(), &mut info, err.as_mut_ptr().cast(), err.len()) };
     let message = read_buf(&err);
     match code {
         0 => Ok(ProbeStatus::Playable(info_from(&info))),
@@ -246,7 +248,14 @@ impl Player {
         let mut err = [0u8; 512];
         // SAFETY: pixel and err are caller-owned buffers. The C side releases
         // the pixel buffer and flushes the texture cache before returning.
-        let code = unsafe { nv_metal_sample(self.raw, pixel.as_mut_ptr(), err.as_mut_ptr().cast(), err.len()) };
+        let code = unsafe {
+            nv_metal_sample(
+                self.raw,
+                pixel.as_mut_ptr(),
+                err.as_mut_ptr().cast(),
+                err.len(),
+            )
+        };
         match code {
             0 => Ok(pixel),
             -2 => Err(read_buf(&err).if_empty("no Metal device")),

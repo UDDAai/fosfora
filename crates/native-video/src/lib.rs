@@ -1,3 +1,6 @@
+// Phase-1 prototype: several mailbox/FFI fields are wired for upcoming app integration.
+#![allow(dead_code)]
+
 mod budget;
 #[cfg(target_os = "macos")]
 mod ffi;
@@ -13,6 +16,6 @@ pub use timing::FrameStamp;
 #[cfg(target_os = "macos")]
 pub mod bench;
 #[cfg(target_os = "macos")]
-pub use ffi::{probe, MediaInfo, ProbeStatus};
+pub use ffi::{MediaInfo, ProbeStatus, probe};
 #[cfg(target_os = "macos")]
-pub use session::{phys_footprint, players_alive, NativeClip, PlayStats};
+pub use session::{NativeClip, PlayStats, phys_footprint, players_alive};

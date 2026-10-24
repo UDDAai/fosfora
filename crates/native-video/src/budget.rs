@@ -16,9 +16,8 @@ pub fn frame_bytes(width: u32, height: u32) -> Option<u64> {
 
 /// Bytes reserved for one streamed clip. Independent of duration and frame count.
 pub fn staging_ram_bytes(width: u32, height: u32) -> Result<u64, String> {
-    let frame = frame_bytes(width, height).ok_or_else(|| {
-        format!("video frame {width}x{height} has no usable RGBA size")
-    })?;
+    let frame = frame_bytes(width, height)
+        .ok_or_else(|| format!("video frame {width}x{height} has no usable RGBA size"))?;
     frame
         .checked_mul(CPU_FRAMES)
         .ok_or_else(|| "streamed video staging size overflowed".to_string())

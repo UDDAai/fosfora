@@ -64,9 +64,11 @@ struct Shared {
     copy_ns: AtomicU64,
     allocations: AtomicU64,
     first_ns: AtomicU64,
-    metal: Mutex<Option<Sender<Result<[u8; 4], String>>>>,
+    metal: Mutex<MetalPreviewSlot>,
     direction_warned: AtomicBool,
 }
+
+type MetalPreviewSlot = Option<Sender<Result<[u8; 4], String>>>;
 
 impl Shared {
     fn new() -> Arc<Self> {
@@ -287,18 +289,16 @@ impl NativeClip {
         if self.duration > 0.0 {
             secs = secs.min(self.duration);
         }
-        self.shared.seek_bits.store(secs.to_bits(), Ordering::Relaxed);
+        self.shared
+            .seek_bits
+            .store(secs.to_bits(), Ordering::Relaxed);
         self.shared.set_position(secs);
         self.shared.mailbox.invalidate();
         self.shared.seek_seq.fetch_add(1, Ordering::Release);
     }
 
     pub fn note_forward_only(&self) {
-        if self
-            .shared
-            .direction_warned
-            .swap(true, Ordering::Relaxed)
-        {
+        if self.shared.direction_warned.swap(true, Ordering::Relaxed) {
             return;
         }
         log::warn!(
@@ -321,7 +321,11 @@ impl NativeClip {
     pub fn metal_preview(&self) -> Result<[u8; 4], String> {
         let (tx, rx) = mpsc::channel();
         {
-            let mut slot = self.shared.metal.lock().unwrap_or_else(|err| err.into_inner());
+            let mut slot = self
+                .shared
+                .metal
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
             if slot.is_some() {
                 return Err("a Metal preview is already running".to_string());
             }
@@ -334,11 +338,10 @@ impl NativeClip {
     pub fn stats(&self) -> PlayStats {
         let frames = self.shared.frames.load(Ordering::Relaxed);
         let copy_ns = self.shared.copy_ns.load(Ordering::Relaxed);
-        let average = if frames == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_nanos(copy_ns / frames)
-        };
+        let average = copy_ns
+            .checked_div(frames)
+            .map(Duration::from_nanos)
+            .unwrap_or(Duration::ZERO);
         PlayStats {
             frames,
             dropped: self.shared.dropped.load(Ordering::Relaxed),
@@ -499,7 +502,10 @@ fn apply_loop(player: &Player, shared: &Shared, pump: &mut Pump) {
     let position = player.position();
     let slop = (1.0 / pump.fps).clamp(0.01, 0.05);
     let playing = shared.playing.load(Ordering::Relaxed) && shared.rate() > 0.0;
-    if !pump.latched && shared.looping.load(Ordering::Relaxed) && playing && at_end(position, pump.duration, slop)
+    if !pump.latched
+        && shared.looping.load(Ordering::Relaxed)
+        && playing
+        && at_end(position, pump.duration, slop)
     {
         pump.latched = true;
         shared.loops.fetch_add(1, Ordering::Relaxed);
@@ -536,7 +542,10 @@ fn copy_frame(
     info: &ffi::MediaInfo,
 ) -> Result<(), String> {
     let need = frame_bytes(pump.width, pump.height).ok_or_else(|| {
-        format!("video frame {}x{} has no usable RGBA size", pump.width, pump.height)
+        format!(
+            "video frame {}x{} has no usable RGBA size",
+            pump.width, pump.height
+        )
     })?;
     ensure_scratch(&mut pump.scratch, need as usize, &shared.allocations);
     let epoch = shared.mailbox.epoch();
@@ -675,7 +684,11 @@ mod tests {
             dir
         });
         let path = dir.join(name);
-        if path.is_file() && std::fs::metadata(&path).map(|meta| meta.len() > 1500).unwrap_or(false) {
+        if path.is_file()
+            && std::fs::metadata(&path)
+                .map(|meta| meta.len() > 1500)
+                .unwrap_or(false)
+        {
             return Some(path);
         }
         if !ffmpeg_available() {
@@ -708,7 +721,8 @@ mod tests {
                 .map(|status| status.success())
                 .unwrap_or(false)
         };
-        if !encoded("h264_videotoolbox", &["-b:v", "2M"]) && !encoded("libx264", &["-preset", "ultrafast", "-crf", "28"])
+        if !encoded("h264_videotoolbox", &["-b:v", "2M"])
+            && !encoded("libx264", &["-preset", "ultrafast", "-crf", "28"])
         {
             return None;
         }
@@ -740,12 +754,20 @@ mod tests {
         };
         let clip = NativeClip::open(&path).expect("open");
         assert!(clip.stats().first_frame < Duration::from_secs(3));
-        assert!(clip.latest_frame().is_some(), "first frame was not published");
+        assert!(
+            clip.latest_frame().is_some(),
+            "first frame was not published"
+        );
         assert!(!clip.note().is_empty());
         if clip.hardware() == 0 {
             assert!(clip.note().to_lowercase().contains("not available"));
         }
-        let full = full_rgba_bytes(clip.width(), clip.height(), clip.fps(), clip.duration_secs());
+        let full = full_rgba_bytes(
+            clip.width(),
+            clip.height(),
+            clip.fps(),
+            clip.duration_secs(),
+        );
         assert!(clip.resident_bytes() * 5 < full);
         assert_eq!(
             clip.resident_bytes(),
@@ -830,7 +852,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let bad = dir.join("not-a-video.mp4");
         std::fs::write(&bad, b"this is not an mp4").unwrap();
-        let error = NativeClip::open(&bad).expect_err("garbage must not play");
+        let error = match NativeClip::open(&bad) {
+            Err(err) => err,
+            Ok(_) => panic!("garbage must not play"),
+        };
         assert!(!error.is_empty(), "{error}");
         assert_eq!(players_alive(), 0);
         let Some(path) = one_second() else {
