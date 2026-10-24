@@ -413,12 +413,12 @@ impl MediaLibrary {
                 self.linked_files
                     .retain(|have| have != &canon && have.to_string_lossy() != item.path);
             }
-            return self.hide_library_item(&item);
+            return Ok(self.hide_library_item(&item));
         }
         let Some(path) = removable_pack_file(&self.pack_root, &item) else {
             // A show pack can point assets/ at an external library. Hiding the
             // row leaves that file where it is.
-            return self.hide_library_item(&item);
+            return Ok(self.hide_library_item(&item));
         };
         // Preserve imported footage even if an unsaved scene still refers to it.
         // A hidden recovery directory inside the pack keeps the move on the same
@@ -553,7 +553,7 @@ impl MediaLibrary {
     }
 
     /// Drop a library row and remember the id. The file stays on disk.
-    fn hide_library_item(&mut self, item: &LibraryItem) -> Result<String, String> {
+    fn hide_library_item(&mut self, item: &LibraryItem) -> String {
         let path = PathBuf::from(&item.path);
         for hide in related_ids(&path, &item.id) {
             if !self.hidden.iter().any(|id| id == &hide) {
@@ -564,10 +564,10 @@ impl MediaLibrary {
             self.hidden.push(item.id.clone());
         }
         self.persist_sources();
-        Ok(format!(
+        format!(
             "Removed {} from the library. The file was left where it is.",
             item.name
-        ))
+        )
     }
 
     fn prune_hidden(&mut self) {
@@ -729,7 +729,7 @@ fn scan_library(request: &ScanRequest) -> (Vec<LibraryItem>, Vec<String>) {
     for item in &mut items {
         item.scenes = scenes_for(item, &scenes);
     }
-    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    items.sort_by_key(|item| item.name.to_lowercase());
     let hidden = &request.hidden;
     items.retain(|item| !hidden.iter().any(|id| id == &item.id));
     let mut seen_ids = std::collections::HashSet::new();
@@ -773,7 +773,11 @@ pub fn library_json_path(pack_root: &Path) -> PathBuf {
 
 pub fn thumb_path(pack_root: &Path, thumb: &str) -> Option<PathBuf> {
     let name = Path::new(thumb).file_name()?.to_str()?;
-    if name != thumb || !name.ends_with(".jpg") {
+    if name != thumb
+        || !Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+    {
         return None;
     }
     let path = pack_root.join("assets/.thumbs").join(name);
@@ -1070,9 +1074,9 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn file_fingerprint(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
-    let mut head = [0u8; 65536];
+    let mut head = vec![0u8; 65536];
     let head_n = file.read(&mut head)?;
-    let mut tail = [0u8; 65536];
+    let mut tail = vec![0u8; 65536];
     let tail_n = if len > 65536 {
         file.seek(SeekFrom::End(-65536))?;
         file.read(&mut tail)?
@@ -1118,7 +1122,7 @@ fn describe_file(
     } else {
         let probed = probe_uncached(&seen.path, kind);
         let fingerprint = file_fingerprint(&seen.path).unwrap_or_default();
-        let entry = CachedProbe {
+        CachedProbe {
             path: seen.id.clone(),
             source_path: seen.path.to_string_lossy().to_string(),
             bytes: meta.len(),
@@ -1131,8 +1135,7 @@ fn describe_file(
             duration_secs: probed.duration_secs,
             status: probed.status,
             detail: probed.detail,
-        };
-        entry
+        }
     };
     next_cache.entries.push(probe.clone());
     let thumb = if probe.status == "ok" || probe.status == "too_large" {
@@ -1217,7 +1220,7 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
                         format!("would decode to {}", format_bytes(ram)),
                     )
                 } else {
-                    ("ok".into(), String::new())
+                    ("ok", String::new())
                 };
                 Probed {
                     width: meta.width,
@@ -1269,7 +1272,7 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
                 fps: 0.0,
                 duration_secs: 0.0,
                 status: "unsupported".into(),
-                detail: err.to_string(),
+                detail: err.clone(),
             },
         }
     }
@@ -1781,9 +1784,7 @@ fn linked_file_id(path: &Path) -> String {
 
 fn linked_file_seen(path: &Path) -> Option<SeenFile> {
     let name = path.file_name()?.to_str()?;
-    if media_kind(name).is_none() {
-        return None;
-    }
+    media_kind(name)?;
     Some(SeenFile {
         id: linked_file_id(path),
         path: path.to_path_buf(),
@@ -2116,6 +2117,7 @@ return collected"#;
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn drag_line_to_path(line: &str) -> Option<PathBuf> {
     let line = line.trim();
     if line.is_empty() {
@@ -2137,6 +2139,7 @@ fn drag_line_to_path(line: &str) -> Option<PathBuf> {
     canon.is_file().then_some(canon)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn file_url_to_path(url: &str) -> Option<PathBuf> {
     let rest = url.trim().strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
@@ -2146,6 +2149,7 @@ fn file_url_to_path(url: &str) -> Option<PathBuf> {
     Some(PathBuf::from(percent_decode(rest)))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -2525,11 +2529,13 @@ mod tests {
             let mut encoder =
                 gif::Encoder::new(&mut bytes, 2, 2, &[0, 0, 0, 255, 255, 255]).unwrap();
             for index in 0..frames {
-                let mut frame = gif::Frame::default();
-                frame.width = 2;
-                frame.height = 2;
-                frame.delay = 4;
-                frame.buffer = std::borrow::Cow::Owned(vec![index; 4]);
+                let frame = gif::Frame {
+                    width: 2,
+                    height: 2,
+                    delay: 4,
+                    buffer: std::borrow::Cow::Owned(vec![index; 4]),
+                    ..gif::Frame::default()
+                };
                 encoder.write_frame(&frame).unwrap();
             }
         }
@@ -2675,7 +2681,7 @@ mod tests {
         ];
         let message = admission_error(7, 0, 8, &clips).unwrap();
         assert!(message.contains("Nothing was added"));
-        assert!(message.contains("a.mp4") == false || message.contains("free layer"));
+        assert!(!message.contains("a.mp4") || message.contains("free layer"));
         assert!(message.contains("b.mp4"));
         assert!(message.contains("free layer"));
         assert!(admission_error(0, u64::MAX, 8, &clips[..1]).is_none());

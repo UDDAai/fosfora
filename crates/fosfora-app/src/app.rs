@@ -1242,11 +1242,6 @@ impl App {
                     view_changed = true;
                 }
             }
-            // Decoded on the media worker; the stack changes when a job lands.
-            for path in web_result.add_media {
-                self.add_media_layer(path);
-                view_changed = true;
-            }
             for ids in &web_result.add_library {
                 self.add_library_media(ids);
                 view_changed = true;
@@ -2872,39 +2867,6 @@ impl App {
         };
     }
 
-    /// Replace active layer content with media from a file path.
-    pub fn load_media_on_layer(&mut self, layer_idx: usize, path: std::path::PathBuf) {
-        if layer_idx >= self.layer_stack.layers.len() {
-            return;
-        }
-
-        match crate::media::decoder::load_media(&path) {
-            Ok(source) => {
-                let hdr_format = GpuContext::hdr_format();
-                let media_layer = MediaLayer::new(
-                    &self.gpu.device,
-                    &self.gpu.queue,
-                    hdr_format,
-                    self.gpu.surface_config.width,
-                    self.gpu.surface_config.height,
-                    source,
-                    path.clone(),
-                );
-                let file_name = media_layer.file_name.clone();
-                let layer = &mut self.layer_stack.layers[layer_idx];
-                // A new clip replaces whatever Remove effect would have restored.
-                layer.suspended_media = None;
-                layer.content = LayerContent::Media(Box::new(media_layer));
-                layer.param_store = ParamStore::new();
-                log::info!("Layer {}: loaded media '{}'", layer_idx, file_name);
-            }
-            Err(e) => {
-                log::error!("Failed to load media '{}': {e}", path.display());
-                self.status_error = Some((e, Instant::now()));
-            }
-        }
-    }
-
     /// Remove a layer, carrying its bindings with it.
     ///
     /// Wrapped rather than left to each call site: binding targets pin a layer by
@@ -3629,11 +3591,9 @@ impl App {
                 self.save_state = crate::show::scene_file::SaveState::Saved;
                 self.perform_pending_scene_change(pending);
             }
-            "save" => {
-                if self.save_open_scene().is_ok() {
-                    self.pending_scene_change = None;
-                    self.perform_pending_scene_change(pending);
-                }
+            "save" if self.save_open_scene().is_ok() => {
+                self.pending_scene_change = None;
+                self.perform_pending_scene_change(pending);
             }
             _ => {}
         }
@@ -5019,14 +4979,14 @@ impl App {
                                 format!("audio-bindings({preset_id})"),
                                 *layer,
                                 param.clone(),
-                            ))
+                            ));
                         }
                         crate::bindings::types::BindingTarget::LegacyParam { param, .. } => {
                             pack_audio_targets.push((
                                 format!("audio-bindings({preset_id})"),
                                 0,
                                 param.clone(),
-                            ))
+                            ));
                         }
                         _ => {}
                     }
@@ -5039,7 +4999,11 @@ impl App {
                 }
                 match &b.target {
                     crate::bindings::types::BindingTarget::Param { layer, param, .. } => {
-                        external.push((format!("binding-bus({})", b.source), *layer, param.clone()))
+                        external.push((
+                            format!("binding-bus({})", b.source),
+                            *layer,
+                            param.clone(),
+                        ));
                     }
                     crate::bindings::types::BindingTarget::LegacyParam { param, .. } => external
                         .push((
@@ -5108,19 +5072,6 @@ impl App {
         if let Some(colors) = opening {
             self.apply_palette_map(colors);
         }
-    }
-
-    /// True while palette automation owns bound color params: a pack is open
-    /// AND automation is on. External writers (MIDI/OSC/WS/binding-bus)
-    /// must skip palette-owned params while this holds — PaletteController
-    /// is the exclusive owner, enforced by the per-frame write order below.
-    /// Plan p3-web-control contract probe: true while the show clock owns
-    /// bound color params (web UI reads this to render the automation badge).
-    /// Test-only for now — the native + web panels read `auto_enabled` off
-    /// the `show` snapshot instead — so this stays out of normal builds.
-    #[cfg(test)]
-    pub fn palette_automating(&self) -> bool {
-        self.show.as_ref().is_some_and(|s| s.auto_enabled)
     }
 
     /// Palette-owned (layer, param) pairs for the ownership guard, or `None`

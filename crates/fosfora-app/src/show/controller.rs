@@ -76,10 +76,8 @@ impl ShowController {
     }
 
     /// Plan p1-paths: every relative show-pack path resolves against the
-    /// show.json directory. The validator's media preflight calls the
-    /// standalone `validation::media_exists` twin (same semantics). Preset
-    /// load uses this so a pack-relative `media_path` is not looked up from
-    /// the process working directory.
+    /// show.json directory. Preset load uses this so a pack-relative
+    /// `media_path` is not looked up from the process working directory.
     pub fn resolve_path(&self, stored: &str) -> PathBuf {
         crate::media::library::resolve_pack_media_path(&self.pack_root, stored)
     }
@@ -127,13 +125,6 @@ impl ShowController {
             .extend(hibernation_acceptance(&self.definition));
         self.last_report = report.clone();
         report
-    }
-
-    /// Test-only seam for p1-showclock/p1-ui unit tests (production reads
-    /// `snapshot().elapsed_ms` instead, so this stays out of normal builds).
-    #[cfg(test)]
-    pub fn elapsed_ms_at(&self, now: Instant) -> u128 {
-        self.clock.elapsed_at(now).as_millis()
     }
 
     /// (layer, param) pairs owned by palette automation, for conflict scans.

@@ -952,8 +952,8 @@ mod composite_decay_guard {
         // A count, so deleting the declarations does not turn this into a
         // vacuous pass over zero effects.
         assert_eq!(
-            declared, 14,
-            "expected the 14 additive members of the feedback family to declare \
+            declared, 15,
+            "expected the 15 additive members of the feedback family to declare \
              composite_decay (Genesis is wboit, Morph and Raster are alpha)",
         );
     }
@@ -966,7 +966,7 @@ mod composite_decay_guard {
     ///
     /// Note for anyone reconciling this against #2349's note, which quotes
     /// "0.505-0.588 at 30 fps and 1.837-1.990 at 120": that range does not
-    /// reproduce from the shipped defaults. The real spread over the 14 declared
+    /// reproduce from the shipped defaults. The real spread over the 15 declared
     /// effects is 0.526-0.625 and 1.775-1.949, because Cascade sits at k=0.60
     /// (plateau 0.625) and Array at k=0.70. The board figures are the right
     /// magnitude but were not derived from these defaults.
@@ -1014,7 +1014,7 @@ mod composite_decay_guard {
             checked += 1;
         }
 
-        assert_eq!(checked, 14, "expected 14 declared effects");
+        assert_eq!(checked, 15, "expected 15 declared effects");
         // Pin the magnitude so a declaration pointing at the wrong slider (which
         // would still self-consistently cancel) shows up as an implausible error.
         assert!(
@@ -2908,6 +2908,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
                 "a reaction-diffusion integrator, not an image: nothing decays, and its \
                  step size is scaled by frame_steps() so the chemistry advances the same \
                  amount per second at any frame rate",
+            ),
+            (
+                "organic_liquid_state.wgsl",
+                "a reaction-diffusion integrator, not an image: nothing decays; its \
+                 per-frame step is not frame-time scaled yet (follow-up)",
             ),
             (
                 "phosphor.wgsl",

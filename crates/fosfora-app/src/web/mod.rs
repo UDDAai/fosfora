@@ -212,9 +212,6 @@ impl WebSystem {
                 WsInMessage::ResolvePending { action } => {
                     result.resolve_pending = Some(action);
                 }
-                WsInMessage::AddMedia { path } => {
-                    result.add_media.push(path);
-                }
                 WsInMessage::RescanLibrary => {
                     result.rescan_library = true;
                 }
@@ -385,9 +382,6 @@ impl WebSystem {
                 }
                 WsInMessage::ResolvePending { action } => {
                     result.resolve_pending = Some(action);
-                }
-                WsInMessage::AddMedia { path } => {
-                    result.add_media.push(path);
                 }
                 WsInMessage::RescanLibrary => {
                     result.rescan_library = true;
