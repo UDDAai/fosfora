@@ -94,6 +94,7 @@ export type FullState = {
   requested_preset?: string | null
   loading_preset?: string | null
   load_error?: string | null
+  error_messages?: string[]
   command_drops?: number
   show?: ShowSnapshot | null
 }

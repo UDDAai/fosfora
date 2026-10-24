@@ -62,7 +62,6 @@ pub fn draw_panels(
     visible: bool,
     audio: &mut AudioSystem,
     params: &mut ParamStore,
-    shader_error: &Option<String>,
     uniforms: &ShaderUniforms,
     effect_loader: &EffectLoader,
     postprocess: &mut PostProcessDef,
@@ -150,7 +149,6 @@ pub fn draw_panels(
             .map(|t| (t.current_cue, t.cue_count));
         status_bar::draw_status_bar(
             ui,
-            shader_error,
             uniforms,
             particle_count,
             midi.config.enabled,

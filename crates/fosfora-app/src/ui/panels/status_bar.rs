@@ -45,7 +45,6 @@ const ERROR_DISPLAY_SECS: f64 = 6.0;
 #[allow(clippy::fn_params_excessive_bools)]
 pub fn draw_status_bar(
     ui: &mut Ui,
-    shader_error: &Option<String>,
     uniforms: &ShaderUniforms,
     particle_count: Option<u32>,
     midi_enabled: bool,
@@ -75,18 +74,6 @@ pub fn draw_status_bar(
             if elapsed < ERROR_DISPLAY_SECS {
                 ui.add_space(4.0);
                 ui.colored_label(tc.error, RichText::new(msg).size(SMALL_SIZE));
-            }
-        }
-        // Shader errors (dismissable)
-        else if let Some(err) = shader_error {
-            ui.add_space(4.0);
-            ui.colored_label(
-                tc.error,
-                RichText::new(format!("ERR: {err}")).size(SMALL_SIZE),
-            );
-            if ui.small_button("×").clicked() {
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(egui::Id::new("dismiss_shader_error"), true));
             }
         }
         // Preset loading indicator

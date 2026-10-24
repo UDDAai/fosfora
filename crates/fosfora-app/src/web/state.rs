@@ -34,9 +34,50 @@ pub struct FullState {
     pub requested_preset: Option<String>,
     pub loading_preset: Option<String>,
     pub load_error: Option<String>,
+    /// Short, de-duplicated error lines for the controller to show briefly.
+    pub error_messages: Vec<String>,
     pub command_drops: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show: Option<crate::show::controller::ShowSnapshot>,
+}
+
+/// Longest single error line sent to the controller.
+const ERROR_LINE_MAX: usize = 160;
+
+/// First non-empty line of `raw`, cut to [`ERROR_LINE_MAX`] characters.
+fn first_error_line(raw: &str) -> String {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    match line.char_indices().nth(ERROR_LINE_MAX) {
+        Some((end, _)) => format!("{}...", &line[..end]),
+        None => line.to_string(),
+    }
+}
+
+/// Short messages for the controller: the engine's load error split on its
+/// "; " joins, plus each failed layer shader as "effect: first error line"
+/// (never the shader source). Repeats are dropped, order is kept.
+pub fn error_messages(load_error: Option<&str>, layers: &[LayerInfo]) -> Vec<String> {
+    let loads = load_error.into_iter().flat_map(|e| e.split("; "));
+    let shaders = layers.iter().enumerate().filter_map(|(i, l)| {
+        let err = l.shader_error.as_deref()?;
+        let who = l
+            .effect_name
+            .clone()
+            .unwrap_or_else(|| format!("Layer {}", i + 1));
+        let err = err.strip_prefix("Load error: ").unwrap_or(err);
+        Some(format!("{who}: {}", first_error_line(err)))
+    });
+    let mut out: Vec<String> = Vec::new();
+    for msg in loads.map(first_error_line).chain(shaders) {
+        if !msg.is_empty() && !out.contains(&msg) {
+            out.push(msg);
+        }
+    }
+    out
 }
 
 pub fn engine_commit() -> &'static str {
@@ -307,6 +348,7 @@ pub fn build_full_state(
         requested_preset: workspace.requested_preset.clone(),
         loading_preset: workspace.loading_preset.clone(),
         load_error: workspace.load_error.clone(),
+        error_messages: error_messages(workspace.load_error.as_deref(), layer_infos),
         command_drops: workspace.command_drops,
         show: show.cloned(),
     };
@@ -473,6 +515,73 @@ fn build_params(store: &ParamStore) -> Vec<ParamInfo> {
 mod tests {
     use super::*;
     use crate::params::types::ParamDef;
+
+    fn layer_with_error(effect: Option<&str>, err: Option<&str>) -> LayerInfo {
+        LayerInfo {
+            name: "Layer".into(),
+            custom_name: None,
+            effect_index: Some(0),
+            effect_name: effect.map(str::to_string),
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            displace_amount: crate::gpu::layer::DEFAULT_DISPLACE_AMOUNT,
+            enabled: true,
+            locked: false,
+            pinned: false,
+            has_particles: false,
+            shader_error: err.map(str::to_string),
+            is_media: false,
+            media_file_name: None,
+            media_is_animated: false,
+            media_is_video: false,
+            media_is_live: false,
+            media_fit: String::new(),
+            media_width_scale: 1.0,
+            media_pos_x: 0.0,
+            media_pos_y: 0.0,
+            media_speed: 1.0,
+            media_looping: true,
+            media_preview: None,
+            chain: None,
+            needs_layer_below: false,
+        }
+    }
+
+    #[test]
+    fn error_messages_repeat_is_shown_once() {
+        let msgs = error_messages(Some("Missing media 'a.mp4'; Missing media 'a.mp4'"), &[]);
+        assert_eq!(msgs, vec!["Missing media 'a.mp4'".to_string()]);
+    }
+
+    #[test]
+    fn error_messages_shader_error_is_first_line_only() {
+        let raw = "Load error: parsing error: bad token\n  ┌─ wgsl:3:1\nfn main() {}";
+        let layers = [layer_with_error(Some("Aurora"), Some(raw))];
+        assert_eq!(
+            error_messages(None, &layers),
+            vec!["Aurora: parsing error: bad token".to_string()]
+        );
+    }
+
+    #[test]
+    fn error_messages_truncates_and_skips_clean_layers() {
+        let long = "x".repeat(500);
+        let layers = [
+            layer_with_error(Some("Ok"), None),
+            layer_with_error(None, Some(&long)),
+        ];
+        let msgs = error_messages(None, &layers);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].starts_with("Layer 2: xxx"));
+        assert!(msgs[0].ends_with("..."));
+        assert!(msgs[0].chars().count() < 200);
+    }
+
+    #[test]
+    fn error_messages_dedupes_across_sources() {
+        let layers = [layer_with_error(Some("A"), Some("boom"))];
+        assert_eq!(error_messages(Some("A: boom"), &layers), vec!["A: boom"]);
+    }
 
     #[test]
     fn audio_snapshot_contains_type() {

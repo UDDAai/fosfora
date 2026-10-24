@@ -2244,33 +2244,14 @@ impl App {
                 }
                 self.shader_watcher.drain_changes();
             }
-            Err(e) => {
+            Err(_) => {
                 // Update current_effect so the grid selection reflects the broken effect
                 if layer_idx == self.layer_stack.active_layer {
                     self.effect_loader.current_effect = Some(effect_index);
                 }
-                // Auto-open the editor so the user can fix the shader. Retries land
-                // here too, so don't re-open a file the editor already shows — that
-                // would reset the user's cursor and scroll on every save.
-                let passes = effect.normalized_passes();
-                if let Some(pass) = passes.first() {
-                    let path = self.effect_loader.resolve_shader_path(&pass.shader);
-                    let already_open = self.shader_editor.open
-                        && self.shader_editor.file_path.as_ref() == Some(&path);
-                    if already_open {
-                        self.shader_editor.compile_error = Some(e.clone());
-                    } else if let Ok(content) = std::fs::read_to_string(&path) {
-                        self.shader_editor.open_file(&effect.name, path, content);
-                        self.shader_editor.compile_error = Some(e.clone());
-                        // Load paired .pfx for tab switching
-                        if let Some(ref pfx_path) = effect.source_path {
-                            if let Ok(pfx_content) = std::fs::read_to_string(pfx_path) {
-                                self.shader_editor
-                                    .load_paired_pfx(pfx_path.clone(), pfx_content);
-                            }
-                        }
-                    }
-                }
+                // No auto-opened editor: it covers the projected output. The
+                // layer keeps `shader_error`, which the controller shows; an
+                // editor the operator opened picks it up in main.rs.
             }
         }
 
