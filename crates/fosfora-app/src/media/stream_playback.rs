@@ -2,18 +2,26 @@
 //! [`StreamClock`] (which frame to show) and [`StreamDecoder`] (the frames).
 //!
 //! A media layer owns one [`StreamPlayback`] and calls [`StreamPlayback::tick`] once per
-//! render frame. `tick` advances the clock, pulls queued frames with `try_recv` (it never
-//! blocks the render thread) and returns the bytes of a new frame only when one should
-//! be uploaded; `None` means keep the current texture. The shown frame stays in its
-//! pool buffer until the next shown frame replaces it, so RAM is
-//! [`StreamPlayback::resident_bytes`] whatever the clip length.
+//! render frame, paused or not (paused seeks, the end of the stream and errors are only
+//! processed by a tick). `tick` advances the clock, pulls queued frames with `try_recv`
+//! (it never blocks the render thread) and returns true when a new frame should be
+//! uploaded; the caller then reads it from [`StreamPlayback::current_frame`]. The shown
+//! frame stays in its pool buffer until the next shown frame replaces it, so RAM is
+//! [`StreamPlayback::resident_bytes`] whatever the clip length. `position` in
+//! `TransportState` is output only: the caller writes
+//! [`StreamPlayback::position_secs`] into it, and clears `playing` when
+//! [`StreamPlayback::finished`] turns true.
 //!
 //! One path starts a new epoch: a seek. It comes from the operator
 //! ([`StreamPlayback::seek`]), from the clock falling behind the decoder (catch-up),
 //! from a retry after a stream error, or from a looping change that needs a fresh
 //! stream. At most one seek runs per tick; the first reason in that order wins. After a
 //! seek the clock holds until the first frame of the new epoch arrives, and shows it
-//! even while paused.
+//! even while paused. A new epoch that yields no frame (and no error) within
+//! [`FIRST_FRAME_TIMEOUT`] of tick time counts as an error. Catch-up seeks are gated: the
+//! epoch must be [`CATCH_UP_DWELL_SECS`] old, and the wait doubles after each catch-up
+//! until [`CATCH_UP_QUIET_SECS`] pass without one, so a decoder that cannot keep up does
+//! not thrash.
 //!
 //! Looping is the producer's job (`-stream_loop`), fixed when a stream is opened. Turning
 //! it on mid-clip takes effect when the stream ends (the end is then a restart at the
@@ -23,8 +31,8 @@
 //!
 //! An error keeps the last frame on screen, is recorded in
 //! [`StreamPlayback::last_error`] and is retried once by seeking to the current position.
-//! If that fails too the clock freezes on the last frame until the operator seeks. The
-//! retry is re-armed after [`RETRY_REARM_SECS`] of frames, so a stream that breaks at
+//! If that fails too the clock freezes on the last frame until a seek starts a new epoch.
+//! The retry is re-armed after [`RETRY_REARM_SECS`] of frames, so a stream that breaks at
 //! the same spot cannot loop forever.
 //!
 //! Not yet wired into the app.
@@ -41,6 +49,16 @@ pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Seconds of shown frames after a retry before another failure may be retried again.
 pub const RETRY_REARM_SECS: f64 = 2.0;
+
+/// Epoch age (tick seconds) before the first catch-up seek is allowed.
+pub const CATCH_UP_DWELL_SECS: f64 = 1.0;
+
+/// Longest wait between catch-up seeks.
+const CATCH_UP_DWELL_MAX_SECS: f64 = 16.0;
+
+/// Tick seconds without a catch-up seek after which the wait drops back to
+/// [`CATCH_UP_DWELL_SECS`].
+pub const CATCH_UP_QUIET_SECS: f64 = 5.0;
 
 /// Tolerance for float error when comparing media times (0.1 ms), as in the clock.
 const EPS_SECS: f64 = 1e-4;
@@ -87,6 +105,14 @@ pub struct StreamPlayback {
     /// Media time of the shown frame, counted from its epoch's start (not wrapped).
     last_shown_secs: f64,
     operator_seek: Option<f64>,
+    /// Tick seconds since the last seek (or since open).
+    epoch_secs: f64,
+    /// No frame of the current epoch has been shown yet.
+    awaiting_first: bool,
+    /// Epoch age needed for the next catch-up seek.
+    catch_up_dwell_secs: f64,
+    /// Tick seconds since the last catch-up seek.
+    since_catch_up_secs: f64,
     /// The stream has nothing more to give: it ended, or ran past the end of a
     /// non-looping clip. Cleared by a seek.
     ended: bool,
@@ -190,6 +216,10 @@ impl StreamPlayback {
             stream_looping: looping,
             last_shown_secs: 0.0,
             operator_seek: None,
+            epoch_secs: 0.0,
+            awaiting_first: false,
+            catch_up_dwell_secs: CATCH_UP_DWELL_SECS,
+            since_catch_up_secs: CATCH_UP_QUIET_SECS,
             ended: false,
             retry_due: false,
             retry_spent: false,
@@ -208,10 +238,22 @@ impl StreamPlayback {
         &self.held
     }
 
-    /// Advance by `dt_secs` and return the bytes of a new frame to upload, if any.
-    /// `transport.direction` is ignored (forward only) and `position` is output only;
-    /// when [`StreamPlayback::finished`] turns true the caller clears `playing`.
-    pub fn tick(&mut self, dt_secs: f32, transport: &TransportState) -> Option<&[u8]> {
+    /// Advance by `dt_secs`. Returns true when a new frame is on screen and should be
+    /// uploaded from [`StreamPlayback::current_frame`]; false means keep the texture.
+    /// Call it every render frame, paused or not. `transport.direction` is ignored
+    /// (forward only).
+    pub fn tick(&mut self, dt_secs: f32, transport: &TransportState) -> bool {
+        let tick_secs = if dt_secs.is_finite() {
+            f64::from(dt_secs.max(0.0))
+        } else {
+            0.0
+        };
+        self.epoch_secs += tick_secs;
+        self.since_catch_up_secs += tick_secs;
+        if self.since_catch_up_secs >= CATCH_UP_QUIET_SECS {
+            self.catch_up_dwell_secs = CATCH_UP_DWELL_SECS;
+        }
+
         // Seeks due before the drain: the operator's, and a looping change.
         let mut seek = self.operator_seek.take().map(|s| (SeekReason::Operator, s));
         if transport.looping != self.looping {
@@ -235,6 +277,17 @@ impl StreamPlayback {
 
         let shown = self.drain();
 
+        // A seek that yields neither a frame nor an error would freeze playback silently.
+        if self.awaiting_first
+            && !self.failed
+            && self.epoch_secs >= FIRST_FRAME_TIMEOUT.as_secs_f64()
+        {
+            self.on_error(format!(
+                "no frame within {} s after seek",
+                FIRST_FRAME_TIMEOUT.as_secs()
+            ));
+        }
+
         if !seeked {
             let due = if self.retry_due {
                 Some((SeekReason::Retry, self.clock.position_secs()))
@@ -243,14 +296,17 @@ impl StreamPlayback {
             } else if self.ended || self.failed {
                 None
             } else {
-                self.clock.wants_seek().map(|s| (SeekReason::CatchUp, s))
+                self.clock
+                    .wants_seek()
+                    .filter(|_| self.epoch_secs >= self.catch_up_dwell_secs)
+                    .map(|s| (SeekReason::CatchUp, s))
             };
             if let Some((reason, secs)) = due {
                 self.do_seek(secs, reason);
             }
         }
 
-        if shown { Some(&self.held) } else { None }
+        shown
     }
 
     /// Jump to `secs` (wrapped into the clip when looping, clamped otherwise). It runs
@@ -260,7 +316,9 @@ impl StreamPlayback {
         self.operator_seek = Some(secs);
     }
 
-    /// True once a non-looping clip has played to its end.
+    /// True once a non-looping clip has played to its end. It can turn true up to one
+    /// frame before the clock does (when the stream reports its end). Afterwards a seek,
+    /// for example `seek(0.0)`, is needed before playing again.
     pub fn finished(&self) -> bool {
         self.clock.finished() || (self.ended && !self.looping)
     }
@@ -345,6 +403,7 @@ impl StreamPlayback {
         self.last_shown_secs = secs;
         self.held = frame.data; // the previous frame goes back to the pool
         self.last_error = None;
+        self.awaiting_first = false;
         if self.retry_spent {
             self.shown_since_retry += 1;
             if self.shown_since_retry as f64 >= RETRY_REARM_SECS * self.fps {
@@ -355,6 +414,7 @@ impl StreamPlayback {
 
     fn on_error(&mut self, message: String) {
         self.last_error = Some(message);
+        self.awaiting_first = false;
         if self.retry_spent {
             self.failed = true;
         } else {
@@ -373,15 +433,23 @@ impl StreamPlayback {
         self.decoder.seek(epoch, self.clock.start_secs());
         self.stream_looping = self.looping;
         self.pending = None; // frame of the old epoch: back to the pool
+        self.last_shown_secs = self.clock.start_secs();
+        self.epoch_secs = 0.0;
+        self.awaiting_first = true;
         self.ended = false;
         self.retry_due = false;
+        self.failed = false; // a new epoch is a fresh stream; retry_spent stays
         match reason {
             SeekReason::Operator => {
-                self.failed = false;
                 self.retry_spent = false;
                 self.stats.seeks += 1;
             }
-            SeekReason::CatchUp => self.stats.seeks += 1,
+            SeekReason::CatchUp => {
+                self.stats.seeks += 1;
+                self.catch_up_dwell_secs =
+                    (self.catch_up_dwell_secs * 2.0).min(CATCH_UP_DWELL_MAX_SECS);
+                self.since_catch_up_secs = 0.0;
+            }
             SeekReason::Restart => self.stats.restarts += 1,
             SeekReason::Retry => {
                 self.retry_spent = true;
@@ -398,6 +466,7 @@ mod tests {
     use crate::media::stream_decoder::{POOL_BUFFERS, QUEUE_DEPTH};
     use crossbeam_channel::{Receiver, bounded};
     use std::io::{self, Read};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     const W: u32 = 2;
@@ -515,7 +584,7 @@ mod tests {
     {
         let calls = Calls::default();
         let p = producer(duration, calls.clone(), script);
-        let pb = StreamPlayback::open(W, H, FPS, duration, looping, p).unwrap();
+        let pb = StreamPlayback::open_with_timeout(W, H, FPS, duration, looping, p, WAIT).unwrap();
         (pb, calls)
     }
 
@@ -550,7 +619,7 @@ mod tests {
     /// One paced tick at 60 Hz. Returns the clip index of the frame to upload.
     fn step(pb: &mut StreamPlayback, t: &TransportState) -> Option<u64> {
         wait_ready(pb);
-        pb.tick(DT, t).map(abs_index)
+        pb.tick(DT, t).then(|| abs_index(pb.current_frame()))
     }
 
     /// Paced ticks until `done`, collecting the shown frame indexes.
@@ -722,14 +791,16 @@ mod tests {
             })
         });
         let t = transport(true, false);
-        // Virtual time runs on with no new frames: about half a second behind, the
-        // playback gives up on the stream and seeks.
-        let deadline = Instant::now() + WAIT;
+        // Virtual time runs on with no new frames. Once the epoch is old enough and half
+        // a second behind, the playback gives up on the stream and seeks. No real time
+        // is involved: the test ticks fast and the outcome depends on tick seconds only.
+        let mut ticks = 0;
         while pb.stats().seeks == 0 {
-            assert!(Instant::now() < deadline, "no catch-up seek");
+            ticks += 1;
+            assert!(ticks < 600, "no catch-up seek");
             pb.tick(DT, &t);
-            std::thread::sleep(Duration::from_millis(1));
         }
+        assert!(ticks >= 55, "seeked after only {ticks} ticks"); // the 1 s dwell
         wait_for("the second producer call", || {
             calls.lock().unwrap().len() == 2
         });
@@ -781,10 +852,7 @@ mod tests {
             assert!((0.0..1.0).contains(&calls[1].0), "{calls:?}");
         }
         // Played out to the last frame of the clip, then stopped.
-        wait_for("the last frame", || {
-            pb.tick(DT, &off);
-            abs_index(pb.current_frame()) == 29
-        });
+        step_until(&mut pb, &off, |pb| abs_index(pb.current_frame()) == 29);
         for _ in 0..20 {
             assert_eq!(step(&mut pb, &off), None);
         }
@@ -807,7 +875,7 @@ mod tests {
         // The still-looping stream is no longer read: its queue fills and it blocks.
         wait_for("a full queue", || pb.decoder.queued() == QUEUE_DEPTH);
         for _ in 0..20 {
-            assert_eq!(pb.tick(DT, &off), None);
+            assert!(!pb.tick(DT, &off));
         }
         assert_eq!(pb.decoder.queued(), QUEUE_DEPTH);
         assert_eq!(abs_index(pb.current_frame()), 29);
@@ -850,7 +918,7 @@ mod tests {
         // Failed: the last frame stays, the clock is frozen and nobody retries again.
         let pos = pb.position_secs();
         for _ in 0..60 {
-            assert_eq!(pb.tick(DT, &t), None);
+            assert!(!pb.tick(DT, &t));
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(pb.position_secs(), pos);
@@ -895,5 +963,192 @@ mod tests {
         assert!(pb.last_error().is_none());
         assert_eq!(calls.lock().unwrap().len(), 3);
         assert_eq!(pb.stats().seeks, 1);
+    }
+
+    /// Stalls forever on the epochs picked by `stalled` (a seek, retry or restart whose
+    /// producer succeeds but never yields a frame).
+    fn stalling(stalled: fn(usize) -> bool) -> impl FnMut(usize) -> Result<Opts, String> {
+        move |n| {
+            Ok(Opts {
+                stall_at: stalled(n).then_some(0),
+                ..Opts::default()
+            })
+        }
+    }
+
+    #[test]
+    fn an_epoch_without_a_frame_times_out_and_is_retried() {
+        let (mut pb, calls) = start_with(10.0, false, stalling(|n| n == 1));
+        let t = transport(true, false);
+        pb.seek(2.0);
+        pb.tick(DT, &t);
+        // Let the seek's stream start before time runs, so the producer calls stay in order.
+        wait_for("the seek's producer call", || {
+            calls.lock().unwrap().len() == 2
+        });
+        // Only virtual time passes: the seek's stream yields nothing and never errors.
+        let mut ticks = 0;
+        while pb.stats().restarts == 0 {
+            ticks += 1;
+            assert!(ticks < 400, "no timeout");
+            pb.tick(DT, &t);
+        }
+        assert!(ticks >= 175, "timed out after {ticks} ticks"); // FIRST_FRAME_TIMEOUT
+        assert_eq!(pb.last_error(), Some("no frame within 3 s after seek"));
+
+        // The retry succeeds: playback resumes at the sought position.
+        step_until(&mut pb, &t, |pb| abs_index(pb.current_frame()) >= 65);
+        assert!(pb.last_error().is_none());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(0.0, false), (2.0, false), (2.0, false)]
+        );
+    }
+
+    #[test]
+    fn two_silent_epochs_in_a_row_fail_and_freeze() {
+        let (mut pb, calls) = start_with(10.0, false, stalling(|n| n >= 1));
+        let t = transport(true, false);
+        pb.seek(2.0);
+        pb.tick(DT, &t);
+        wait_for("the seek's producer call", || {
+            calls.lock().unwrap().len() == 2
+        });
+        let mut ticks = 0;
+        while !pb.failed {
+            ticks += 1;
+            assert!(ticks < 800, "never failed");
+            pb.tick(DT, &t);
+        }
+        assert_eq!(pb.last_error(), Some("no frame within 3 s after seek"));
+        assert_eq!(pb.stats().restarts, 1);
+        assert_eq!(abs_index(pb.current_frame()), 0);
+        // Frozen on the last frame; the timeout does not fire again.
+        let pos = pb.position_secs();
+        for _ in 0..600 {
+            assert!(!pb.tick(DT, &t));
+        }
+        assert_eq!(pb.position_secs(), pos);
+        assert_eq!(pb.stats().restarts, 1);
+        wait_for("both producer calls", || calls.lock().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn a_restart_clears_a_failed_stream() {
+        // The retry (call 1) plays past the wrap, then breaks: failed at once, as the
+        // retry is spent. Looping off then restarts a healthy stream.
+        let (mut pb, calls) = start_with(1.0, true, |n| {
+            Ok(Opts {
+                fail_at: match n {
+                    0 => Some(5),
+                    1 => Some(30),
+                    _ => None,
+                },
+                ..Opts::default()
+            })
+        });
+        let on = transport(true, true);
+        step_until(&mut pb, &on, |pb| pb.failed);
+        assert_eq!(pb.stats().restarts, 1);
+        assert!(pb.last_error().is_some());
+        assert!(pb.wrapped());
+
+        let off = transport(true, false);
+        step_until(&mut pb, &off, |pb| pb.finished());
+        assert!(!pb.failed);
+        assert_eq!(pb.stats().restarts, 2);
+        step_until(&mut pb, &off, |pb| abs_index(pb.current_frame()) == 29);
+        assert!(pb.last_error().is_none());
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(!calls[2].1);
+    }
+
+    #[test]
+    fn a_seek_resets_the_wrapped_flag_at_once() {
+        let (mut pb, calls) = start(1.0, true);
+        let on = transport(true, true);
+        step_until(&mut pb, &on, |pb| abs_index(pb.current_frame()) >= 40);
+        // Seek, then switch looping off before the new stream has shown a frame.
+        pb.seek(0.2);
+        pb.tick(DT, &on);
+        pb.tick(DT, &transport(true, false));
+        assert_eq!(pb.stats().restarts, 0);
+        wait_for("the seek's producer call", || {
+            calls.lock().unwrap().len() == 2
+        });
+    }
+
+    /// A frame stream that hands out frames only as fast as the test grants credit, so
+    /// a stream can be "half as fast as playback needs" in virtual time.
+    struct Metered {
+        inner: Box<dyn Read + Send>,
+        credit: Arc<AtomicU64>,
+        taken: Arc<AtomicU64>,
+        got: usize,
+    }
+
+    impl Read for Metered {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.got == 0 {
+                let taken = self.taken.load(Ordering::SeqCst);
+                let allowed = self.credit.load(Ordering::SeqCst) > taken
+                    && self
+                        .taken
+                        .compare_exchange(taken, taken + 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok();
+                if !allowed {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+            }
+            let n = self.inner.read(buf)?;
+            self.got = (self.got + n) % FRAME_BYTES;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_decoder_at_half_rate_does_not_thrash_with_seeks() {
+        let credit = Arc::new(AtomicU64::new(1)); // frame 0 for open
+        let taken = Arc::new(AtomicU64::new(0));
+        let (c, tk) = (credit.clone(), taken.clone());
+        let producer = move |start: f64, looping: bool| {
+            let FrameSource { reader, kill } = source(600.0, start, looping, Opts::default());
+            let reader = Box::new(Metered {
+                inner: reader,
+                credit: c.clone(),
+                taken: tk.clone(),
+                got: 0,
+            });
+            Ok(FrameSource { reader, kill })
+        };
+        let mut pb =
+            StreamPlayback::open_with_timeout(W, H, FPS, 600.0, true, producer, WAIT).unwrap();
+
+        // 30 s of virtual time at 60 Hz; the stream delivers 15 frames per second where
+        // 30 are needed, so it falls behind by half a second every second.
+        let t = transport(true, true);
+        let mut shown = 0;
+        for k in 0..1800 {
+            if k % 4 == 3 {
+                let granted = credit.fetch_add(1, Ordering::SeqCst) + 1;
+                wait_for("the stream to use its credit", || {
+                    taken.load(Ordering::SeqCst) >= granted
+                });
+            }
+            shown += u32::from(pb.tick(DT, &t));
+        }
+        let stats = pb.stats();
+        assert!(stats.seeks >= 2, "never caught up: {stats:?}");
+        // Ungated this would seek about every 1.1 s (27 times).
+        assert!(stats.seeks <= 12, "thrashing: {stats:?}");
+        assert_eq!(stats.restarts, 0);
+        // A stream this slow only gets its first frame of each epoch on time; the rest
+        // arrive late and are dropped by the clock until the next catch-up.
+        assert!(
+            shown >= stats.seeks as u32,
+            "{shown} frames shown; {stats:?}"
+        );
+        assert!(pb.last_error().is_none());
     }
 }
