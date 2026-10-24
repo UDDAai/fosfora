@@ -259,7 +259,10 @@ mod tests {
     fn concurrent_decode_peak_uses_largest_two_not_whole_show() {
         assert_eq!(max_concurrent_preset_bytes(&[]), 0);
         assert_eq!(max_concurrent_preset_bytes(&[1_000]), 1_000);
-        assert_eq!(max_concurrent_preset_bytes(&[1_000, 4_000, 2_000, 3_000]), 7_000);
+        assert_eq!(
+            max_concurrent_preset_bytes(&[1_000, 4_000, 2_000, 3_000]),
+            7_000
+        );
         assert_eq!(max_concurrent_preset_bytes(&[u64::MAX, 1]), u64::MAX);
     }
 

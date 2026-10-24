@@ -286,12 +286,25 @@ impl ChainBadge {
     }
 }
 
+/// A clip that was on this layer when an effect replaced it.
+///
+/// Remove effect puts the clip back. The decoded frames stay here so the
+/// picture does not go blank while the effect is up, and so the clip is not
+/// decoded a second time.
+pub struct SuspendedMedia {
+    pub media: Box<MediaLayer>,
+    pub postprocess: PostProcessDef,
+}
+
 /// A single compositing layer. Owns its own rendering pipeline and parameters.
 pub struct Layer {
     pub name: String,
     pub custom_name: Option<String>,
     pub param_store: ParamStore,
     pub content: LayerContent,
+    /// Set when an effect replaces a playing clip. Cleared when that clip
+    /// returns, or when a different clip is loaded onto the layer.
+    pub suspended_media: Option<SuspendedMedia>,
     pub blend_mode: BlendMode,
     pub opacity: f32,
     /// Warp strength for the displacement blend modes (#1478). Ignored by the
@@ -316,6 +329,7 @@ impl Layer {
             custom_name: None,
             param_store,
             content: LayerContent::Effect(Box::new(effect)),
+            suspended_media: None,
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             displace_amount: DEFAULT_DISPLACE_AMOUNT,
@@ -334,6 +348,7 @@ impl Layer {
             custom_name: None,
             param_store: ParamStore::new(),
             content: LayerContent::Media(Box::new(media)),
+            suspended_media: None,
             blend_mode: BlendMode::Normal,
             opacity: 1.0,
             displace_amount: DEFAULT_DISPLACE_AMOUNT,
@@ -386,6 +401,15 @@ impl Layer {
     /// Check if this is a media layer.
     pub fn is_media(&self) -> bool {
         matches!(&self.content, LayerContent::Media(_))
+    }
+
+    /// The clip on screen, plus a clip parked behind an effect that replaced it.
+    pub fn resident_media(&self) -> impl Iterator<Item = &MediaLayer> + '_ {
+        self.as_media().into_iter().chain(
+            self.suspended_media
+                .as_ref()
+                .map(|parked| parked.media.as_ref()),
+        )
     }
 
     /// Get effect_index (None for non-effect layers).

@@ -440,7 +440,14 @@ fn is_control_document(path: &str) -> bool {
     };
     matches!(
         path,
-        "/" | "/index.html" | "/control" | "/layers" | "/look" | "/picture" | "/library" | "/show"
+        "/" | "/index.html"
+            | "/control"
+            | "/layers"
+            | "/effects"
+            | "/look"
+            | "/picture"
+            | "/library"
+            | "/show"
     )
 }
 
@@ -539,6 +546,7 @@ mod tests {
         for path in [
             "/",
             "/layers",
+            "/effects",
             "/look",
             "/picture",
             "/library",

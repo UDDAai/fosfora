@@ -186,6 +186,11 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let id = v.get("id")?.as_str()?.to_string();
             Some(WsInMessage::RemoveLibraryItem { id })
         }
+        "rename_library_item" => {
+            let id = v.get("id")?.as_str()?.to_string();
+            let name = v.get("name")?.as_str()?.to_string();
+            Some(WsInMessage::RenameLibraryItem { id, name })
+        }
         "save_scene" => Some(WsInMessage::SaveScene),
         "set_workspace_mode" => {
             let mode = v.get("mode")?.as_str()?.to_string();

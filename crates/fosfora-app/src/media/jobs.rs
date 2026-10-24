@@ -42,10 +42,25 @@ impl MediaBudget {
     }
 
     /// 6 GB, or 40% of physical memory when that is less.
+    ///
+    /// `FOSFORA_DECODE_BUDGET_PERCENT` (set by `make server-start`) uses that
+    /// share of RAM and does not apply the 6 GB cap. Stopping the process
+    /// drops the variable, so the next launch uses the normal cap.
     pub fn for_this_machine() -> Self {
-        let limit = physical_memory()
-            .map(|bytes| (bytes / 5 * 2).min(MAX_DECODED_RAM))
-            .unwrap_or(MAX_DECODED_RAM);
+        let raw = std::env::var("FOSFORA_DECODE_BUDGET_PERCENT").ok();
+        let percent = raw.as_deref().and_then(parse_budget_percent);
+        if raw.is_some() && percent.is_none() {
+            log::warn!(
+                "FOSFORA_DECODE_BUDGET_PERCENT is not a percent from 1 to 90; using the normal budget"
+            );
+        }
+        let limit = budget_limit(physical_memory(), percent);
+        if let Some(percent) = percent {
+            log::info!(
+                "Decode budget override: {percent}% of RAM ({})",
+                format_bytes(limit)
+            );
+        }
         Self::new(limit)
     }
 
@@ -107,7 +122,23 @@ impl MediaBudget {
     }
 }
 
-fn physical_memory() -> Option<u64> {
+/// `Some` for a whole percent from 1 through 90. Anything else is ignored.
+pub fn parse_budget_percent(raw: &str) -> Option<u64> {
+    let percent: u64 = raw.trim().parse().ok()?;
+    (1..=90).contains(&percent).then_some(percent)
+}
+
+/// Decoded-RAM ceiling. An override is that percent of physical memory.
+/// The normal ceiling is 40% of RAM, and never more than [`MAX_DECODED_RAM`].
+pub fn budget_limit(physical: Option<u64>, percent_override: Option<u64>) -> u64 {
+    match (physical, percent_override) {
+        (Some(bytes), Some(percent)) => bytes.saturating_mul(percent) / 100,
+        (Some(bytes), None) => (bytes / 5 * 2).min(MAX_DECODED_RAM),
+        (None, _) => MAX_DECODED_RAM,
+    }
+}
+
+pub(crate) fn physical_memory() -> Option<u64> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -280,6 +311,38 @@ fn run_job(job: MediaJob, budget: &MediaBudget) -> MediaJobResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::library::MAX_CLIP_RAM;
+
+    #[test]
+    fn normal_budget_stays_at_most_six_gigabytes() {
+        let sixteen = 16 * 1024 * 1024 * 1024;
+        assert_eq!(budget_limit(Some(sixteen), None), MAX_DECODED_RAM);
+        let eight = 8 * 1024 * 1024 * 1024;
+        assert_eq!(budget_limit(Some(eight), None), eight / 5 * 2);
+        assert_eq!(budget_limit(None, Some(70)), MAX_DECODED_RAM);
+    }
+
+    #[test]
+    fn percent_override_skips_the_six_gigabyte_cap() {
+        let sixteen = 16 * 1024 * 1024 * 1024;
+        let elevated = budget_limit(Some(sixteen), Some(70));
+        assert_eq!(elevated, sixteen.saturating_mul(70) / 100);
+        assert!(elevated > MAX_DECODED_RAM);
+        assert_eq!(parse_budget_percent("70"), Some(70));
+        assert_eq!(parse_budget_percent(" 70 "), Some(70));
+        assert_eq!(parse_budget_percent("0"), None);
+        assert_eq!(parse_budget_percent("91"), None);
+        assert_eq!(parse_budget_percent("nope"), None);
+    }
+
+    #[test]
+    fn a_55_second_720p_clip_fits_one_elevated_slot() {
+        let sixteen = 16 * 1024 * 1024 * 1024;
+        let session = budget_limit(Some(sixteen), Some(70)).max(MAX_CLIP_RAM);
+        let slumber = 1280u64 * 720 * 4 * 1333;
+        assert!(slumber > MAX_CLIP_RAM);
+        assert!(slumber < session);
+    }
 
     #[test]
     fn budget_counts_resident_and_in_flight_together() {

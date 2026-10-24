@@ -7,12 +7,12 @@ import { Separator } from '@/components/ui/separator'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { FosforaProvider, useFosfora } from '@/fosfora/client'
 import { clock } from '@/fosfora/types'
-import { LayersPanel, LibraryPanel, LookPanel, PicturePanel, SectionInfo, ShowPanel } from '@/panels'
+import { EffectsPanel, LayersPanel, LibraryPanel, PicturePanel, SectionInfo, ShowPanel } from '@/panels'
 
 const NAV = [
   { id: 'show', label: 'Show', icon: Clapperboard },
   { id: 'layers', label: 'Layers', icon: Layers },
-  { id: 'look', label: 'Look', icon: SlidersHorizontal },
+  { id: 'effects', label: 'Effects', icon: SlidersHorizontal },
   { id: 'picture', label: 'Picture', icon: Image },
   { id: 'library', label: 'Library', icon: Library },
 ] as const
@@ -25,6 +25,7 @@ const NAV_MAX = 320
 
 function pageFromPath(path: string): Section | null {
   const name = path.split('?')[0].replace(/\/+$/, '').replace(/^\//, '')
+  if (name === 'look') return 'effects'
   return NAV.some((item) => item.id === name) ? (name as Section) : null
 }
 
@@ -43,7 +44,10 @@ function Shell() {
   const mode = state?.workspace_mode === 'perform' ? 'perform' : 'prepare'
 
   useEffect(() => {
-    if (pageFromPath(window.location.pathname) == null) {
+    const path = window.location.pathname.replace(/\/+$/, '') || '/'
+    if (path === '/look') {
+      history.replaceState(null, '', '/effects')
+    } else if (pageFromPath(path) == null) {
       history.replaceState(null, '', '/layers')
     }
     const onPop = () => setSection(pageFromPath(window.location.pathname) ?? 'layers')
@@ -216,7 +220,7 @@ function Shell() {
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
           {section === 'layers' ? <LayersPanel /> : (
             <div className="min-h-0 flex-1 overflow-auto">
-              {section === 'look' ? <LookPanel /> : null}
+              {section === 'effects' ? <EffectsPanel /> : null}
               {section === 'picture' ? <PicturePanel /> : null}
               {section === 'library' ? <LibraryPanel /> : null}
               {section === 'show' ? <ShowPanel /> : null}

@@ -1300,10 +1300,17 @@ impl App {
                     paths.into_iter().map(std::path::PathBuf::from).collect();
                 if let Some(library) = &mut self.media_library {
                     match library.link_paths(&paths) {
-                        Ok(message) => self.status_error = Some((message, now)),
-                        Err(err) => self.status_error = Some((err, now)),
+                        Ok(message) => {
+                            self.load_error = None;
+                            self.status_error = Some((message, now));
+                        }
+                        Err(err) => {
+                            self.load_error = Some(err.clone());
+                            self.status_error = Some((err, now));
+                        }
                     }
                 }
+                view_changed = true;
             }
             for id in &web_result.remove_library {
                 if let Some(library) = &mut self.media_library {
@@ -1312,6 +1319,10 @@ impl App {
                         Err(err) => self.status_error = Some((err, now)),
                     }
                 }
+            }
+            for (id, name) in web_result.rename_library.clone() {
+                self.rename_library_item(&id, &name, now);
+                view_changed = true;
             }
             if let Some(mode) = web_result.workspace_mode.clone() {
                 self.workspace_mode = crate::show::scene_file::WorkspaceMode::parse(&mode);
@@ -1604,6 +1615,10 @@ impl App {
                 m.advance(dt);
                 m.upload_frame(&self.gpu.queue);
                 m.write_placement(&self.gpu.queue);
+            } else if let Some(parked) = layer.suspended_media.as_mut() {
+                // Keep the hidden clip in time so Remove effect shows the
+                // frame the show has reached, not the frame the effect replaced.
+                parked.media.advance(dt);
             }
         }
 
@@ -1628,6 +1643,11 @@ impl App {
                             if m.is_live() {
                                 m.set_live_frame(frame.data.clone());
                                 m.upload_frame(&self.gpu.queue);
+                            }
+                        } else if let Some(parked) = layer.suspended_media.as_mut() {
+                            if parked.media.is_live() {
+                                parked.media.set_live_frame(frame.data.clone());
+                                parked.media.upload_frame(&self.gpu.queue);
                             }
                         }
                     }
@@ -1777,6 +1797,11 @@ impl App {
                     let LayerContent::Effect(ref mut e) = layer.content else {
                         continue;
                     };
+                    // A compile started before Remove effect must not paint the
+                    // shader back onto the emptied layer.
+                    if e.effect_index.is_none() || e.pending_rebuild {
+                        continue;
+                    }
                     match result {
                         Ok(pipeline) => {
                             match e.pass_executor.swap_pass_pipeline(
@@ -1817,6 +1842,9 @@ impl App {
                     let LayerContent::Effect(ref mut e) = layer.content else {
                         continue;
                     };
+                    if e.effect_index.is_none() || e.pending_rebuild {
+                        continue;
+                    }
                     match result {
                         Ok(pipeline) => {
                             if let Some(ref mut ps) = e.pass_executor.particle_system {
@@ -2249,7 +2277,8 @@ impl App {
     }
 
     /// Drop the effect on one layer. The layer stays, with its opacity, blend,
-    /// and place in the stack. Media layers have no effect to remove.
+    /// and place in the stack. A clip the effect replaced comes back. Media
+    /// layers that were never an effect have nothing to remove.
     pub fn clear_layer_effect(&mut self, layer_idx: usize) -> bool {
         let Some(layer) = self.layer_stack.layers.get(layer_idx) else {
             return false;
@@ -2257,6 +2286,32 @@ impl App {
         if layer.locked || layer.effect_index().is_none() {
             return false;
         }
+        let removed_effect = layer
+            .effect_index()
+            .and_then(|idx| self.effect_loader.effects.get(idx))
+            .map(|effect| effect.name.clone());
+        let parked = self.layer_stack.layers[layer_idx].suspended_media.take();
+        if let Some(parked) = parked {
+            let media_name = parked.media.file_name.clone();
+            let layer = &mut self.layer_stack.layers[layer_idx];
+            layer.content = LayerContent::Media(parked.media);
+            layer.param_store = ParamStore::new();
+            layer.postprocess = parked.postprocess;
+            log::info!("Layer {layer_idx}: removed effect, restored '{media_name}'");
+        } else if !self.replace_layer_with_default(layer_idx) {
+            return false;
+        }
+        let _ = self.binding_bus.clear_preset_bindings_for_layer(layer_idx);
+        if layer_idx == self.layer_stack.active_layer {
+            self.effect_loader.current_effect = None;
+            self.post_process.enabled = self.layer_stack.layers[layer_idx].postprocess.enabled;
+        }
+        self.close_shader_editor_if_unused(removed_effect.as_deref());
+        true
+    }
+
+    /// Swap one layer for an empty default shader, keeping its stack slot.
+    fn replace_layer_with_default(&mut self, layer_idx: usize) -> bool {
         let fresh = {
             let ctx = crate::gpu::layer_builder::LayerBuildCtx {
                 device: &self.gpu.device,
@@ -2290,11 +2345,29 @@ impl App {
         slot.pinned = old.pinned;
         slot.postprocess = old.postprocess.clone();
         slot.chain = old.chain.take();
-        let _ = self.binding_bus.clear_preset_bindings_for_layer(layer_idx);
-        if layer_idx == self.layer_stack.active_layer {
-            self.effect_loader.current_effect = None;
-        }
         true
+    }
+
+    /// The shader editor draws on the output. Close it once nothing on the
+    /// stack is still running that effect, so the removed look leaves the screen.
+    fn close_shader_editor_if_unused(&mut self, effect_name: Option<&str>) {
+        let Some(effect_name) = effect_name else {
+            return;
+        };
+        if self.shader_editor.effect_name != effect_name {
+            return;
+        }
+        let still_used = self.layer_stack.layers.iter().any(|layer| {
+            layer
+                .effect_index()
+                .and_then(|idx| self.effect_loader.effects.get(idx))
+                .is_some_and(|effect| effect.name == effect_name)
+        });
+        // A failed load opens this editor on the output. Close it when the
+        // effect is gone, unless the operator has unsaved edits in the buffer.
+        if !still_used && !self.shader_editor.is_dirty() {
+            self.shader_editor.open = false;
+        }
     }
 
     /// Add a new empty layer with the default shader.
@@ -2359,6 +2432,46 @@ impl App {
     /// appears when [`App::poll_media_jobs`] takes the result.
     pub fn add_media_layer(&mut self, path: std::path::PathBuf) {
         self.submit_media(crate::media::jobs::MediaTarget::Add, vec![path]);
+    }
+
+    fn rename_library_item(&mut self, id: &str, name: &str, now: Instant) {
+        let renamed = {
+            let Some(library) = &mut self.media_library else {
+                return;
+            };
+            library.rename_item(id, name)
+        };
+        let renamed = match renamed {
+            Ok(renamed) => renamed,
+            Err(err) => {
+                self.load_error = Some(err.clone());
+                self.status_error = Some((err, now));
+                return;
+            }
+        };
+        for layer in &mut self.layer_stack.layers {
+            let Some(media) = layer.as_media_mut() else {
+                continue;
+            };
+            if renamed
+                .previous_paths
+                .iter()
+                .any(|old| old == &media.file_path)
+            {
+                media.file_path = renamed.new_file.clone();
+                media.file_name = renamed.new_name.clone();
+            }
+        }
+        for (_, preset) in &mut self.preset_store.presets {
+            for layer in &mut preset.layers {
+                rewrite_stored_media(&mut layer.media_path, &renamed.replacements);
+                rewrite_stored_media(&mut layer.particle_video_path, &renamed.replacements);
+                rewrite_stored_media(&mut layer.particle_image_path, &renamed.replacements);
+                rewrite_stored_media(&mut layer.obstacle_image_path, &renamed.replacements);
+            }
+        }
+        self.load_error = None;
+        self.status_error = Some((format!("Renamed to {}", renamed.new_name), now));
     }
 
     /// Add library clips in order. If any clip cannot fit, none are decoded.
@@ -2506,7 +2619,7 @@ impl App {
             .layer_stack
             .layers
             .iter()
-            .filter_map(|layer| layer.as_media())
+            .flat_map(|layer| layer.resident_media())
             .map(|media| {
                 let (w, h) = media.source.dimensions();
                 u64::from(w) * u64::from(h) * 4
@@ -2632,7 +2745,7 @@ impl App {
         self.layer_stack
             .layers
             .iter()
-            .filter_map(|layer| layer.as_media())
+            .flat_map(|layer| layer.resident_media())
             .map(decoded_media_layer_bytes)
             .sum()
     }
@@ -2700,7 +2813,7 @@ impl App {
             .layer_stack
             .layers
             .iter()
-            .any(|l| l.as_media().map_or(false, |m| m.is_live()));
+            .any(|layer| layer.resident_media().any(|media| media.is_live()));
         let obstacle_uses_cam = self.layer_stack.layers.iter().any(|l| {
             l.as_effect()
                 .and_then(|e| e.pass_executor.particle_system.as_ref())
@@ -2767,6 +2880,8 @@ impl App {
                 );
                 let file_name = media_layer.file_name.clone();
                 let layer = &mut self.layer_stack.layers[layer_idx];
+                // A new clip replaces whatever Remove effect would have restored.
+                layer.suspended_media = None;
                 layer.content = LayerContent::Media(Box::new(media_layer));
                 layer.param_store = ParamStore::new();
                 log::info!("Layer {}: loaded media '{}'", layer_idx, file_name);
@@ -4728,9 +4843,7 @@ impl App {
                                 .entry(path.clone())
                                 .or_insert_with(|| crate::media::library::plan_clip(&path));
                             if let Some(problem) = plan.problem.as_ref() {
-                                media_problems.push(format!(
-                                    "{preset_id} / {stored}: {problem}"
-                                ));
+                                media_problems.push(format!("{preset_id} / {stored}: {problem}"));
                             }
                             plan.ram_bytes
                         } else {
@@ -6059,6 +6172,15 @@ fn changes_touch_effect(
             .particles
             .as_ref()
             .is_some_and(|pd| touches(&pd.compute_shader))
+}
+
+fn rewrite_stored_media(field: &mut Option<String>, replacements: &[(String, String)]) {
+    let Some(path) = field.as_mut() else {
+        return;
+    };
+    if let Some((_, next)) = replacements.iter().find(|(from, _)| from == path) {
+        *path = next.clone();
+    }
 }
 
 fn scene_name(id: &str) -> Result<String, String> {

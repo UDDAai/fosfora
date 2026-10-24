@@ -17,7 +17,30 @@ pub const MAX_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_LIBRARY_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const MAX_DECODED_RAM: u64 = 6 * 1024 * 1024 * 1024;
 pub const MAX_CLIP_RAM: u64 = 2 * 1024 * 1024 * 1024;
+
+/// 2 GB normally. While `FOSFORA_DECODE_BUDGET_PERCENT` is set, one clip may
+/// use that whole session budget. The sum of clips is still checked against it.
+pub fn max_clip_ram() -> u64 {
+    let Some(percent) = std::env::var("FOSFORA_DECODE_BUDGET_PERCENT")
+        .ok()
+        .as_deref()
+        .and_then(super::jobs::parse_budget_percent)
+    else {
+        return MAX_CLIP_RAM;
+    };
+    super::jobs::budget_limit(super::jobs::physical_memory(), Some(percent)).max(MAX_CLIP_RAM)
+}
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+/// A finished library rename. `replacements` are stored scene paths.
+#[derive(Clone, Debug)]
+pub struct LibraryRename {
+    /// Paths the open scene may still be holding for this file.
+    pub previous_paths: Vec<PathBuf>,
+    pub new_file: PathBuf,
+    pub new_name: String,
+    pub replacements: Vec<(String, String)>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LibraryItem {
@@ -229,6 +252,9 @@ impl MediaLibrary {
     /// Ask for a rescan. With a scanner it runs in the background and lands
     /// through [`MediaLibrary::poll`]; without one it runs now.
     pub fn request_rescan(&mut self) {
+        // Uploads reveal a hidden row by editing media-sources.json on the
+        // accept thread. Pick that up before the scan copies this list.
+        self.hidden = load_sources(&self.pack_root).hidden;
         if self.scanner.is_none() {
             if let Some(from) = self.import_wanted.take() {
                 import_folder(&self.pack_root, &from);
@@ -414,12 +440,78 @@ impl MediaLibrary {
         ))
     }
 
+    /// Rename the file on disk and point saved scenes at the new name.
+    /// The extension stays, so a video remains a video.
+    pub fn rename_item(&mut self, id: &str, requested: &str) -> Result<LibraryRename, String> {
+        let item = self
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| "That library item is not in the list".to_string())?;
+        let new_name = library_file_name(&item.name, requested)?;
+        if new_name == item.name {
+            return Err(format!("{} already has that name", item.name));
+        }
+        let raw = item_file(&self.pack_root, &item)
+            .ok_or_else(|| format!("{} is not available to rename", item.name))?;
+        let source = fs::canonicalize(&raw).unwrap_or(raw.clone());
+        let parent = source
+            .parent()
+            .ok_or_else(|| format!("{} has no folder", item.name))?
+            .to_path_buf();
+        let dest = parent.join(&new_name);
+        if dest.exists() {
+            let same = fs::canonicalize(&dest).ok().as_ref() == Some(&source);
+            if !same {
+                return Err(format!("{new_name} is already in that folder"));
+            }
+        }
+        let hits = collect_preset_renames(&self.pack_root, &source, &new_name);
+        if dest.exists() {
+            let temp = parent.join(format!(".{new_name}.rename-tmp"));
+            fs::rename(&source, &temp).map_err(|err| err.to_string())?;
+            if let Err(err) = fs::rename(&temp, &dest) {
+                let _ = fs::rename(&temp, &source);
+                return Err(err.to_string());
+            }
+        } else {
+            fs::rename(&source, &dest).map_err(|err| err.to_string())?;
+        }
+        if let Err(err) = apply_preset_renames(&hits) {
+            let _ = fs::rename(&dest, &source);
+            return Err(err);
+        }
+        let mut linked_changed = false;
+        for slot in &mut self.linked_files {
+            if slot == &raw || slot == &source {
+                *slot = dest.clone();
+                linked_changed = true;
+            }
+        }
+        if linked_changed {
+            self.write_sources();
+        }
+        let replacements: Vec<(String, String)> =
+            hits.into_iter().flat_map(|(_, pairs)| pairs).collect();
+        self.request_rescan();
+        let mut previous_paths = vec![raw, source];
+        previous_paths.dedup();
+        Ok(LibraryRename {
+            previous_paths,
+            new_file: dest,
+            new_name,
+            replacements,
+        })
+    }
+
     fn stage_link(&mut self, path: &Path) -> Result<bool, String> {
         let canon =
             fs::canonicalize(path).map_err(|_| format!("{} is not available", path.display()))?;
-        for hide in related_ids(&canon, "") {
-            self.hidden.retain(|id| id != &hide);
-        }
+        let revealed = reveal_ids(
+            &mut self.hidden,
+            &concealment_ids(&self.pack_root, &canon, ""),
+        );
         if canon.is_dir() {
             if self.linked_folders.iter().any(|have| have == &canon) {
                 return Ok(false);
@@ -434,10 +526,11 @@ impl MediaLibrary {
         if media_kind(name).is_none() {
             return Err(format!("{name} is not a video or image"));
         }
-        if self.linked_files.iter().any(|have| have == &canon)
+        let catalogued = self.linked_files.iter().any(|have| have == &canon)
             || path_is_in_pack(&self.pack_root, &canon)
-        {
-            return Ok(false);
+            || virtual_media_path(&self.pack_root, &canon).is_some();
+        if catalogued {
+            return Ok(revealed);
         }
         self.linked_files.push(canon);
         Ok(true)
@@ -741,6 +834,7 @@ pub fn commit_upload(
     let fingerprint = file_fingerprint(partial).map_err(|e| e.to_string())?;
     if let Some(existing) = find_fingerprint(pack_root, &fingerprint) {
         let _ = fs::remove_file(partial);
+        reveal_saved(pack_root, &existing.0);
         return Ok(UploadReport {
             id: existing.0,
             name: existing.1,
@@ -839,6 +933,7 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
         match probe_video_meta(path) {
             Ok(meta) => {
                 let ram = meta.decoded_bytes;
+                let cap = max_clip_ram();
                 let mut problem = None;
                 if meta.duration_secs > max_predecode_secs() {
                     problem = Some(format!(
@@ -846,7 +941,7 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
                         meta.duration_secs,
                         max_predecode_secs()
                     ));
-                } else if ram > MAX_CLIP_RAM {
+                } else if ram > cap {
                     problem = Some(format!(
                         "{}x{} {} × {} frames would decode to {}, over {} per clip",
                         meta.width,
@@ -854,7 +949,7 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
                         meta.pix_fmt,
                         meta.frames,
                         format_bytes(ram),
-                        format_bytes(MAX_CLIP_RAM)
+                        format_bytes(cap)
                     ));
                 }
                 ClipPlan {
@@ -873,14 +968,15 @@ pub fn plan_clip(path: &Path) -> ClipPlan {
         match image::image_dimensions(path) {
             Ok((width, height)) => {
                 let ram = u64::from(width) * u64::from(height) * 4;
+                let cap = max_clip_ram();
                 ClipPlan {
                     name,
                     ram_bytes: ram,
-                    problem: (ram > MAX_CLIP_RAM).then(|| {
+                    problem: (ram > cap).then(|| {
                         format!(
                             "would decode to {}, over {} per clip",
                             format_bytes(ram),
-                            format_bytes(MAX_CLIP_RAM)
+                            format_bytes(cap)
                         )
                     }),
                 }
@@ -1066,7 +1162,7 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
             Ok(meta) => {
                 let ram = meta.decoded_bytes;
                 let too_long = meta.duration_secs > max_predecode_secs();
-                let too_big = ram > MAX_CLIP_RAM;
+                let too_big = ram > max_clip_ram();
                 let (status, detail) = if too_long {
                     (
                         "too_large",
@@ -1106,7 +1202,7 @@ fn probe_uncached(path: &Path, kind: &str) -> Probed {
         match image::image_dimensions(path) {
             Ok((width, height)) => {
                 let ram = u64::from(width) * u64::from(height) * 4;
-                if ram > MAX_CLIP_RAM {
+                if ram > max_clip_ram() {
                     Probed {
                         width,
                         height,
@@ -1675,6 +1771,42 @@ fn related_ids(path: &Path, item_id: &str) -> Vec<String> {
     ids
 }
 
+/// Ids Remove may have stored for this file, including the portable
+/// `assets/video/…` alias of a primary-library clip.
+fn concealment_ids(pack_root: &Path, path: &Path, item_id: &str) -> Vec<String> {
+    let mut ids = related_ids(path, item_id);
+    if !item_id.is_empty() {
+        ids.push(format!("file:{item_id}"));
+    }
+    if let Some(virtual_id) = virtual_media_path(pack_root, path) {
+        ids.push(virtual_id.clone());
+        ids.push(format!("file:{virtual_id}"));
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn reveal_ids(hidden: &mut Vec<String>, ids: &[String]) -> bool {
+    let before = hidden.len();
+    hidden.retain(|have| !ids.iter().any(|id| id == have));
+    hidden.len() != before
+}
+
+/// Drop a hidden-row mark. The next library scan reloads this file.
+fn reveal_saved(pack_root: &Path, library_id: &str) {
+    let path = pack_root.join("media-sources.json");
+    let mut file = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SourceFile>(&text).ok())
+        .unwrap_or_default();
+    let ids = [library_id.to_string(), format!("file:{library_id}")];
+    if !reveal_ids(&mut file.hidden, &ids) {
+        return;
+    }
+    let _ = write_json(&path, &file);
+}
+
 fn path_is_in_pack(pack_root: &Path, path: &Path) -> bool {
     let Ok(root) = fs::canonicalize(pack_root) else {
         return false;
@@ -1690,6 +1822,136 @@ fn scenes_naming(pack_root: &Path, item: &LibraryItem) -> Vec<String> {
         }
     }
     used
+}
+
+const SCENE_MEDIA_KEYS: &[&str] = &[
+    "media_path",
+    "particle_video_path",
+    "particle_image_path",
+    "obstacle_image_path",
+];
+
+fn library_file_name(current: &str, requested: &str) -> Result<String, String> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested == "." || requested == ".." {
+        return Err("Type a file name".into());
+    }
+    if requested.contains('/') || requested.contains('\\') || requested.contains('\0') {
+        return Err("A file name cannot include a folder".into());
+    }
+    if requested.starts_with('.') {
+        return Err("A file name cannot start with a dot".into());
+    }
+    let ext = extension(current).ok_or_else(|| format!("{current} has no file type"))?;
+    let next = match extension(requested).as_deref() {
+        Some(got) if got == ext => requested.to_string(),
+        Some(_) => return Err(format!("Keep the .{ext} ending")),
+        None => format!("{requested}.{ext}"),
+    };
+    if next.chars().count() > 180 {
+        return Err("That name is too long".into());
+    }
+    if media_kind(&next).is_none() {
+        return Err("That is not a video or image name".into());
+    }
+    Ok(next)
+}
+
+fn renamed_label(stored: &str, new_name: &str) -> String {
+    if let Some(rest) = stored.strip_prefix("linked:") {
+        if let Some((source, _)) = rest.rsplit_once(':') {
+            return format!("linked:{source}:{new_name}");
+        }
+    }
+    if let Some(rest) = stored.strip_prefix("file:") {
+        let path = Path::new(rest).with_file_name(new_name);
+        return format!("file:{}", path.to_string_lossy().replace('\\', "/"));
+    }
+    Path::new(stored)
+        .with_file_name(new_name)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn preset_points_at(pack_root: &Path, stored: &str, file: &Path) -> bool {
+    let resolved = resolve_pack_media_path(pack_root, stored);
+    if resolved == file {
+        return true;
+    }
+    match (fs::canonicalize(&resolved), fs::canonicalize(file)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn collect_preset_renames(
+    pack_root: &Path,
+    file: &Path,
+    new_name: &str,
+) -> Vec<(PathBuf, Vec<(String, String)>)> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(pack_root.join("presets")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(layers) = value.get("layers").and_then(|layer| layer.as_array()) else {
+            continue;
+        };
+        let mut pairs = Vec::new();
+        for layer in layers {
+            for key in SCENE_MEDIA_KEYS {
+                let Some(stored) = layer.get(*key).and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                if !preset_points_at(pack_root, stored, file) {
+                    continue;
+                }
+                let next = renamed_label(stored, new_name);
+                if next != stored {
+                    pairs.push((stored.to_string(), next));
+                }
+            }
+        }
+        if !pairs.is_empty() {
+            out.push((path, pairs));
+        }
+    }
+    out
+}
+
+fn apply_preset_renames(hits: &[(PathBuf, Vec<(String, String)>)]) -> Result<(), String> {
+    for (path, pairs) in hits {
+        let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|err| err.to_string())?;
+        if let Some(layers) = value
+            .get_mut("layers")
+            .and_then(|layer| layer.as_array_mut())
+        {
+            for layer in layers {
+                for key in SCENE_MEDIA_KEYS {
+                    let Some(stored) = layer.get(*key).and_then(|value| value.as_str()) else {
+                        continue;
+                    };
+                    if let Some((_, next)) = pairs.iter().find(|(from, _)| from == stored) {
+                        layer[*key] = serde_json::Value::String(next.clone());
+                    }
+                }
+            }
+        }
+        write_json(path, &value)?;
+    }
+    Ok(())
 }
 
 fn removable_pack_file(pack_root: &Path, item: &LibraryItem) -> Option<PathBuf> {
@@ -1743,31 +2005,47 @@ pub fn finder_drag_paths() -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn macos_drag_paths() -> Vec<String> {
+    // The browser drop does not include a filesystem path. Finder puts the
+    // paths on the drag pasteboard for the whole drag, including at drop.
     let script = r#"use framework "Foundation"
 set pb to current application's NSPasteboard's pasteboardWithName:"NSDragPboard"
 set collected to ""
 try
+  set urls to pb's readObjectsForClasses:{current application's NSURL} options:(missing value)
+  if urls is not missing value then
+    repeat with oneURL in urls
+      try
+        set collected to collected & ((oneURL's |path|()) as text) & linefeed
+      end try
+    end repeat
+  end if
+end try
+try
   set boardItems to pb's pasteboardItems()
-  set n to count of boardItems
-  repeat with i from 0 to (n - 1)
-    set one to (boardItems's objectAtIndex:i)
-    try
-      set raw to (one's stringForType:"public.file-url")
-      if raw is not missing value then set collected to collected & (raw as text) & linefeed
-    end try
-  end repeat
+  if boardItems is not missing value then
+    set n to count of boardItems
+    repeat with i from 0 to (n - 1)
+      try
+        set one to (boardItems's objectAtIndex:i)
+        set raw to (one's stringForType:"public.file-url")
+        if raw is not missing value then set collected to collected & (raw as text) & linefeed
+      end try
+    end repeat
+  end if
 end try
 try
   set names to pb's propertyListForType:"NSFilenamesPboardType"
-  repeat with oneName in names
-    set collected to collected & (oneName as text) & linefeed
-  end repeat
+  if names is not missing value then
+    repeat with oneName in names
+      set collected to collected & (oneName as text) & linefeed
+    end repeat
+  end if
 end try
 return collected"#;
     let Ok(mut child) = std::process::Command::new("osascript")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
     else {
         return Vec::new();
@@ -1785,6 +2063,10 @@ return collected"#;
         return Vec::new();
     };
     if !output.status.success() {
+        log::debug!(
+            "finder drag pasteboard: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         return Vec::new();
     }
     String::from_utf8_lossy(&output.stdout)
@@ -2006,8 +2288,32 @@ mod tests {
         assert!(lib.remove_item("assets/images/spare.png").is_ok());
         assert!(external.join("images/spare.png").exists());
         assert!(lib.items.iter().all(|item| item.name != "spare.png"));
+        let back = lib
+            .link_paths(&[external.join("images/spare.png")])
+            .unwrap();
+        assert!(back.contains("spare.png"));
+        assert!(
+            lib.items
+                .iter()
+                .any(|item| item.id == "assets/images/spare.png")
+        );
+        assert!(lib.remove_item("assets/images/spare.png").is_ok());
+        let again_upload =
+            copy_into_library(&root, &external.join("images/spare.png"), "spare.png").unwrap();
+        assert!(again_upload.duplicate);
+        lib.request_rescan();
+        assert!(
+            lib.items
+                .iter()
+                .any(|item| item.id == "assets/images/spare.png")
+        );
         let again = MediaLibrary::open(root.clone());
-        assert!(again.items.iter().all(|item| item.name != "spare.png"));
+        assert!(
+            again
+                .items
+                .iter()
+                .any(|item| item.id == "assets/images/spare.png")
+        );
 
         // Uploads/imports go into the cloud location, but their IDs remain
         // portable and the show pack keeps only metadata and thumbnails.
@@ -2090,6 +2396,41 @@ mod tests {
         assert_eq!(notes.status, "unsupported");
         lib.rescan();
         assert_eq!(lib.items.len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn renaming_a_library_file_keeps_the_scene_path() {
+        let root = temp_pack("rename");
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([10, 20, 30, 255]))
+            .save(root.join("assets/images/plate.png"))
+            .unwrap();
+        fs::write(
+            root.join("presets/under-ice.json"),
+            r#"{"layers":[{"effect_name":"","media_path":"assets/images/plate.png"}]}"#,
+        )
+        .unwrap();
+        let mut lib = MediaLibrary::open(root.clone());
+        let renamed = lib
+            .rename_item("assets/images/plate.png", "ice plate")
+            .unwrap();
+        assert_eq!(renamed.new_name, "ice plate.png");
+        assert!(root.join("assets/images/ice plate.png").is_file());
+        assert!(!root.join("assets/images/plate.png").exists());
+        let text = fs::read_to_string(root.join("presets/under-ice.json")).unwrap();
+        assert!(text.contains("assets/images/ice plate.png"));
+        assert!(!text.contains("assets/images/plate.png"));
+        assert!(lib.items.iter().any(
+            |item| item.name == "ice plate.png" && item.scenes == vec!["under-ice".to_string()]
+        ));
+        let renamed_id = lib
+            .items
+            .iter()
+            .find(|item| item.name == "ice plate.png")
+            .unwrap()
+            .id
+            .clone();
+        assert!(lib.rename_item(&renamed_id, "clip.mp4").is_err());
         let _ = fs::remove_dir_all(&root);
     }
 

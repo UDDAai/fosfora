@@ -233,6 +233,9 @@ impl WebSystem {
                 WsInMessage::RemoveLibraryItem { id } => {
                     result.remove_library.push(id);
                 }
+                WsInMessage::RenameLibraryItem { id, name } => {
+                    result.rename_library.push((id, name));
+                }
                 WsInMessage::AddLibraryMedia { ids } => {
                     result.add_library.push(ids);
                 }
@@ -400,6 +403,9 @@ impl WebSystem {
                 }
                 WsInMessage::RemoveLibraryItem { id } => {
                     result.remove_library.push(id);
+                }
+                WsInMessage::RenameLibraryItem { id, name } => {
+                    result.rename_library.push((id, name));
                 }
                 WsInMessage::AddLibraryMedia { ids } => {
                     result.add_library.push(ids);

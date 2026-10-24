@@ -55,6 +55,8 @@ pub enum WsInMessage {
     LinkLibraryFiles { paths: Vec<String> },
     /// Remove one library entry. A linked original stays on disk.
     RemoveLibraryItem { id: String },
+    /// Rename one library file. The extension stays, and scenes that use it follow.
+    RenameLibraryItem { id: String, name: String },
     /// Add library items as new layers, in this order. Nothing is added if the
     /// batch does not fit.
     AddLibraryMedia { ids: Vec<String> },
@@ -160,6 +162,7 @@ pub struct WebFrameResult {
     pub link_folder: bool,
     pub link_library_files: Vec<Vec<String>>,
     pub remove_library: Vec<String>,
+    pub rename_library: Vec<(String, String)>,
     pub add_library: Vec<Vec<String>>,
     pub replace_library: Vec<(usize, String)>,
     pub media_transport: Vec<(usize, Option<f32>, Option<bool>)>,
@@ -200,6 +203,7 @@ impl WebFrameResult {
             link_folder: false,
             link_library_files: Vec::new(),
             remove_library: Vec::new(),
+            rename_library: Vec::new(),
             add_library: Vec::new(),
             replace_library: Vec::new(),
             media_transport: Vec::new(),
