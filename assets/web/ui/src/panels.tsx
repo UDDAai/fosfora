@@ -183,11 +183,34 @@ function neighborShift(index: number, drag: LayerDrag | null) {
   return 0
 }
 
+/**
+ * Why a typed name cannot become a new scene, or null when it can. Mirrors
+ * new_scene_name in show/scene_file.rs (trimmed; 1-64 letters, numbers, spaces,
+ * hyphens or underscores) and the engine's case-insensitive name check.
+ */
+function newSceneProblem(raw: string, taken: string[]): string | null {
+  const name = raw.trim()
+  if (!name) return null
+  if (name.length > 64 || !/^[A-Za-z0-9 _-]+$/.test(name)) return 'Use letters, numbers, spaces, or hyphens'
+  const lower = name.toLowerCase()
+  return taken.some((existing) => existing.toLowerCase() === lower) ? 'A scene with this name exists' : null
+}
+
 export function LayersPanel() {
   const { state, send } = useFosfora()
   const { stars, toggle } = useStars()
   const layers = state?.layers ?? []
   const [presetName, setPresetName] = useState('')
+  const nameProblem = newSceneProblem(
+    presetName,
+    (state?.presets ?? []).map((preset) => preset.name),
+  )
+  const canSave = !!presetName.trim() && !nameProblem
+  function saveNewScene() {
+    if (!canSave) return
+    send({ type: 'save_scene_as', name: presetName.trim() })
+    setPresetName('')
+  }
   const cards = useRef<Array<HTMLDivElement | null>>([])
   const dragRef = useRef<LayerDrag | null>(null)
   const [drag, setDrag] = useState<LayerDrag | null>(null)
@@ -291,27 +314,24 @@ export function LayersPanel() {
         <Input
           value={presetName}
           placeholder="Name this composition"
-          aria-label="Preset name"
+          aria-label="Scene name"
+          aria-invalid={!!nameProblem}
           onChange={(event) => setPresetName(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && presetName.trim()) {
-              send({ type: 'save_preset', name: presetName.trim() })
-              setPresetName('')
-            }
+            if (event.key === 'Enter') saveNewScene()
           }}
         />
-        <Button
-          disabled={!presetName.trim()}
-          onClick={() => {
-            send({ type: 'save_preset', name: presetName.trim() })
-            setPresetName('')
-          }}
-        >
-          Save as preset
+        <Button disabled={!canSave} onClick={saveNewScene}>
+          Save as new scene
         </Button>
       </div>
+      {nameProblem ? (
+        <p role="alert" className="text-xs text-destructive">
+          {nameProblem}
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
-        Save scene in the header writes the open scene under its current name. This stores a new named copy of these layers.
+        Save scene in the header writes the open scene under its current name. Save as new scene stores a copy of these layers under a name no other scene has.
       </p>
       <div
         className={`rounded-xl border border-dashed px-3 py-2 text-center text-xs ${dropAt === 'new' ? 'border-primary bg-primary/15 text-foreground' : 'border-border text-muted-foreground'}`}
@@ -508,9 +528,10 @@ export function EffectsPanel() {
   const { stars, toggle } = useStars()
   const layer = state ? activeLayer(state.layers, state.active_layer) : undefined
   const [query, setQuery] = useState('')
-  const effects = (state?.effects ?? []).filter((effect) =>
-    effect.name.toLowerCase().includes(query.trim().toLowerCase()),
-  )
+  // Alphabetical by the shown name; the engine's order follows file names. Stars only mark.
+  const effects = (state?.effects ?? [])
+    .filter((effect) => effect.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
 
   return (
     <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
