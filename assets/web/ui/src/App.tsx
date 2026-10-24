@@ -24,6 +24,9 @@ type Section = (typeof NAV)[number]['id']
 const BARS = ['sub_bass', 'bass', 'low_mid', 'mid', 'upper_mid', 'presence', 'brilliance'] as const
 const NAV_MIN = 144
 const NAV_MAX = 320
+// Below this window width the menu folds to icons by itself so a half-screen
+// browser keeps room for the header and the panels.
+const NARROW_QUERY = '(max-width: 799px)'
 
 function pageFromPath(path: string): Section | null {
   const name = path.split('?')[0].replace(/\/+$/, '').replace(/^\//, '')
@@ -38,10 +41,15 @@ function readNavWidth() {
   return Math.min(NAV_MAX, Math.max(NAV_MIN, saved))
 }
 
+function readNavPref() {
+  return localStorage.getItem('fosfora-nav') === 'icons'
+}
+
 function Shell() {
   const { connected, linkError, state, audio, send } = useFosfora()
   const [section, setSection] = useState<Section>(() => pageFromPath(window.location.pathname) ?? 'layers')
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('fosfora-nav') === 'icons')
+  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW_QUERY).matches)
+  const [collapsed, setCollapsed] = useState(() => window.matchMedia(NARROW_QUERY).matches || readNavPref())
   const [navWidth, setNavWidth] = useState(readNavWidth)
   const mode = state?.workspace_mode === 'perform' ? 'perform' : 'prepare'
 
@@ -58,6 +66,18 @@ function Shell() {
     }
     shownErrors.current = now
   }, [errorMessages])
+
+  // Crossing the width line folds the menu, or restores the saved choice.
+  // A toggle made while narrow lasts until the window widens again.
+  useEffect(() => {
+    const query = window.matchMedia(NARROW_QUERY)
+    const onChange = (event: MediaQueryListEvent) => {
+      setNarrow(event.matches)
+      setCollapsed(event.matches || readNavPref())
+    }
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
 
   useEffect(() => {
     const path = window.location.pathname.replace(/\/+$/, '') || '/'
@@ -128,7 +148,7 @@ function Shell() {
             aria-label={collapsed ? 'Expand menu' : 'Compact menu'}
             onClick={() => {
               const next = !collapsed
-              localStorage.setItem('fosfora-nav', next ? 'icons' : 'open')
+              if (!narrow) localStorage.setItem('fosfora-nav', next ? 'icons' : 'open')
               setCollapsed(next)
             }}
           >
@@ -161,10 +181,10 @@ function Shell() {
           {collapsed ? null : <span className="ml-2">{connected ? 'Connected' : 'Reconnecting'}</span>}
         </div>
       </aside>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b px-4 py-3">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div className="font-mono text-lg tabular-nums tracking-tight">
+      <div className="@container flex min-w-0 flex-1 flex-col">
+        <header className="flex items-center gap-1.5 border-b px-3 py-3 @2xl:gap-2 @2xl:px-4">
+          <div className="flex min-w-48 flex-1 items-center gap-3">
+            <div className="shrink-0 font-mono text-lg tabular-nums tracking-tight">
               {state?.show?.loaded ? clock(state.show.elapsed_ms) : '--:--:--'}
             </div>
             <div className="min-w-0">
@@ -172,14 +192,14 @@ function Shell() {
               <div className="text-[10px] leading-none tracking-wide text-muted-foreground">Scene</div>
             </div>
             {loading || waiting ? (
-              <div className="truncate text-xs text-muted-foreground">
+              <div className="hidden truncate text-xs text-muted-foreground @3xl:block">
                 {loading ? `Loading ${loading}` : `Waiting for ${waiting}`}
               </div>
             ) : null}
           </div>
-          <div className="hidden items-end gap-1 sm:flex" aria-hidden>
+          <div className="hidden items-end gap-1 self-center @4xl:flex" aria-hidden>
             {BARS.map((band) => (
-              <div key={band} className="flex h-8 w-1.5 items-end rounded-full bg-muted">
+              <div key={band} className="flex h-5 w-1.5 items-end rounded-full bg-muted">
                 <div
                   className="w-full rounded-full bg-primary"
                   style={{ height: `${Math.round((audio?.[band] ?? 0) * 100)}%` }}
@@ -206,11 +226,15 @@ function Shell() {
           >
             Perform
           </Button>
-          <Badge variant={save === 'failed' ? 'destructive' : 'secondary'}>
-            {save === 'failed' && state?.save_detail ? state.save_detail : save}
+          <Badge
+            variant={save === 'failed' ? 'destructive' : 'secondary'}
+            className="max-w-28 @4xl:max-w-64"
+            title={save === 'failed' && state?.save_detail ? state.save_detail : undefined}
+          >
+            <span className="truncate">{save === 'failed' && state?.save_detail ? state.save_detail : save}</span>
           </Badge>
-          <Button size="sm" disabled={!!state?.save_blocked} onClick={() => send({ type: 'save_scene' })}>
-            Save scene
+          <Button size="sm" aria-label="Save scene" disabled={!!state?.save_blocked} onClick={() => send({ type: 'save_scene' })}>
+            Save<span className="hidden @xl:inline"> scene</span>
           </Button>
         </header>
         {state?.pending_switch ? (
@@ -230,7 +254,7 @@ function Shell() {
         {state?.show?.notice && !state.load_error ? (
           <div className="border-b px-4 py-2 text-sm text-muted-foreground">{state.show.notice}</div>
         ) : null}
-        <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 @2xl:p-4">
           {section === 'layers' ? <LayersPanel /> : (
             <div className="min-h-0 flex-1 overflow-auto">
               {section === 'effects' ? <EffectsPanel /> : null}
@@ -240,18 +264,27 @@ function Shell() {
             </div>
           )}
         </main>
-        <footer className="truncate border-t px-4 py-2 font-mono text-[11px] text-muted-foreground">
-          {connected ? 'connected' : 'reconnecting'}
-          {' · '}
-          {state?.engine_commit || 'no commit'}
-          {' · pid '}
-          {state?.engine_pid ?? '—'}
-          {' · '}
-          {state?.engine_exe || 'no executable'}
-          {' · '}
-          {state?.show_path || 'no show'}
-          {' · applied '}
-          {state?.applied_preset || 'none'}
+        <footer className="flex gap-1 border-t px-3 py-2 font-mono text-[11px] text-muted-foreground @2xl:px-4">
+          {/* Narrow windows drop the long paths first and ellipsize the rest. */}
+          <span className="shrink-0">
+            {connected ? 'connected' : 'reconnecting'}
+            {' · '}
+            {state?.engine_commit || 'no commit'}
+            {' · pid '}
+            {state?.engine_pid ?? '—'}
+          </span>
+          <span className="hidden min-w-0 truncate @3xl:inline" title={state?.engine_exe || undefined}>
+            {' · '}
+            {state?.engine_exe || 'no executable'}
+          </span>
+          <span className="hidden min-w-0 truncate @2xl:inline" title={state?.show_path || undefined}>
+            {' · '}
+            {state?.show_path || 'no show'}
+          </span>
+          <span className="min-w-0 truncate">
+            {' · applied '}
+            {state?.applied_preset || 'none'}
+          </span>
         </footer>
       </div>
     </div>

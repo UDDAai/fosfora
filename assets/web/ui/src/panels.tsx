@@ -382,7 +382,7 @@ export function LayersPanel() {
                 {layer.effect_name && !layer.locked ? (
                   <button
                     type="button"
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className="shrink-0 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground"
                     onClick={(event) => {
                       event.stopPropagation()
                       send({ type: 'clear_layer_effect', index })
@@ -508,13 +508,9 @@ export function EffectsPanel() {
   const { stars, toggle } = useStars()
   const layer = state ? activeLayer(state.layers, state.active_layer) : undefined
   const [query, setQuery] = useState('')
-  const effects = (state?.effects ?? [])
-    .filter((effect) => effect.name.toLowerCase().includes(query.trim().toLowerCase()))
-    .sort((left, right) => {
-      const leftStar = stars.includes(`effect:${left.name}`) ? 0 : 1
-      const rightStar = stars.includes(`effect:${right.name}`) ? 0 : 1
-      return leftStar - rightStar
-    })
+  const effects = (state?.effects ?? []).filter((effect) =>
+    effect.name.toLowerCase().includes(query.trim().toLowerCase()),
+  )
 
   return (
     <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
@@ -524,7 +520,7 @@ export function EffectsPanel() {
             Effects
             <SectionInfo
               label="About effects"
-              text="Loads onto the layer you selected on Layers. The highlighted name is the effect already on that layer. Choosing one replaces the look on that layer and leaves the other layers as they are. Star an effect to keep it at the top of this list."
+              text="Loads onto the layer you selected on Layers. The highlighted name is the effect already on that layer. Choosing one replaces the look on that layer and leaves the other layers as they are. The star marks an effect you use often; it stays where it is in the list."
             />
           </CardTitle>
           <CardDescription>Loads onto {layer?.name ?? 'the selected layer'}.</CardDescription>
@@ -1184,9 +1180,9 @@ export function ShowPanel() {
           <CardDescription>{show?.validation || 'Open a show pack in Fosfora.'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex justify-between text-sm">
-            <span>{show?.scene || 'Scene'}</span>
-            <span className="text-muted-foreground">
+          <div className="flex justify-between gap-3 text-sm">
+            <span className="min-w-0 truncate">{show?.scene || 'Scene'}</span>
+            <span className="min-w-0 truncate text-muted-foreground">
               {show?.next_scene
                 ? `next ${show.next_scene}${show.next_scene_secs != null ? ` at ${clock(show.next_scene_secs * 1000)}` : ''}`
                 : ''}
