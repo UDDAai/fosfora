@@ -253,8 +253,14 @@ pub fn build_full_state(
                 locked: info.locked,
                 pinned: info.pinned,
                 media_name: info.media_file_name.clone(),
-                media_fit: info.media_file_name.as_ref().map(|_| info.media_fit.clone()),
-                media_width: info.media_file_name.as_ref().map(|_| info.media_width_scale),
+                media_fit: info
+                    .media_file_name
+                    .as_ref()
+                    .map(|_| info.media_fit.clone()),
+                media_width: info
+                    .media_file_name
+                    .as_ref()
+                    .map(|_| info.media_width_scale),
                 media_pos_x: info.media_file_name.as_ref().map(|_| info.media_pos_x),
                 media_pos_y: info.media_file_name.as_ref().map(|_| info.media_pos_y),
                 preview: info.media_preview.clone(),
