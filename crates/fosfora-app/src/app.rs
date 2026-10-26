@@ -2645,6 +2645,11 @@ impl App {
 
     /// GPU half of adding a clip: runs on the render thread with frames
     /// that are already decoded.
+    ///
+    /// A new layer starts disabled at 40% opacity, so a clip dropped on the
+    /// Layers page can be placed before it reaches the output. Replacing an
+    /// existing layer goes through [`Self::swap_media_layer`] and keeps that
+    /// layer's opacity and enable switch.
     fn install_media_layer(
         &mut self,
         path: std::path::PathBuf,
@@ -2663,6 +2668,8 @@ impl App {
         let file_name = media_layer.file_name.clone();
         let mut layer = Layer::new_media(file_name.clone(), media_layer);
         layer.custom_name = Some(file_name.clone());
+        layer.enabled = false;
+        layer.opacity = 0.4;
         if self.show.is_some() {
             if let Some(media) = layer.as_media_mut() {
                 media.fit = crate::media::MediaFit::Fill;

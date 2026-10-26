@@ -274,7 +274,7 @@ export function LayersPanel() {
           <span className="text-sm font-medium">Layers</span>
           <SectionInfo
             label="About layers"
-            text="Click a layer to choose what Effects and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. This works from a second window on this same page. Solo shows only the selected layer and is not saved. The star remembers a layer or its effect on this computer."
+            text="Click a layer to choose what Effects and Picture edit. That click does not change the picture. Opacity, blend, and the enable switch do. Drag the grip to reorder; the top of the list is in front. Drop a library item on a layer to replace it, or on the dashed row to add a layer behind the others. A new layer starts off, at 40% opacity. This works from a second window on this same page. Solo shows only the selected layer and is not saved. The star remembers a layer or its effect on this computer."
           />
         </div>
         <Button
@@ -320,7 +320,7 @@ export function LayersPanel() {
         onDragLeave={leaveMedia}
         onDrop={(event) => dropMedia(event, 'new')}
       >
-        Drop a library item here to add a layer
+        Drop a library item here to add a layer. It starts off, at 40%.
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
       {layers.map((layer, index) => {
@@ -938,7 +938,7 @@ export function LibraryPanel() {
           Library
           <SectionInfo
             label="About the library"
-            text="Drag a file or folder from Finder onto this page. When Finder shares the location, the file stays where it is and nothing is copied. When it does not, the drop is copied into the library, the same as Upload. Filter the table to images or videos. Names stay in alphabetical order. Right-click a row to rename the file; scenes that use it follow the new name. Drop a library item on the Layers page to replace a layer, or on the dashed row to add one. The trash icon hides it from this list and leaves the original file where it is. A file a scene still uses stays in the list."
+            text="Drag a file or folder from Finder onto this page. When Finder shares the location, the file stays where it is and nothing is copied. When it does not, the drop is copied into the library, the same as Upload. Filter the table to images or videos. Names stay in alphabetical order. Right-click a row to rename the file; scenes that use it follow the new name. Drop a library item on the Layers page to replace a layer, or on the dashed row to add one. A new layer starts off, at 40% opacity. The trash icon hides it from this list and leaves the original file where it is. A file a scene still uses stays in the list."
           />
         </CardTitle>
         <CardDescription>
