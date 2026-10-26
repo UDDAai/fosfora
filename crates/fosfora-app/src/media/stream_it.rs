@@ -96,6 +96,19 @@ fn run(
     (uploads, slowest)
 }
 
+/// Sleep until `at`, then spin the last millisecond: a render loop locked to the display
+/// does not wander by the millisecond a plain sleep does, and the clock would
+/// show that wander as skipped and repeated frames.
+pub(super) fn pace_until(at: Instant) {
+    std::thread::sleep(
+        at.saturating_duration_since(Instant::now())
+            .saturating_sub(Duration::from_millis(1)),
+    );
+    while Instant::now() < at {
+        std::hint::spin_loop();
+    }
+}
+
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !cond() {
@@ -392,4 +405,167 @@ fn a_truncated_clip_stops_with_an_error() {
     );
     drop(source);
     wait_until("the clip to be torn down", || live_streams() == 0);
+}
+
+/// Resident set size of a process in MB, from `ps`.
+fn rss_mb(pid: u32) -> f64 {
+    let out = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
+        / 1024.0
+}
+
+/// Real clips as real media layers, on a headless GPU device (no window, no show
+/// port). The clips go through the path an added clip takes:
+/// `MediaJobs::submit` -> `run_job` (`plan_clip`, `admission_error`,
+/// `MediaBudget::reserve`, `load_media` -> `load_video` -> `open_streamed`) ->
+/// `MediaSource::Streamed` -> `MediaLayer::new`, then each frame `advance`,
+/// `upload_frame` and the blit pass `execute`, all layers in one 60 Hz loop like the
+/// app's. Prints one `LAYERCHECK` line per layer and one for the process.
+///
+/// ```text
+/// FOSFORA_VIDEO_STREAM=auto FOSFORA_STREAM_CLIPS='/a.mp4|/b.mp4' nice -n 19 \
+///   cargo test -p fosfora-app --features video media_layers_play_real_clips \
+///   -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "needs ffmpeg, a GPU and clips: set FOSFORA_STREAM_CLIPS (paths split by |)"]
+fn media_layers_play_real_clips() {
+    use super::MediaLayer;
+    use super::jobs::{MediaBudget, MediaJobOutcome, MediaJobs, MediaTarget};
+    use crate::gpu::context::GpuContext;
+    use crate::gpu::test_gpu::{gpu_guard, test_gpu};
+    use std::sync::Arc;
+
+    assert_eq!(
+        StreamPolicy::from_env(),
+        StreamPolicy::Auto,
+        "run with FOSFORA_VIDEO_STREAM=auto"
+    );
+    let _gpu_lock = gpu_guard();
+    let _lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let clips: Vec<PathBuf> = std::env::var("FOSFORA_STREAM_CLIPS")
+        .expect("set FOSFORA_STREAM_CLIPS")
+        .split('|')
+        .map(PathBuf::from)
+        .collect();
+    let secs: f64 = std::env::var("FOSFORA_STREAM_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20.0);
+    let (device, queue) = test_gpu();
+    let pid = std::process::id();
+
+    // Add the clips as one job, as the controller's "add to layers" does.
+    let budget = Arc::new(MediaBudget::for_this_machine());
+    let mut jobs = MediaJobs::new(budget.clone());
+    let opened = Instant::now();
+    jobs.submit(1, MediaTarget::Add, clips.clone(), 8)
+        .expect("submit");
+    let result = loop {
+        if let Some(result) = jobs.try_recv() {
+            break result;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let load_ms = opened.elapsed().as_secs_f64() * 1000.0;
+    let sources = match result.outcome {
+        MediaJobOutcome::Ready(sources) => sources,
+        MediaJobOutcome::Refused(message) => panic!("job refused: {message}"),
+    };
+    println!(
+        "LAYERCHECK job: {} clips ready in {load_ms:.0} ms, reserved {:.0} MB of a {:.1} GB budget",
+        sources.len(),
+        result.reserved as f64 / 1048576.0,
+        budget.limit() as f64 / 1073741824.0,
+    );
+
+    let mut layers: Vec<MediaLayer> = sources
+        .into_iter()
+        .map(|(path, source)| {
+            assert!(
+                matches!(source, MediaSource::Streamed { .. }),
+                "{} did not stream",
+                path.display()
+            );
+            MediaLayer::new(
+                &device,
+                &queue,
+                GpuContext::hdr_format(),
+                1920,
+                1080,
+                source,
+                path,
+            )
+        })
+        .collect();
+    // The app's refresh_media_budget: resident now counts the layers, the job's
+    // reservation is released.
+    let resident: u64 = layers.iter().map(|l| l.source.resident_bytes()).sum();
+    assert_eq!(resident, result.reserved, "reserved what the layers hold");
+    budget.set_resident(resident);
+    budget.release(result.reserved);
+
+    let mut uploads = vec![0u64; layers.len()];
+    let mut peak = rss_mb(pid);
+    let begin = Instant::now();
+    let (mut next, mut last) = (begin, begin);
+    let (mut ticks, mut late, mut worst) = (0u64, 0u64, 0.0f32);
+    while begin.elapsed().as_secs_f64() < secs {
+        next += FRAME;
+        pace_until(next);
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f32().min(0.05);
+        last = now;
+        // A frame later than 1.5 periods makes the clock skip a source frame.
+        late += u64::from(dt > 1.5 / 60.0);
+        worst = worst.max(dt);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for (layer, count) in layers.iter_mut().zip(&mut uploads) {
+            layer.advance(dt);
+            *count += u64::from(layer.needs_upload);
+            layer.upload_frame(&queue);
+            layer.execute(&mut encoder);
+        }
+        queue.submit([encoder.finish()]);
+        ticks += 1;
+        if ticks % 60 == 0 {
+            peak = peak.max(rss_mb(pid));
+        }
+    }
+    let wall = begin.elapsed().as_secs_f64();
+    for (layer, uploaded) in layers.iter_mut().zip(&uploads) {
+        let frames = layer.frame_count() as f64;
+        let fps = frames / layer.duration_secs();
+        let expected = wall * fps.min(60.0);
+        let stats = playback(&mut layer.source).stats();
+        let error = playback(&mut layer.source).last_error().map(str::to_owned);
+        println!(
+            "LAYERCHECK layer={} size={}x{} fps={fps:.2} uploaded={uploaded} expected={expected:.0} \
+             pct={:.1} dropped={} seeks={} restarts={} first_frame_ms={:.0} error={error:?}",
+            layer.file_name,
+            layer.media_width,
+            layer.media_height,
+            *uploaded as f64 / expected * 100.0,
+            stats.dropped_frames,
+            stats.seeks,
+            stats.restarts,
+            stats.first_frame_ms,
+        );
+    }
+    println!(
+        "LAYERCHECK process layers={} wall={wall:.1}s ticks={ticks} late_ticks={late} \
+         worst_dt_ms={:.0} rss_peak_mb={peak:.0} resident_counted_mb={:.0} live_streams={}",
+        layers.len(),
+        worst * 1000.0,
+        resident as f64 / 1048576.0,
+        live_streams(),
+    );
+    drop(layers);
+    wait_until("the layers to be torn down", || live_streams() == 0);
 }

@@ -85,6 +85,9 @@ pub struct StreamStats {
     pub restarts: u64,
     /// Decoded frames that were never shown (late, superseded, or skipped at speed).
     pub dropped_frames: u64,
+    pub dbg_superseded: u64,
+    pub dbg_late: u64,
+    pub dbg_max_backlog: u64,
 }
 
 /// One streamed clip, ticked from the render thread.
@@ -270,7 +273,10 @@ impl StreamPlayback {
             seeked = true;
         }
 
+        let q0 = self.decoder.queued();
+        let d0 = self.stats.dropped_frames;
         let shown = self.drain();
+        if self.epoch_secs < 0.6 { eprintln!("DBG tick dt={:.2}ms epoch={:.4} pos={:.4} q_before={} q_after={} shown={} idx={} dropped_now={}", dt_secs*1000.0, self.epoch_secs, self.clock.position_secs(), q0, self.decoder.queued(), shown, self.last_shown_secs * self.fps, self.stats.dropped_frames - d0); }
 
         // A seek that yields neither a frame nor an error would freeze playback silently.
         if self.awaiting_first
@@ -392,6 +398,7 @@ impl StreamPlayback {
                 FrameVerdict::Show => {
                     // An earlier Show of this tick was superseded before it was uploaded.
                     self.stats.dropped_frames += u64::from(shown);
+                    self.stats.dbg_superseded += u64::from(shown);
                     shown = true;
                     self.show(frame, secs);
                 }
@@ -399,7 +406,7 @@ impl StreamPlayback {
                     self.pending = Some(frame);
                     break;
                 }
-                FrameVerdict::Drop => self.stats.dropped_frames += u64::from(current),
+                FrameVerdict::Drop => { self.stats.dropped_frames += u64::from(current); self.stats.dbg_late += u64::from(current); if current && self.stats.dbg_late <= 12 { eprintln!("DBG late idx={} secs={:.4} pos={:.4} epoch_secs={:.3} queued={}", frame.index, secs, self.clock.position_secs(), self.epoch_secs, self.decoder.queued()); } }
             }
         }
         shown

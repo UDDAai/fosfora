@@ -766,14 +766,18 @@ mod tests {
         let begin = Instant::now();
         let (mut next, mut last) = (begin, begin);
         let (mut shown, mut ticks, mut wraps) = (0u64, 0u64, 0u64);
+        // Ticks later than 1.5 periods: each makes the clock skip a source frame.
+        let (mut late, mut worst) = (0u64, 0.0f32);
         let mut last_pos = 0.0;
         let mut staging = vec![0u8; width as usize * height as usize * 4];
         while begin.elapsed().as_secs_f64() < secs {
             next += frame_time;
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            crate::media::stream_it::pace_until(next);
             let now = Instant::now();
             let dt = now.duration_since(last).as_secs_f32().min(0.05);
             last = now;
+            late += u64::from(dt > 1.5 / 60.0);
+            worst = worst.max(dt);
             if playback.tick(dt, &transport) {
                 shown += 1;
                 staging.copy_from_slice(playback.current_frame()); // the upload's CPU cost
@@ -793,8 +797,8 @@ mod tests {
         println!(
             "STREAMCHECK clip={} size={width}x{height} fps={fps:.2} dur={:.1}s load_ms={load_ms:.0} \
              first_frame_ms={:.0} shown={shown} expected={expected:.0} pct={:.1} dropped={} \
-             seeks={} restarts={} wraps={wraps} ticks={ticks} rss_self_peak_mb={peak_self:.0} \
-             rss_ffmpeg_peak_mb={peak_children:.0} reserve_mb={:.0} error={:?}",
+             seeks={} restarts={} wraps={wraps} ticks={ticks} late_ticks={late} worst_dt_ms={:.0} rss_self_peak_mb={peak_self:.0} \
+             rss_ffmpeg_peak_mb={peak_children:.0} reserve_mb={:.0} error={:?} sup={} late={}",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
             playback.duration_secs(),
             stats.first_frame_ms,
@@ -802,8 +806,11 @@ mod tests {
             stats.dropped_frames,
             stats.seeks,
             stats.restarts,
+            worst * 1000.0,
             reserve as f64 / (1024.0 * 1024.0),
             playback.last_error(),
+            stats.dbg_superseded,
+            stats.dbg_late,
         );
         assert_eq!(staging.len(), width as usize * height as usize * 4);
     }
