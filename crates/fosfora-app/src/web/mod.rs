@@ -194,6 +194,9 @@ impl WebSystem {
                 WsInMessage::RenamePalette { from, to } => {
                     result.rename_palette = Some((from, to));
                 }
+                WsInMessage::RenameEffect { name, alias } => {
+                    result.rename_effects.push((name, alias));
+                }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);
                 }
@@ -364,6 +367,9 @@ impl WebSystem {
                 }
                 WsInMessage::RenamePalette { from, to } => {
                     result.rename_palette = Some((from, to));
+                }
+                WsInMessage::RenameEffect { name, alias } => {
+                    result.rename_effects.push((name, alias));
                 }
                 WsInMessage::SelectLayer { index } => {
                     result.select_layer = Some(index);

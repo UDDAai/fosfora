@@ -93,7 +93,10 @@ pub fn engine_commit() -> &'static str {
 #[derive(Serialize)]
 pub struct EffectInfo {
     pub index: usize,
+    /// The real name; scenes and the engine use it.
     pub name: String,
+    /// The user's alias, or `name` when there is none. Shown in the controller.
+    pub display_name: String,
 }
 
 #[derive(Serialize)]
@@ -101,6 +104,8 @@ pub struct LayerState {
     pub index: usize,
     pub name: String,
     pub effect_name: Option<String>,
+    /// `effect_name` with the user's alias applied.
+    pub effect_display_name: Option<String>,
     pub effect_index: Option<usize>,
     pub blend_mode: u32,
     pub blend_name: &'static str,
@@ -249,6 +254,7 @@ pub struct WebWorkspace<'a> {
     pub loading_preset: Option<String>,
     pub load_error: Option<String>,
     pub command_drops: u64,
+    pub effect_aliases: &'a crate::effect::aliases::EffectAliases,
 }
 
 pub fn build_full_state(
@@ -268,6 +274,7 @@ pub fn build_full_state(
         .map(|(i, e)| EffectInfo {
             index: i,
             name: e.name.clone(),
+            display_name: workspace.effect_aliases.display_name(&e.name).to_string(),
         })
         .collect();
 
@@ -292,6 +299,10 @@ pub fn build_full_state(
                     .clone()
                     .unwrap_or_else(|| info.name.clone()),
                 effect_name: info.effect_name.clone(),
+                effect_display_name: info
+                    .effect_name
+                    .as_deref()
+                    .map(|name| workspace.effect_aliases.display_name(name).to_string()),
                 effect_index: info.effect_index,
                 blend_mode: blend.as_u32(),
                 blend_name: blend.display_name(),
@@ -836,6 +847,7 @@ mod tests {
             loading_preset: None,
             load_error: None,
             command_drops: 0,
+            effect_aliases: &crate::effect::aliases::EffectAliases::default(),
         };
         let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -892,6 +904,7 @@ mod tests {
             loading_preset: None,
             load_error: None,
             command_drops: 0,
+            effect_aliases: &crate::effect::aliases::EffectAliases::default(),
         };
         let json = build_full_state(&[], &[], 0, &[], &store, true, Some(&snap), &workspace);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -905,5 +918,58 @@ mod tests {
         assert_eq!(v["show"]["next_palette"], "plum");
         assert_eq!(v["show"]["blackout"], false);
         assert_eq!(v["show"]["validation"], "READY");
+    }
+
+    #[test]
+    fn full_state_shows_an_effect_alias_and_keeps_the_real_name() {
+        let dir = std::env::temp_dir().join(format!("fosfora_state_alias_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut aliases =
+            crate::effect::aliases::EffectAliases::load(dir.join("effect-names.json"));
+        aliases
+            .set("Astrolabe", "Ice Clock", ["Astrolabe", "Aurora"])
+            .unwrap();
+        let effects: Vec<PfxEffect> = ["Astrolabe", "Aurora"]
+            .iter()
+            .map(|name| {
+                serde_json::from_str(&format!(r#"{{"name":"{name}","shader":"x.wgsl"}}"#)).unwrap()
+            })
+            .collect();
+        let workspace = WebWorkspace {
+            library: &[],
+            warnings: &[],
+            save_state: "saved",
+            save_detail: "",
+            mode: "prepare",
+            solo_layer: None,
+            pending_switch: None,
+            save_blocked: false,
+            engine_commit: "test".into(),
+            engine_pid: 1,
+            engine_exe: "fosfora".into(),
+            show_path: "show".into(),
+            applied_preset: None,
+            requested_preset: None,
+            loading_preset: None,
+            load_error: None,
+            command_drops: 0,
+            effect_aliases: &aliases,
+        };
+        let json = build_full_state(
+            &effects,
+            &[],
+            0,
+            &[],
+            &PresetStore::new(),
+            true,
+            None,
+            &workspace,
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["effects"][0]["name"], "Astrolabe");
+        assert_eq!(v["effects"][0]["display_name"], "Ice Clock");
+        assert_eq!(v["effects"][1]["name"], "Aurora");
+        assert_eq!(v["effects"][1]["display_name"], "Aurora");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -146,6 +146,11 @@ fn parse_client_message(text: &str) -> Option<WsInMessage> {
             let to = v.get("to")?.as_str()?.to_string();
             Some(WsInMessage::RenamePalette { from, to })
         }
+        "rename_effect" => {
+            let name = v.get("name")?.as_str()?.to_string();
+            let alias = v.get("alias")?.as_str()?.to_string();
+            Some(WsInMessage::RenameEffect { name, alias })
+        }
         "select_layer" => {
             let index = v.get("index")?.as_u64()? as usize;
             Some(WsInMessage::SelectLayer { index })
@@ -630,5 +635,24 @@ mod tests {
             )) => {}
             other => panic!("expected ShowCommand::ToggleBlackout, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_rename_effect() {
+        let json = r#"{"type":"rename_effect","name":"Astrolabe","alias":"Ice Clock"}"#;
+        match parse_client_message(json) {
+            Some(WsInMessage::RenameEffect { name, alias }) => {
+                assert_eq!(name, "Astrolabe");
+                assert_eq!(alias, "Ice Clock");
+            }
+            other => panic!("expected RenameEffect, got {:?}", other),
+        }
+        // An empty alias is a reset; a missing one is not a message.
+        let reset = r#"{"type":"rename_effect","name":"Astrolabe","alias":""}"#;
+        assert!(matches!(
+            parse_client_message(reset),
+            Some(WsInMessage::RenameEffect { alias, .. }) if alias.is_empty()
+        ));
+        assert!(parse_client_message(r#"{"type":"rename_effect","name":"Astrolabe"}"#).is_none());
     }
 }

@@ -23,6 +23,9 @@ pub enum WsInMessage {
     SavePreset { name: String },
     /// Rename a scene file. Built-in presets stay as they are.
     RenamePreset { from: String, to: String },
+    /// Give an effect a display name in the controller, or clear it with an empty
+    /// alias. Scenes keep the real effect name.
+    RenameEffect { name: String, alias: String },
     /// Delete a scene file. Built-in presets stay. A cue that names it leaves the show clock.
     DeletePreset { name: String },
     /// Rename a show-pack palette and the cues that name it.
@@ -150,6 +153,7 @@ pub struct WebFrameResult {
     pub rename_preset: Option<(String, String)>,
     pub delete_preset: Option<String>,
     pub rename_palette: Option<(String, String)>,
+    pub rename_effects: Vec<(String, String)>,
     pub select_layer: Option<usize>,
     pub solo: Option<SoloRequest>,
     pub layer_moves: Vec<(usize, usize)>,
@@ -191,6 +195,7 @@ impl WebFrameResult {
             rename_preset: None,
             delete_preset: None,
             rename_palette: None,
+            rename_effects: Vec::new(),
             select_layer: None,
             solo: None,
             layer_moves: Vec::new(),

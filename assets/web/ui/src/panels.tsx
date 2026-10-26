@@ -393,7 +393,7 @@ export function LayersPanel() {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium">{layer.name}</span>
-                    {layer.effect_name ? <Badge variant="secondary">{layer.effect_name}</Badge> : null}
+                    {layer.effect_name ? <Badge variant="secondary">{layer.effect_display_name || layer.effect_name}</Badge> : null}
                     {solo ? <Badge>Solo</Badge> : null}
                     {layer.pinned ? <Badge variant="outline">Pinned</Badge> : null}
                     {dropAt === index ? <span className="text-xs text-muted-foreground">Replace</span> : null}
@@ -413,7 +413,7 @@ export function LayersPanel() {
                 ) : null}
                 <StarMark
                   on={stars.includes(starKeyForLayer(layer))}
-                  label={layer.effect_name || layer.media_name || layer.name}
+                  label={layer.effect_display_name || layer.effect_name || layer.media_name || layer.name}
                   onToggle={() => toggle(starKeyForLayer(layer))}
                 />
                 <button
@@ -529,9 +529,11 @@ export function EffectsPanel() {
   const layer = state ? activeLayer(state.layers, state.active_layer) : undefined
   const [query, setQuery] = useState('')
   // Alphabetical by the shown name; the engine's order follows file names. Stars only mark.
+  // The search matches the alias and the real name.
+  const needle = query.trim().toLowerCase()
   const effects = (state?.effects ?? [])
-    .filter((effect) => effect.name.toLowerCase().includes(query.trim().toLowerCase()))
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
+    .filter((effect) => effect.display_name.toLowerCase().includes(needle) || effect.name.toLowerCase().includes(needle))
+    .sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { numeric: true, sensitivity: 'base' }))
 
   return (
     <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
@@ -550,22 +552,46 @@ export function EffectsPanel() {
           <Input value={query} placeholder="Search effects" onChange={(event) => setQuery(event.target.value)} />
           <ScrollArea className="h-[28rem]">
             <div className="flex flex-col gap-1 pr-3">
-              {effects.map((effect) => (
-                <div key={effect.index} className="flex items-center gap-1">
-                  <Button
-                    variant={layer?.effect_name === effect.name ? 'secondary' : 'ghost'}
-                    className="min-w-0 flex-1 justify-start"
-                    onClick={() => send({ type: 'load_effect', index: effect.index })}
-                  >
-                    <span className="truncate">{effect.name}</span>
-                  </Button>
-                  <StarMark
-                    on={stars.includes(`effect:${effect.name}`)}
-                    label={effect.name}
-                    onToggle={() => toggle(`effect:${effect.name}`)}
-                  />
-                </div>
-              ))}
+              {effects.map((effect) => {
+                const renamed = effect.display_name !== effect.name
+                return (
+                  <ContextMenu key={effect.index}>
+                    <ContextMenuTrigger asChild>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant={layer?.effect_name === effect.name ? 'secondary' : 'ghost'}
+                          className="min-w-0 flex-1 justify-start"
+                          title={renamed ? effect.name : undefined}
+                          onClick={() => send({ type: 'load_effect', index: effect.index })}
+                        >
+                          <span className="truncate">{effect.display_name}</span>
+                        </Button>
+                        <StarMark
+                          on={stars.includes(`effect:${effect.name}`)}
+                          label={effect.display_name}
+                          onToggle={() => toggle(`effect:${effect.name}`)}
+                        />
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem
+                        onSelect={() => {
+                          const next = window.prompt('Rename effect', effect.display_name)
+                          if (next === null || next.trim() === effect.display_name) return
+                          send({ type: 'rename_effect', name: effect.name, alias: next.trim() })
+                        }}
+                      >
+                        Rename…
+                      </ContextMenuItem>
+                      {renamed ? (
+                        <ContextMenuItem onSelect={() => send({ type: 'rename_effect', name: effect.name, alias: '' })}>
+                          Reset name
+                        </ContextMenuItem>
+                      ) : null}
+                    </ContextMenuContent>
+                  </ContextMenu>
+                )
+              })}
             </div>
           </ScrollArea>
         </CardContent>
@@ -573,7 +599,7 @@ export function EffectsPanel() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-1.5">
-            {layer?.effect_name || layer?.name || 'Parameters'}
+            {layer?.effect_display_name || layer?.effect_name || layer?.name || 'Parameters'}
             <SectionInfo
               label="About parameters"
               text="These controls belong to the selected layer. A badge means audio or the palette is driving the picture. The slider then writes the saved value, which comes back when that control stops."

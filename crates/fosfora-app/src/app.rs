@@ -153,6 +153,8 @@ pub struct App {
     pub quit_requested: bool,
     // Transient status error (displayed in status bar, auto-clears)
     pub status_error: Option<(String, Instant)>,
+    /// Controller-only display names for effects. Scenes keep the real names.
+    effect_aliases: crate::effect::aliases::EffectAliases,
     pub media_library: Option<crate::media::library::MediaLibrary>,
     pub workspace_mode: crate::show::scene_file::WorkspaceMode,
     pub save_state: crate::show::scene_file::SaveState,
@@ -698,6 +700,7 @@ impl App {
             binding_matrix: crate::ui::panels::binding_matrix::BindingMatrixState::new(),
             quit_requested: false,
             status_error: None,
+            effect_aliases: crate::effect::aliases::EffectAliases::load_default(),
             media_library: None,
             workspace_mode: crate::show::scene_file::WorkspaceMode::Prepare,
             save_state: crate::show::scene_file::SaveState::Saved,
@@ -1218,6 +1221,17 @@ impl App {
             if let Some((from, to)) = web_result.rename_palette.clone() {
                 if let Err(err) = self.rename_palette(&from, &to) {
                     self.status_error = Some((err, now));
+                }
+                view_changed = true;
+            }
+            for (name, alias) in &web_result.rename_effects {
+                let known = self.effect_loader.effects.iter().map(|e| e.name.as_str());
+                match self.effect_aliases.set(name, alias, known) {
+                    Ok(()) => self.load_error = None,
+                    Err(err) => {
+                        self.load_error = Some(err.clone());
+                        self.status_error = Some((err, now));
+                    }
                 }
                 view_changed = true;
             }
@@ -2980,6 +2994,7 @@ impl App {
             },
             load_error: self.load_error.clone(),
             command_drops: self.web.command_drops(),
+            effect_aliases: &self.effect_aliases,
         };
         crate::web::state::build_full_state(
             &self.effect_loader.effects,

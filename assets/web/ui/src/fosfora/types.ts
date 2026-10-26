@@ -12,6 +12,7 @@ export type LayerState = {
   index: number
   name: string
   effect_name?: string | null
+  effect_display_name?: string | null
   blend_mode: number
   blend_name: string
   opacity: number
@@ -29,7 +30,7 @@ export type LayerState = {
   params: ParamInfo[]
 }
 
-export type EffectInfo = { index: number; name: string }
+export type EffectInfo = { index: number; name: string; display_name: string }
 export type PresetInfo = { index: number; name: string; builtin: boolean }
 
 export type LibraryItem = {
